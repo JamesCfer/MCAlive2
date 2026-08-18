@@ -44,6 +44,8 @@ import { fileURLToPath } from "node:url";
 import { namespacedTool, MCP_SERVER_NAME, ACTOR_TOOLS, actorDisallowedTools, DIRECTOR_WAKE_EVENTS } from "../lib/config.mjs";
 import { parseActorReport } from "../lib/actor-report.mjs";
 import { ActorMemory } from "../lib/actor-memory.mjs";
+import { formatHumanLine, compactArgs } from "../lib/logger.mjs";
+import { journalScene } from "../lib/decisions-journal.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BRAIN_DIR = path.resolve(__dirname, "..");
@@ -147,6 +149,66 @@ async function main() {
   assert(mem3.sessions.size === 3, `actor memory caps at maxPairs (got ${mem3.sessions.size})`);
   assert(mem3.sessions.has("npc-4::Steve") && mem3.sessions.has("npc-3::Steve") && mem3.sessions.has("npc-2::Steve"), "cap evicts the least-recently-active pairs first, keeping the most recent ones");
 
+  console.log("\n1e. Logger human-readable formatting (pure, no process needed)");
+  const toolLine = formatHumanLine("info", "tool_call", {
+    role: "director",
+    tool: "set_block",
+    argsLine: compactArgs({ x: -3, y: 98, z: -60, material: "lightning_rod" }),
+  });
+  assert(toolLine.includes("⚒ set_block"), "tool-call line renders the tool name behind the ⚒ marker");
+  assert(toolLine.includes("x:-3"), "tool-call line renders compact args inline on the same line");
+  assert(/^\d{2}:\d{2}:\d{2}\s+INFO/.test(toolLine), "tool-call line is prefixed with an HH:MM:SS INFO header");
+
+  const summaryLine = formatHumanLine("info", "director_scene_summary", {
+    sceneNumber: 12,
+    summary: "Nothing happened; the village slept.",
+  });
+  assert(
+    summaryLine.includes("✓ scene #12 decided: Nothing happened; the village slept."),
+    "scene-summary line renders the scene number and the full decision text"
+  );
+
+  const sceneStartLine = formatHumanLine("info", "director_scene_starting", { sceneNumber: 12, batchSize: 2, events: ["player_join", "player_chat"] });
+  assert(sceneStartLine.includes("scene #12 starting (2 events)"), "scene-start line renders the scene number and event count");
+
+  const chatLine = formatHumanLine("info", "event_received", { event: "player_chat", data: { player: "AlexCfer", message: "Hello" } });
+  assert(chatLine.includes('event player_chat AlexCfer: "Hello"'), "player_chat event renders as a readable narrative line");
+
+  console.log("\n1f. Decisions journal writes a block for a dry-run scene, marked [dry-run]");
+  const journalStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "brain-journal-"));
+  journalScene({
+    config: { stateDir: journalStateDir },
+    sceneNumber: 1,
+    batch: [{ event: "player_chat", data: { player: "Steve", message: "hi" } }],
+    toolCalls: [{ tool: "npc_say", args: { npcId: "mara-baker", text: "Welcome!" } }],
+    summary: null,
+    dryRun: true,
+  });
+  const journalFile = path.join(journalStateDir, "decisions.log");
+  assert(fs.existsSync(journalFile), "decisions.log was created under state/");
+  const journalContent = fs.readFileSync(journalFile, "utf8");
+  assert(journalContent.includes("[dry-run]"), "dry-run scene block is marked [dry-run]");
+  assert(journalContent.includes("Scene #1"), "journal block is labeled with the scene number");
+  assert(journalContent.includes("npc_say"), "journal block lists the tool call the scene made");
+  assert(journalContent.includes("Steve"), "journal block names the triggering player");
+
+  console.log("\n1g. Decisions journal rotates at a size threshold");
+  const rotateStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "brain-journal-rotate-"));
+  process.env.BRAIN_DECISIONS_MAX_BYTES = "300"; // tiny threshold override, test-only
+  for (let i = 0; i < 10; i++) {
+    journalScene({
+      config: { stateDir: rotateStateDir },
+      sceneNumber: i,
+      batch: [{ event: "npc_death", data: {} }],
+      toolCalls: [],
+      summary: "the bell tolled for nobody in particular, over and over again",
+      dryRun: false,
+    });
+  }
+  delete process.env.BRAIN_DECISIONS_MAX_BYTES;
+  assert(fs.existsSync(path.join(rotateStateDir, "decisions.log.1")), "decisions.log rotated to decisions.log.1 once the size threshold was exceeded");
+  assert(fs.existsSync(path.join(rotateStateDir, "decisions.log")), "a fresh decisions.log exists after rotation");
+
   console.log("\n2. Director debounce, actor routing, knowledge isolation");
   const port1 = 8899;
   const bridge1 = spawnNode([path.join(BRAIN_DIR, "test", "mock-bridge.mjs")], {
@@ -164,6 +226,10 @@ async function main() {
     BRAIN_ENABLED: "1",
     BRAIN_LORE_REFRESH_MS: "600000",
     BRAIN_STATE_DIR: stateDir1,
+    // The default console output is now human-readable prose (see
+    // lib/logger.mjs); this smoke test parses JSON lines, so it opts back
+    // into the full-JSON mode exactly like an operator running `| jq` would.
+    BRAIN_LOG_JSON: "1",
   });
 
   const authed = await waitFor(brain1.logs, (l) => l.msg === "bridge_auth_ok", 5000);
@@ -285,6 +351,7 @@ async function main() {
     BRAIN_DISABLED_FILE: disabledFile,
     BRAIN_LORE_REFRESH_MS: "600000",
     BRAIN_STATE_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "brain-usage-")),
+    BRAIN_LOG_JSON: "1",
   });
 
   const authed2 = await waitFor(brain2.logs, (l) => l.msg === "bridge_auth_ok", 5000);
@@ -310,6 +377,7 @@ async function main() {
     BRAIN_ENABLED: "1",
     BRAIN_LORE_REFRESH_MS: "600000",
     BRAIN_STATE_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "brain-usage-")),
+    BRAIN_LOG_JSON: "1",
   });
 
   const sawTwoRetries = await waitFor(

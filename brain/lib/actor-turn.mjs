@@ -11,8 +11,9 @@
 // actors"), enforced via allowedTools + a disallowedTools complement built
 // from lib/config.mjs's ALL_TOOLS list.
 
-import { log } from "./logger.mjs";
-import { MCP_SERVER_NAME, ACTOR_TOOLS, actorDisallowedTools, namespaceAll } from "./config.mjs";
+import { log, compactArgs } from "./logger.mjs";
+import { MCP_SERVER_NAME, ACTOR_TOOLS, actorDisallowedTools, namespaceAll, stripToolPrefix } from "./config.mjs";
+import { journalActor } from "./decisions-journal.mjs";
 
 const STANDING_REMINDER = `You are voicing ONE character in the fantasy world of MCAlive2: an NPC actor,
 not the director. You know only what is in your character sheet and the
@@ -93,6 +94,7 @@ export async function runActorTurn({ npc, facts, player, trigger, message, trans
       allowedTools,
       disallowedTools,
     });
+    journalActor({ config, npcId: npc.id, player, trigger, toolCalls: [], summary: null, dryRun: true });
     return { inputTokens: 0, outputTokens: 0, totalTokens: 0, dryRun: true, reportText: null };
   }
 
@@ -122,7 +124,23 @@ export async function runActorTurn({ npc, facts, player, trigger, message, trans
 
   let usage = { input_tokens: 0, output_tokens: 0 };
   let resultText = null;
+  const toolCalls = [];
+  // Same streamed SDKAssistantMessage tool_use extraction as
+  // lib/director-turn.mjs - see that file's header comment for the
+  // sdk.d.ts verification. Actors can only ever call the 3 allowed tools
+  // (enforced by allowedTools/disallowedTools above), but every call they
+  // do make is still worth surfacing to the operator.
   for await (const msg of query({ prompt, options })) {
+    if (msg.type === "assistant" && msg.message && Array.isArray(msg.message.content)) {
+      for (const block of msg.message.content) {
+        if (block.type === "tool_use") {
+          const tool = stripToolPrefix(block.name, MCP_SERVER_NAME);
+          const argsLine = compactArgs(block.input);
+          toolCalls.push({ tool, args: block.input });
+          log.info("tool_call", { role: "actor", npcId: npc.id, player, tool, args: block.input, argsLine });
+        }
+      }
+    }
     if (msg.type === "result") {
       usage = msg.usage || usage;
       resultText = msg.subtype === "success" ? msg.result : `error: ${msg.subtype}`;
@@ -139,5 +157,6 @@ export async function runActorTurn({ npc, facts, player, trigger, message, trans
     totalTokens: inputTokens + outputTokens,
     result: resultText,
   });
+  journalActor({ config, npcId: npc.id, player, trigger, toolCalls, summary: resultText, dryRun: false });
   return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, dryRun: false, reportText: resultText };
 }

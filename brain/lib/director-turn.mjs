@@ -11,9 +11,20 @@
 // options.{model, systemPrompt, mcpServers (stdio), tools, disallowedTools,
 // permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions,
 // maxTurns}.
+//
+// Per-tool-call logging streams SDKMessage frames (sdk.d.ts's
+// `export declare type SDKMessage = SDKAssistantMessage | ...`) and picks
+// out SDKAssistantMessage (`type: 'assistant'`): "While a response streams
+// the CLI emits one assistant message per completed content block ... each
+// carries just that block in message.content" - message is a BetaMessage
+// (Anthropic Messages API shape), so message.content[i].type === 'tool_use'
+// blocks (with .name/.input) are visible turn-by-turn, well before the
+// terminal SDKResultMessage (`type: 'result'`) this module already
+// consumed for usage/result text.
 
-import { log } from "./logger.mjs";
-import { MCP_SERVER_NAME } from "./config.mjs";
+import { log, compactArgs } from "./logger.mjs";
+import { MCP_SERVER_NAME, stripToolPrefix } from "./config.mjs";
+import { journalScene } from "./decisions-journal.mjs";
 
 // The briefing is deliberately structured like an actual duty briefing
 // rather than a raw event dump: STANDING ORDERS first (role + the explicit
@@ -95,20 +106,23 @@ export function buildPrompt(batch) {
  * @param {Array} params.batch - debounced sense events
  * @param {string} params.systemPrompt - concatenated lore (brain/lore/*.md)
  * @param {object} params.config - loadConfig() result
+ * @param {number} params.sceneNumber - this process's monotonic scene counter value (lib/logger.mjs's nextSceneNumber()), for console/journal correlation
  * @returns {Promise<{ inputTokens: number, outputTokens: number, totalTokens: number, dryRun: boolean }>}
  */
-export async function runDirectorTurn({ batch, systemPrompt, config }) {
+export async function runDirectorTurn({ batch, systemPrompt, config, sceneNumber }) {
   const prompt = buildPrompt(batch);
 
   if (config.dryRun) {
     log.info("dry_run_director_turn", {
       role: "director",
+      sceneNumber,
       systemPrompt,
       prompt,
       model: config.directorModel,
       allowedTools: "ALL (full toolset)",
       disallowedTools: [],
     });
+    journalScene({ config, sceneNumber, batch, toolCalls: [], summary: null, dryRun: true });
     return { inputTokens: 0, outputTokens: 0, totalTokens: 0, dryRun: true };
   }
 
@@ -139,7 +153,24 @@ export async function runDirectorTurn({ batch, systemPrompt, config }) {
 
   let usage = { input_tokens: 0, output_tokens: 0 };
   let resultText = null;
+  const toolCalls = [];
+  // Stream the turn: SDKAssistantMessage (msg.type === "assistant") frames
+  // deliver one completed content block at a time (verified against
+  // @anthropic-ai/claude-agent-sdk's sdk.d.ts - SDKAssistantMessage.message
+  // is a BetaMessage whose content blocks include tool_use), so a tool call
+  // is visible the moment the model emits it, well before the turn's final
+  // "result" message. This is what makes per-tool-call logging possible.
   for await (const msg of query({ prompt, options })) {
+    if (msg.type === "assistant" && msg.message && Array.isArray(msg.message.content)) {
+      for (const block of msg.message.content) {
+        if (block.type === "tool_use") {
+          const tool = stripToolPrefix(block.name, MCP_SERVER_NAME);
+          const argsLine = compactArgs(block.input);
+          toolCalls.push({ tool, args: block.input });
+          log.info("tool_call", { role: "director", sceneNumber, tool, args: block.input, argsLine });
+        }
+      }
+    }
     if (msg.type === "result") {
       usage = msg.usage || usage;
       resultText = msg.subtype === "success" ? msg.result : `error: ${msg.subtype}`;
@@ -149,6 +180,7 @@ export async function runDirectorTurn({ batch, systemPrompt, config }) {
   const inputTokens = (usage.input_tokens || 0) + (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0);
   const outputTokens = usage.output_tokens || 0;
   log.info("director_turn_complete", {
+    sceneNumber,
     inputTokens,
     outputTokens,
     totalTokens: inputTokens + outputTokens,
@@ -157,6 +189,7 @@ export async function runDirectorTurn({ batch, systemPrompt, config }) {
   // The required final summary paragraph is the audit trail for this scene
   // (DESIGN.md / adjudication procedure): log it as its own info line so it
   // is easy to grep/tail independent of the raw turn-complete record above.
-  log.info("director_scene_summary", { summary: resultText });
+  log.info("director_scene_summary", { sceneNumber, summary: resultText });
+  journalScene({ config, sceneNumber, batch, toolCalls, summary: resultText, dryRun: false });
   return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, dryRun: false };
 }

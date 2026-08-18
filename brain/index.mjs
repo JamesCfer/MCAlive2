@@ -28,7 +28,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { loadConfig, DIRECTOR_WAKE_EVENTS } from "./lib/config.mjs";
-import { log } from "./lib/logger.mjs";
+import { log, nextSceneNumber } from "./lib/logger.mjs";
+import { journalSkip } from "./lib/decisions-journal.mjs";
 import { loadLore, watchLore } from "./lib/lore.mjs";
 import { UsageTracker } from "./lib/usage-tracker.mjs";
 import { RateLimiter } from "./lib/rate-limiter.mjs";
@@ -77,9 +78,16 @@ export async function main(env = process.env) {
     }
   }
 
-  function guardrailBlock(kind) {
+  /** @param {"director"|"actor"} kind
+   * @param {{sceneNumber?: number, batch?: Array, npcId?: string, player?: string, trigger?: string}} context
+   * Both console log fields and the decisions journal need to say WHICH
+   * scene/actor-turn a guardrail blocked - context carries the identifying
+   * bits for whichever kind this is (a scene number + batch for the
+   * director, npc/player/trigger for an actor). */
+  function guardrailBlock(kind, context = {}) {
     if (isKillSwitchActive()) {
-      log.warn(`turn_skipped_kill_switch`, { kind });
+      log.warn(`turn_skipped_kill_switch`, { kind, ...idFields(context) });
+      journalSkip({ config, kind, reason: "kill_switch", ...context });
       return "kill_switch";
     }
     if (usage.isOverBudget()) {
@@ -87,33 +95,48 @@ export async function main(env = process.env) {
         kind,
         tokensUsed: usage.tokens,
         dailyTokenBudget: config.dailyTokenBudget,
+        ...idFields(context),
       });
+      journalSkip({ config, kind, reason: "budget_exceeded", ...context });
       return "budget";
     }
     return null;
   }
 
+  function idFields(context) {
+    const { sceneNumber, npcId, player } = context;
+    const out = {};
+    if (sceneNumber !== undefined) out.sceneNumber = sceneNumber;
+    if (npcId !== undefined) out.npcId = npcId;
+    if (player !== undefined) out.player = player;
+    return out;
+  }
+
   // ---------------- Director scene runner ----------------
 
   async function runScene(batch) {
-    const block = guardrailBlock("director");
+    const sceneNumber = nextSceneNumber();
+    const block = guardrailBlock("director", { sceneNumber, batch });
     if (block) return;
     if (!rateLimiter.tryAcquire()) {
       log.warn("turn_skipped_rate_limited", {
         kind: "director",
+        sceneNumber,
         maxTurnsPerMin: config.maxTurnsPerMin,
         retryInMs: rateLimiter.msUntilSlot(),
       });
+      journalSkip({ config, kind: "director", reason: "rate_limited", sceneNumber, batch });
       scheduler.pending.unshift(...batch); // re-queue for the next debounce cycle
       return;
     }
 
     log.info("director_scene_starting", {
+      sceneNumber,
       batchSize: batch.length,
       events: batch.map((e) => e.event),
     });
 
-    const result = await runDirectorTurn({ batch, systemPrompt: lore.text, config });
+    const result = await runDirectorTurn({ batch, systemPrompt: lore.text, config, sceneNumber });
     if (result.totalTokens > 0) await usage.addTokens(result.totalTokens);
   }
 
@@ -129,7 +152,7 @@ export async function main(env = process.env) {
   }
 
   async function runActor({ npcId, player, trigger, message }) {
-    const block = guardrailBlock("actor");
+    const block = guardrailBlock("actor", { npcId, player, trigger });
     if (block) return;
     if (!rateLimiter.tryAcquire()) {
       log.warn("turn_skipped_rate_limited", {
@@ -139,6 +162,7 @@ export async function main(env = process.env) {
         maxTurnsPerMin: config.maxTurnsPerMin,
         retryInMs: rateLimiter.msUntilSlot(),
       });
+      journalSkip({ config, kind: "actor", reason: "rate_limited", npcId, player, trigger });
       return;
     }
 

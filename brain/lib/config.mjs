@@ -108,6 +108,14 @@ export function namespaceAll(toolNames, serverName = MCP_SERVER_NAME) {
   return toolNames.map((t) => namespacedTool(t, serverName));
 }
 
+/** Inverse of namespacedTool(): strip the mcp__<server>__ prefix a tool_use
+ * block's name carries, for logging/journaling under its bare command name.
+ * Leaves non-namespaced names (shouldn't occur here, but harmless) as-is. */
+export function stripToolPrefix(toolName, serverName = MCP_SERVER_NAME) {
+  const prefix = `mcp__${serverName}__`;
+  return toolName.startsWith(prefix) ? toolName.slice(prefix.length) : toolName;
+}
+
 /** Tools an actor turn must NOT have: everything in ALL_TOOLS except ACTOR_TOOLS, namespaced. */
 export function actorDisallowedTools(serverName = MCP_SERVER_NAME) {
   const allowed = new Set(ACTOR_TOOLS);

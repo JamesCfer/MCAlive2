@@ -80,6 +80,70 @@ Run this under whatever keeps a process alive on your machine (systemd,
 pm2, a `tmux`/`screen` session, NSSM/Task Scheduler on Windows) —
 `brain/` is a plain Node script with no daemonizing of its own.
 
+## Watching the brain
+
+By default the console is a plain-English narration of what the brain is
+doing, one line at a time — meant to be watched live, not piped through
+`jq`:
+
+```
+15:17:04  INFO   bridge connected (ws://127.0.0.1:8899)
+15:17:04  INFO   event player_join Steve joined
+15:17:04  INFO   event player_chat Steve: "hello?"
+15:17:04  INFO   scene #1 starting (3 events)
+15:17:05  INFO     ⚒ npc_say {npcId:mara-baker,text:"Welcome to the bakery!"}
+15:17:05  INFO   ✓ scene #1 decided: Steve greeted Mara; nothing else changed in the world.
+15:17:06  INFO   event npc_interact Steve -> kess-smith
+15:17:06  INFO   actor kess-smith starting (npc_interact) with Steve
+15:17:06  INFO     ⚒ npc_say {npcId:kess-smith,text:"Found a strange ore vein north of the village."}
+15:17:06  INFO   ✓ actor kess-smith replied to Steve: "Found a strange ore vein north of the village."
+```
+
+Every tool call the director or an NPC actor makes mid-turn is logged as it
+streams in (`⚒ <tool> <compact one-line args>`, tool names stripped of
+their `mcp__mcalive2__` prefix) — not just the final summary — so you can
+watch what it's actually doing, not just what it says it did afterward.
+Each director scene is numbered (`scene #N`, a monotonically increasing
+per-process counter) so its tool calls and its final decision line are easy
+to follow together; guardrail skips (kill switch / daily budget / rate
+limit) and bridge connect/reconnect/auth events are rendered the same way.
+
+Set `BRAIN_LOG_JSON=1` to get the original one-JSON-object-per-line output
+instead (for `| jq`, log shipping, or the smoke test, which always runs
+with it set).
+
+### `brain/state/decisions.log`
+
+Independent of the console, every director scene and every NPC actor turn
+also appends a plain-English block to `brain/state/decisions.log` — the
+operator's durable "what has my world been doing" record, readable with no
+JSON knowledge at all:
+
+```
+=== 2026-08-18T19:17:04.708Z  Scene #1 ===
+Triggered by: player_join, player_chat x2 (player: Steve)
+Tool calls:
+  ⚒ npc_say {npcId:mara-baker,text:"Welcome to the bakery!"}
+Decision: Steve greeted Mara; nothing else changed in the world.
+
+=== 2026-08-18T19:17:06.251Z  Actor kess-smith <- Steve (npc_interact) ===
+Tool calls:
+  ⚒ npc_say {npcId:kess-smith,text:"Found a strange ore vein north of the village."}
+Decision: Found a strange ore vein north of the village.
+```
+
+A turn that a guardrail blocked before it ever ran is still journaled, as
+`Decision: skipped: kill_switch` / `budget_exceeded` / `rate_limited`. A
+turn run under `BRAIN_DRY_RUN=1` is still journaled too, with `[dry-run]`
+on its header line, since a dry run is exactly the case you most want a
+paper trail for while tuning the brain — its decision line reads
+`(dry run - no API call made)` since no model was ever called.
+
+The file rotates when it exceeds 1MB: it is renamed to `decisions.log.1`
+(replacing any previous one) and a fresh `decisions.log` is started — one
+rotation kept, not a numbered series. Override the threshold with
+`BRAIN_DECISIONS_MAX_BYTES` (mainly for tests).
+
 ## Dry run
 
 Set `BRAIN_DRY_RUN=1` to see the exact system prompt + prompt + model +
@@ -193,6 +257,8 @@ It exits non-zero if any assertion fails.
 | `BRAIN_NPC_CHAT_RANGE` | `8` | Documented range (enforced plugin-side) within which chat routes to an actor |
 | `BRAIN_ACTOR_HISTORY_TURNS` | `20` | Turns of verbatim conversation kept per (npc, player) before folding into a running summary |
 | `BRAIN_NPC_CONTEXT_TIMEOUT_MS` | `8000` | Timeout for the direct `npc_context` bridge call made before an actor turn |
+| `BRAIN_LOG_JSON` | `0` | `1` = emit one-JSON-object-per-line logs instead of the default human-readable console narration |
+| `BRAIN_DECISIONS_MAX_BYTES` | `1048576` (1MB) | Size threshold at which `brain/state/decisions.log` rotates to `decisions.log.1` (mainly for tests) |
 
 ## Files
 
@@ -220,6 +286,14 @@ It exits non-zero if any assertion fails.
   `BRAIN_DRY_RUN`).
 - `lib/usage-tracker.mjs` — daily token budget, persisted to
   `brain/state/usage.json`.
+- `lib/logger.mjs` — the console logger: human-readable narration by
+  default (`formatHumanLine`, unit-tested directly), full JSON lines under
+  `BRAIN_LOG_JSON=1`; also owns the per-process scene counter
+  (`nextSceneNumber()`).
+- `lib/decisions-journal.mjs` — appends plain-English blocks to
+  `brain/state/decisions.log` for every director scene and actor turn
+  (including dry runs and guardrail-skipped turns), with size-based
+  rotation.
 - `lib/rate-limiter.mjs` — sliding-window turns-per-minute limiter.
 - `lib/lore.mjs` — loads and watches `brain/lore/*.md`.
 - `lore/` — the world's lore, loaded into the director's system prompt.
