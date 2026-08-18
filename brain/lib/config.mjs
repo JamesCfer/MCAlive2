@@ -94,6 +94,11 @@ export function loadConfig(env = process.env) {
     reconnectBaseMs: num("BRAIN_RECONNECT_BASE_MS", 1000),
     reconnectMaxMs: num("BRAIN_RECONNECT_MAX_MS", 30000),
 
+    // Self-update: minutes between checking origin/main for new brain code.
+    // 0 disables entirely; also disabled (gracefully) when brain/.. isn't a
+    // git checkout at all - see lib/self-update.mjs.
+    updateCheckMin: num("BRAIN_UPDATE_CHECK_MIN", 30),
+
     npcChatRangeBlocks: num("BRAIN_NPC_CHAT_RANGE", 8),
     actorHistoryTurns: num("BRAIN_ACTOR_HISTORY_TURNS", 20),
     npcContextTimeoutMs: num("BRAIN_NPC_CONTEXT_TIMEOUT_MS", 8000),

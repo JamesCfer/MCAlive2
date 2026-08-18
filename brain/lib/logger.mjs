@@ -154,6 +154,46 @@ export function formatHumanLine(level, msg, fields = {}, now = new Date()) {
       body = `console listening on http://${fields.bind}:${fields.port} (token required)`;
       break;
 
+    case "self_update_disabled":
+      body = `self-update disabled (${fields.reason})`;
+      break;
+
+    case "self_update_available":
+      body = `⟳ brain update available: ${fields.local} -> ${fields.remote}`;
+      break;
+
+    case "self_update_pulling":
+      body = `⟳ pulling latest brain code (git pull --ff-only)...`;
+      break;
+
+    case "self_update_npm_install":
+      body = `⟳ package-lock.json changed, running npm install...`;
+      break;
+
+    case "self_update_restarting":
+      body = `⟳ restarting to apply update (waiting for idle, then exit 75)`;
+      break;
+
+    case "self_update_pull_failed":
+      body = `⚠ self-update pull failed, skipping: ${fields.error}`;
+      break;
+
+    case "self_update_diff_failed":
+      body = `⚠ self-update diff check failed, defaulting to npm install: ${fields.error}`;
+      break;
+
+    case "self_update_npm_install_failed":
+      body = `⚠ self-update npm install failed (restarting anyway): ${fields.error}`;
+      break;
+
+    case "self_update_check_failed":
+      body = `⚠ self-update check failed: ${fields.error}`;
+      break;
+
+    case "self_update_up_to_date":
+      body = `brain is up to date (${fields.head})`;
+      break;
+
     default: {
       const rest = Object.entries(fields)
         .map(([k, v]) => `${k}=${typeof v === "object" && v !== null ? compactArgs(v, 60) : v}`)
@@ -167,6 +207,11 @@ export function formatHumanLine(level, msg, fields = {}, now = new Date()) {
 
 function jsonMode() {
   const v = process.env.BRAIN_LOG_JSON;
+  return v === "1" || (v || "").toLowerCase() === "true";
+}
+
+function debugMode() {
+  const v = process.env.BRAIN_DEBUG;
   return v === "1" || (v || "").toLowerCase() === "true";
 }
 
@@ -188,6 +233,14 @@ export const log = {
   },
   error(msg, fields = {}) {
     emit(process.stderr, "error", msg, fields);
+  },
+  // Suppressed unless BRAIN_DEBUG=1 (or BRAIN_LOG_JSON=1, so tooling that
+  // already opted into full JSON output can still see it) - for
+  // high-frequency "nothing happened" lines like self-update's
+  // up-to-date check, not worth an operator's attention by default.
+  debug(msg, fields = {}) {
+    if (!debugMode() && !jsonMode()) return;
+    emit(process.stdout, "info", msg, fields);
   },
 };
 

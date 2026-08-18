@@ -41,11 +41,12 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
-import { namespacedTool, MCP_SERVER_NAME, ACTOR_TOOLS, actorDisallowedTools, DIRECTOR_WAKE_EVENTS } from "../lib/config.mjs";
+import { namespacedTool, MCP_SERVER_NAME, ACTOR_TOOLS, actorDisallowedTools, DIRECTOR_WAKE_EVENTS, loadConfig } from "../lib/config.mjs";
 import { parseActorReport } from "../lib/actor-report.mjs";
 import { ActorMemory } from "../lib/actor-memory.mjs";
 import { formatHumanLine, compactArgs } from "../lib/logger.mjs";
 import { journalScene } from "../lib/decisions-journal.mjs";
+import { SelfUpdater } from "../lib/self-update.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BRAIN_DIR = path.resolve(__dirname, "..");
@@ -110,6 +111,15 @@ async function main() {
   assert(DIRECTOR_WAKE_EVENTS.has("player_idle_scene"), "player_idle_scene is a director wake event (M2 re-enabled)");
   assert(DIRECTOR_WAKE_EVENTS.has("region_enter"), "region_enter is a director wake event (M2 re-enabled)");
   assert(DIRECTOR_WAKE_EVENTS.has("region_exit"), "region_exit is a director wake event (M2 re-enabled)");
+
+  assert(loadConfig({}).updateCheckMin === 30, "BRAIN_UPDATE_CHECK_MIN defaults to 30 minutes");
+  // num()/bool01() read directly off process.env (matching every other
+  // config field's existing behavior in this file), not off the `env`
+  // param loadConfig was called with - so exercise it the same way section
+  // 1g does for BRAIN_DECISIONS_MAX_BYTES.
+  process.env.BRAIN_UPDATE_CHECK_MIN = "0";
+  assert(loadConfig().updateCheckMin === 0, "BRAIN_UPDATE_CHECK_MIN=0 is honored (disables self-update)");
+  delete process.env.BRAIN_UPDATE_CHECK_MIN;
 
   console.log("\n1b. Actor report parsing (pure, no process needed)");
   const wellFormed = parseActorReport(
@@ -208,6 +218,124 @@ async function main() {
   delete process.env.BRAIN_DECISIONS_MAX_BYTES;
   assert(fs.existsSync(path.join(rotateStateDir, "decisions.log.1")), "decisions.log rotated to decisions.log.1 once the size threshold was exceeded");
   assert(fs.existsSync(path.join(rotateStateDir, "decisions.log")), "a fresh decisions.log exists after rotation");
+
+  console.log("\n1h. Self-update decision logic (offline, injectable runner - no real git/npm calls)");
+
+  /** Builds a fake `runner(cmd, args, opts)` for SelfUpdater out of an
+   * ordered list of {match(cmd,args), result} entries; result is either an
+   * {stdout,stderr} object to resolve with, or an Error instance to throw
+   * (mirroring what execFile-based failures look like: .stderr attached).
+   * Every call is recorded on `runner.calls` so tests can assert on what
+   * was (or wasn't) invoked - e.g. "npm install never ran". */
+  function fakeRunner(responses) {
+    const calls = [];
+    const runner = async (cmd, args, opts) => {
+      calls.push({ cmd, args, cwd: opts && opts.cwd });
+      const hit = responses.find((r) => r.match(cmd, args));
+      if (!hit) throw new Error(`fakeRunner: unexpected call ${cmd} ${args.join(" ")}`);
+      if (hit.result instanceof Error) throw hit.result;
+      return hit.result;
+    };
+    runner.calls = calls;
+    return runner;
+  }
+  const has = (args, ...needle) => needle.every((n) => args.includes(n));
+  const ok = (stdout = "") => ({ stdout, stderr: "" });
+  const fail = (stderr) => Object.assign(new Error(stderr), { stderr });
+
+  // --- same hash -> no action, no pull, no restart ---
+  {
+    const runner = fakeRunner([
+      { match: (c, a) => c === "git" && has(a, "rev-parse", "--is-inside-work-tree"), result: ok() },
+      { match: (c, a) => c === "git" && has(a, "rev-parse", "HEAD"), result: ok("abc123\n") },
+      { match: (c, a) => c === "git" && has(a, "ls-remote"), result: ok("abc123\trefs/heads/main\n") },
+    ]);
+    let restarted = false;
+    const su = new SelfUpdater({ checkIntervalMin: 30, runner, restart: () => { restarted = true; } });
+    const result = await su.checkOnce();
+    assert(result.action === "up_to_date", `same local/remote HEAD -> up_to_date (got ${result.action})`);
+    assert(!restarted, "same hash never triggers a restart");
+    assert(!runner.calls.some((c) => c.args.includes("pull")), "same hash never runs git pull");
+  }
+
+  // --- different hash, lockfile unchanged -> pull + restart, npm install SKIPPED ---
+  {
+    const runner = fakeRunner([
+      { match: (c, a) => c === "git" && has(a, "rev-parse", "--is-inside-work-tree"), result: ok() },
+      { match: (c, a) => c === "git" && has(a, "rev-parse", "HEAD"), result: ok("abc111\n") },
+      { match: (c, a) => c === "git" && has(a, "ls-remote"), result: ok("def222\trefs/heads/main\n") },
+      { match: (c, a) => c === "git" && has(a, "diff", "--name-only"), result: ok("brain/index.mjs\nbrain/README.md\n") },
+      { match: (c, a) => c === "git" && has(a, "pull", "--ff-only"), result: ok() },
+      { match: (c) => c === "npm", result: ok() },
+    ]);
+    let restarted = false;
+    const su = new SelfUpdater({ checkIntervalMin: 30, runner, restart: () => { restarted = true; } });
+    const result = await su.checkOnce();
+    assert(result.action === "restarted", `different HEAD with a clean pull -> restarted (got ${result.action})`);
+    assert(restarted, "restart callback was invoked after a successful update");
+    assert(runner.calls.some((c) => c.cmd === "git" && c.args.includes("pull")), "git pull --ff-only was run");
+    assert(!runner.calls.some((c) => c.cmd === "npm"), "npm install was SKIPPED because package-lock.json did not change");
+    assert(result.npmInstalled === false, "checkOnce reports npmInstalled=false when the lock file was unchanged");
+  }
+
+  // --- different hash, lockfile changed -> pull + npm install + restart ---
+  {
+    const runner = fakeRunner([
+      { match: (c, a) => c === "git" && has(a, "rev-parse", "--is-inside-work-tree"), result: ok() },
+      { match: (c, a) => c === "git" && has(a, "rev-parse", "HEAD"), result: ok("abc111\n") },
+      { match: (c, a) => c === "git" && has(a, "ls-remote"), result: ok("def222\trefs/heads/main\n") },
+      { match: (c, a) => c === "git" && has(a, "diff", "--name-only"), result: ok("brain/package.json\nbrain/package-lock.json\n") },
+      { match: (c, a) => c === "git" && has(a, "pull", "--ff-only"), result: ok() },
+      { match: (c) => c === "npm", result: ok() },
+    ]);
+    let restarted = false;
+    const su = new SelfUpdater({ checkIntervalMin: 30, runner, restart: () => { restarted = true; } });
+    const result = await su.checkOnce();
+    assert(result.action === "restarted", `different HEAD with a lockfile change -> restarted (got ${result.action})`);
+    assert(restarted, "restart callback was invoked after a successful update with a lock change");
+    const npmCall = runner.calls.find((c) => c.cmd === "npm");
+    assert(npmCall, "npm install WAS run because package-lock.json changed in the pulled range");
+    assert(npmCall && has(npmCall.args, "install", "--no-audit", "--no-fund"), "npm install was run with --no-audit --no-fund");
+    assert(result.npmInstalled === true, "checkOnce reports npmInstalled=true when the lock file changed");
+  }
+
+  // --- pull failure (dirty tree / diverged) -> warning, no restart, no broken state ---
+  {
+    const runner = fakeRunner([
+      { match: (c, a) => c === "git" && has(a, "rev-parse", "--is-inside-work-tree"), result: ok() },
+      { match: (c, a) => c === "git" && has(a, "rev-parse", "HEAD"), result: ok("abc111\n") },
+      { match: (c, a) => c === "git" && has(a, "ls-remote"), result: ok("def222\trefs/heads/main\n") },
+      { match: (c, a) => c === "git" && has(a, "diff", "--name-only"), result: ok("brain/index.mjs\n") },
+      { match: (c, a) => c === "git" && has(a, "pull", "--ff-only"), result: fail("error: Your local changes would be overwritten by merge") },
+    ]);
+    let restarted = false;
+    const su = new SelfUpdater({ checkIntervalMin: 30, runner, restart: () => { restarted = true; } });
+    const result = await su.checkOnce();
+    assert(result.action === "pull_failed", `a failed git pull --ff-only -> pull_failed, not thrown (got ${result.action})`);
+    assert(!restarted, "restart is never triggered when the pull failed");
+    assert(!runner.calls.some((c) => c.cmd === "npm"), "npm install never runs when the pull failed");
+  }
+
+  // --- not a git checkout -> disabled cleanly, no further git calls ---
+  {
+    const runner = fakeRunner([
+      { match: (c, a) => c === "git" && has(a, "rev-parse", "--is-inside-work-tree"), result: fail("fatal: not a git repository") },
+    ]);
+    let restarted = false;
+    const su = new SelfUpdater({ checkIntervalMin: 30, runner, restart: () => { restarted = true; } });
+    const result = await su.checkOnce();
+    assert(result.action === "disabled_not_git", `a non-git brain/.. -> disabled_not_git, not thrown (got ${result.action})`);
+    assert(!restarted, "restart is never triggered when brain/.. is not a git checkout");
+    assert(runner.calls.length === 1, "non-git dir stops after the single is-inside-work-tree probe, no further git calls");
+  }
+
+  // --- checkIntervalMin <= 0 disables the timer entirely (start() never schedules) ---
+  {
+    const suDisabled = new SelfUpdater({ checkIntervalMin: 0, runner: fakeRunner([]) });
+    suDisabled.start();
+    assert(suDisabled.timer === null, "checkIntervalMin=0 never starts the periodic timer");
+    suDisabled.stop();
+  }
 
   console.log("\n2. Director debounce, actor routing, knowledge isolation");
   const port1 = 8899;

@@ -24,8 +24,28 @@ npc-chat-range: 8
 # etc) before a light player_idle_scene heartbeat fires for them. 0 disables this sense.
 idle-scene-minutes: 12
 
-# Self-update: on startup, checks GitHub releases and stages a newer MCAlive2.jar in
-# plugins/update/ (Paper applies it automatically on the next server restart).
+# Self-update: periodically checks GitHub releases and stages a newer MCAlive2.jar in
+# plugins/update/ (Paper applies it automatically on the next server restart). A
+# version already staged is never re-downloaded.
 auto-update:
   enabled: true
   github-repo: JamesCfer/MCAlive2
+
+  # Minutes between re-checks of GitHub releases, via a repeating async task.
+  # 0 = check once, at startup only (the old behavior).
+  check-minutes: 60
+
+  # If true, once an update is staged AND the server has had zero players for
+  # empty-minutes, the plugin calls a full server shutdown so the staged jar gets
+  # applied on the next start.
+  #
+  # IMPORTANT: only enable this if the server process is run under a restart loop
+  # (see scripts/run-server.cmd at the repo root) that relaunches it after it exits.
+  # Bukkit's shutdown() just stops the JVM - if nothing restarts it, the server goes
+  # down and STAYS down until a human starts it again.
+  #
+  # Default false: leave disabled unless you've confirmed the restart loop is in place.
+  apply-when-empty: false
+
+  # Minutes of continuous zero-player time required before apply-when-empty triggers.
+  empty-minutes: 10

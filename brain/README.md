@@ -80,6 +80,50 @@ Run this under whatever keeps a process alive on your machine (systemd,
 pm2, a `tmux`/`screen` session, NSSM/Task Scheduler on Windows) —
 `brain/` is a plain Node script with no daemonizing of its own.
 
+## Auto-update
+
+Run `run-forever.cmd` (Windows) instead of `npm start` to get zero-operator
+self-updating plus crash recovery:
+
+```
+cd brain
+run-forever.cmd
+```
+
+While running, `lib/self-update.mjs` checks `origin/main` every
+`BRAIN_UPDATE_CHECK_MIN` minutes (default `30`; `0` disables self-update
+entirely). It's also disabled gracefully — logged once, no crash — when
+`brain/..` isn't a git checkout at all. Each check is a plain
+`git rev-parse HEAD` vs. `git ls-remote origin main` (no GitHub API, no
+token, works with any plain git install):
+
+- **Same commit** → nothing happens (logged at debug level only — set
+  `BRAIN_DEBUG=1` to see it — since this fires on every check and there's
+  nothing for an operator to act on).
+- **Different commit** → logged clearly (`⟳ brain update available: <old> ->
+  <new>`), then `git pull --ff-only`. If `package-lock.json` changed in the
+  pulled range, `npm install --no-audit --no-fund` runs in `brain/` first;
+  otherwise that step is skipped. The brain then waits for its current
+  director scene and any in-flight NPC actor turns to finish (never kills a
+  turn mid-flight), runs the same `stop()` path a manual shutdown uses, and
+  exits with code **75** — "restart me".
+- **`git pull` fails** (dirty tree, diverged history, network blip) → a
+  warning is logged with the reason and the check is skipped; the checkout
+  is never left in a broken state, and there's no hot retry loop — the next
+  scheduled check just tries again.
+
+`run-forever.cmd` is a small restart-loop wrapper around `npm start`:
+
+| `npm start` exit code | `run-forever.cmd` does |
+|---|---|
+| `75` | loop again immediately (self-update wants to restart) |
+| `0` | stop looping (deliberate shutdown) |
+| anything else | wait 10 seconds, then loop again (crash recovery) |
+
+Plain `npm start` still works exactly as before — it just won't restart
+itself on an update or a crash; use `run-forever.cmd` for anything meant to
+run unattended.
+
 ## Watching the brain
 
 By default the console is a plain-English narration of what the brain is
@@ -312,6 +356,8 @@ It exits non-zero if any assertion fails.
 | `BRAIN_CONSOLE_BIND` | `127.0.0.1` | Interface the Lore Console binds to; `0.0.0.0` to reach it from the LAN |
 | `BRAIN_CONSOLE_PORT` | `7777` | Port the Lore Console listens on |
 | `BRAIN_CONSOLE_TOKEN` | `MCALIVE2_TOKEN` | Shared token required on every Lore Console request |
+| `BRAIN_UPDATE_CHECK_MIN` | `30` | Minutes between self-update checks against `origin/main`; `0` disables self-update (see Auto-update above) |
+| `BRAIN_DEBUG` | `0` | `1` = also show debug-level lines (e.g. self-update's "up to date" check) in the default human-readable console |
 
 ## Files
 
@@ -353,6 +399,10 @@ It exits non-zero if any assertion fails.
   auth via query param + cookie) serving the operator page, and the
   `lore/90-operator-directives.md` add/list/delete logic, triggering an
   immediate lore reload after every change.
+- `lib/self-update.mjs` — checks `origin/main` on a timer and pulls +
+  restarts (exit 75) when new code has landed; see Auto-update above.
+- `run-forever.cmd` — Windows restart-loop wrapper around `npm start` that
+  understands exit code 75 (update) vs. any other nonzero exit (crash).
 - `lore/` — the world's lore, loaded into the director's system prompt.
 - `blueprints/` — reserved for M3 (`build_blueprint` JSON blueprint
   library); empty for M1.

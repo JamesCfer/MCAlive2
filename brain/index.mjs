@@ -24,6 +24,11 @@
 // run concurrently with each other (lib/director-scheduler.mjs), while
 // actor turns run immediately, serialized per (npc, player) conversation so
 // two rapid interactions with the same NPC by the same player never race.
+//
+// Self-update (lib/self-update.mjs) runs alongside all of the above: on a
+// timer it checks origin/main, and if new code has landed it pulls, npm
+// installs if needed, waits for the idle point below, then exits 75 for
+// run-forever.cmd to restart into.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -40,6 +45,7 @@ import { ActorMemory } from "./lib/actor-memory.mjs";
 import { runDirectorTurn } from "./lib/director-turn.mjs";
 import { runActorTurn } from "./lib/actor-turn.mjs";
 import { parseActorReport } from "./lib/actor-report.mjs";
+import { SelfUpdater } from "./lib/self-update.mjs";
 
 export async function main(env = process.env) {
   const config = loadConfig(env);
@@ -80,6 +86,28 @@ export async function main(env = process.env) {
 
   const onlinePlayers = new Set();
   const actorQueues = new Map(); // `${npcId}::${player}` -> Promise chain
+  let activeActorTurns = 0; // in-flight runActor() calls, for the idle check below
+
+  /** Resolves once no director scene is mid-flight AND no actor turn is
+   * in-flight - the "safe to restart" point self-update.mjs waits for
+   * before exiting, so a running update never kills a turn mid-flight.
+   * Neither DirectorScheduler nor the actor queue previously exposed an
+   * idle signal of their own, so this polls the two flags directly rather
+   * than threading a new event through both - self-update only calls this
+   * right before an infrequent restart, so polling cost is a non-issue. */
+  function waitUntilIdle(pollMs = 200) {
+    return new Promise((resolve) => {
+      const check = () => {
+        if (!scheduler.sceneRunning && activeActorTurns === 0) {
+          resolve();
+          return;
+        }
+        const t = setTimeout(check, pollMs);
+        if (typeof t.unref === "function") t.unref();
+      };
+      check();
+    });
+  }
 
   function isKillSwitchActive() {
     if (!config.enabled) return true;
@@ -228,7 +256,12 @@ export async function main(env = process.env) {
     const prior = actorQueues.get(key) || Promise.resolve();
     const next = prior
       .catch(() => {})
-      .then(() => runActor(args))
+      .then(() => {
+        activeActorTurns += 1;
+        return runActor(args).finally(() => {
+          activeActorTurns -= 1;
+        });
+      })
       .catch((e) => log.error("actor_turn_failed", { npcId: args.npcId, player: args.player, error: String(e && e.stack || e) }));
     actorQueues.set(key, next);
     return next;
@@ -270,6 +303,28 @@ export async function main(env = process.env) {
   });
   bridge.start();
 
+  const stop = () => {
+    bridge.stop();
+    loreWatch.stop();
+    actorMemory.saveSync();
+    if (consoleServer) return consoleServer.stop();
+  };
+
+  // Self-update: check origin/main on a timer (BRAIN_UPDATE_CHECK_MIN,
+  // default 30min, 0=disabled); when it pulls new code it waits for the
+  // director/actor idle point above, runs the same stop() path a manual
+  // shutdown would, then exits 75 - run-forever.cmd (brain/run-forever.cmd)
+  // interprets exit 75 as "restart me immediately", any other nonzero exit
+  // as a crash (restart after a short delay), and 0 as a deliberate stop.
+  const selfUpdater = new SelfUpdater({
+    checkIntervalMin: config.updateCheckMin,
+    waitForIdle: waitUntilIdle,
+    restart: () => {
+      stop();
+      process.exit(75);
+    },
+  }).start();
+
   return {
     config,
     usage,
@@ -278,12 +333,8 @@ export async function main(env = process.env) {
     actorMemory,
     bridge,
     onlinePlayers,
-    stop() {
-      bridge.stop();
-      loreWatch.stop();
-      actorMemory.saveSync();
-      if (consoleServer) return consoleServer.stop();
-    },
+    selfUpdater,
+    stop,
   };
 }
 

@@ -23,15 +23,37 @@ See [`DESIGN.md`](DESIGN.md) for the full architecture, protocol, and milestone 
 3. Restart (or reload) the server. The plugin logs
    `MCAlive2 bridge listening on ws://<host>:<port>` once it's up.
 
-### Self-update
+## Updates
 
-On every startup the plugin checks `auto-update.github-repo`'s GitHub releases
-(`auto-update.enabled: true` by default, repo defaults to `JamesCfer/MCAlive2`). If a
-newer release exists and carries an `MCAlive2.jar` asset, it's downloaded into
-`plugins/update/`. Paper's own update-folder mechanism means the update **stages on
-restart N and applies on restart N+1** — nothing changes on disk for the currently
-running server until you restart it again. Set `auto-update.enabled: false` in
-`config.yml` to disable the check entirely.
+Releasing a new plugin version is just "bump `plugin/pom.xml`'s `<version>` and push
+to `main`" — everything after that is automatic:
+
+1. **CI release.** [`.github/workflows/release.yml`](.github/workflows/release.yml)
+   triggers on any push to `main` that touches `plugin/**`. It reads the version out
+   of `plugin/pom.xml`, and if a GitHub release tagged `v<version>` doesn't already
+   exist, it builds the plugin (`mvn package`, running the full test suite) and
+   publishes a release with `plugin/target/MCAlive2.jar` attached. If that tag's
+   release already exists, the workflow exits without doing anything — so pushes that
+   don't bump the version are no-ops.
+2. **Server staging.** Each running server's plugin checks `auto-update.github-repo`'s
+   GitHub releases on startup and then again every `auto-update.check-minutes`
+   (default 60 minutes; 0 = startup-only). When it finds a newer release with an
+   `MCAlive2.jar` asset, it downloads it into `plugins/update/` and never re-downloads
+   a version it has already staged. Paper's own update-folder mechanism means the
+   update **stages on restart N and applies on restart N+1** — nothing changes on disk
+   for the currently running server until it restarts.
+3. **Applying it.** By default that restart is up to you (or your process manager).
+   Optionally, set `auto-update.apply-when-empty: true` in `config.yml` to have the
+   plugin call a full server shutdown once an update is staged *and* the server has
+   been empty of players for `auto-update.empty-minutes` (default 10) — but only do
+   this if the server process runs under a restart loop that relaunches it after it
+   exits (see [`scripts/run-server.cmd`](scripts/run-server.cmd) for a ready-made
+   Windows one), otherwise the server just goes down and stays down.
+
+Set `auto-update.enabled: false` in `config.yml` to disable the check entirely.
+
+`brain/` updates itself separately from the plugin — see
+[`brain/README.md`](brain/README.md) for its own update/versioning story.
 
 ## Brain setup (the AI side)
 

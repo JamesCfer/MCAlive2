@@ -1,0 +1,65 @@
+name: Release plugin
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'plugin/**'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Read version from pom.xml
+        id: version
+        run: |
+          VERSION=$(grep -oP '(?<=^  <version>)[^<]+' plugin/pom.xml | head -n1)
+          if [ -z "$VERSION" ]; then
+            echo "Could not read <version> from plugin/pom.xml" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether the release already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ steps.version.outputs.tag }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build plugin (runs tests)
+        if: steps.check.outputs.exists == 'false'
+        run: mvn -q -f plugin/pom.xml package
+
+      - name: Create GitHub release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            plugin/target/MCAlive2.jar \
+            --repo "${{ github.repository }}" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --generate-notes
+
+      - name: Skip (release already exists)
+        if: steps.check.outputs.exists == 'true'
+        run: echo "Release ${{ steps.version.outputs.tag }} already exists; nothing to do."
