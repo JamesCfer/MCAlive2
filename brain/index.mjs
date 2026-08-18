@@ -14,9 +14,10 @@
 //     of an NPC (event carries data.nearNpcId)   -> an actor turn
 //   - player_chat with no nearby NPC, and every
 //     other sense event (join/death/explored/
-//     idle_scene/region_enter/exit/npc_attacked/
-//     npc_death)                                 -> debounced into the
+//     npc_attacked/npc_death)                    -> debounced into the
 //                                                    director's scene queue
+//     (idle_scene/region_enter/exit are M2 - the
+//      plugin doesn't emit them yet)
 //   - player_quit                                -> presence tracking only,
 //                                                    never wakes anything
 //

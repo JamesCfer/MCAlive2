@@ -9,7 +9,7 @@ a stdio MCP server that passes every actuator/ledger/info command straight
 through to the plugin's WebSocket bridge.
 
 ```
-Estari plugin (ws://.../8766)
+Estari plugin (ws://.../8765)
    │
    ├─ brain/index.mjs's OWN ws connection (lib/bridge-client.mjs)
    │     ├─ receives pushed sense events (the wake-up signal, auto-reconnect)
@@ -34,8 +34,9 @@ routes every pushed sense event one of two ways:
   default range `BRAIN_NPC_CHAT_RANGE=8` blocks, and stamps the nearby
   NPC's id on the event) → an actor turn for that NPC.
 - **Everything else** — `player_join`, `player_death`, `npc_attacked`,
-  `npc_death`, `player_explored`, `player_idle_scene`, `region_enter/exit`,
-  and `player_chat` with no nearby NPC — is debounced (`BRAIN_DEBOUNCE_MS`,
+  `npc_death`, `player_explored` (`player_idle_scene` and `region_enter/exit`
+  are M2 - the plugin doesn't emit them yet), and `player_chat` with no
+  nearby NPC — is debounced (`BRAIN_DEBOUNCE_MS`,
   default 2500ms) into a batch and handed to **one director turn**
   ("scene"). Events arriving while a scene is mid-turn are queued for the
   next scene; director scenes never run concurrently
@@ -70,7 +71,7 @@ ledger; the actor never writes to the ledger itself.
 cd brain
 npm install
 export ANTHROPIC_API_KEY=sk-ant-...     # needed for real (non-dry-run) turns
-export ESTARI_URL=ws://127.0.0.1:8766   # matches the plugin's bridge config
+export ESTARI_URL=ws://127.0.0.1:8765   # matches the plugin's bridge config
 export ESTARI_TOKEN=pick-a-long-random-token
 npm start
 ```
@@ -172,7 +173,7 @@ It exits non-zero if any assertion fails.
 
 | Var | Default | Meaning |
 |---|---|---|
-| `ESTARI_URL` | `ws://127.0.0.1:8766` | Plugin bridge WebSocket URL (both the brain's own event connection and the MCP tool server it spawns) |
+| `ESTARI_URL` | `ws://127.0.0.1:8765` | Plugin bridge WebSocket URL (both the brain's own event connection and the MCP tool server it spawns) |
 | `ESTARI_TOKEN` | `change-me` | Auth token matching the plugin's config |
 | `BRAIN_DEBOUNCE_MS` | `2500` | Director scene debounce window |
 | `BRAIN_LORE_REFRESH_MS` | `600000` | How often to re-read `brain/lore/*.md` |

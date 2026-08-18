@@ -15,3 +15,7 @@ explored-cell-chunks: 8
 
 # Radius in blocks that NPC speech (npc_say) is heard by players.
 npc-chat-radius: 20.0
+
+# Radius in blocks within which player chat is tagged with the nearest NPC
+# (nearNpcId/nearNpcName), routing the brain to an actor turn for that NPC.
+npc-chat-range: 8

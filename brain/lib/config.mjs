@@ -54,21 +54,21 @@ export const ACTOR_TOOLS = ["npc_say", "npc_look_at", "npc_pose"];
 // Sense events that feed the director's debounced scene loop. player_quit
 // only updates local presence tracking and never wakes anything (matching
 // gm/'s lesson: nothing useful for a director to react to in a quiet exit).
+// player_idle_scene, region_enter, and region_exit are M2 scope: the plugin
+// does not emit them yet, so they are left out of the wake list for now and
+// will come back once it does.
 export const DIRECTOR_WAKE_EVENTS = new Set([
   "player_join",
   "player_death",
   "npc_attacked",
   "npc_death",
   "player_explored",
-  "player_idle_scene",
-  "region_enter",
-  "region_exit",
   "player_chat", // only when NOT routed to an actor (see index.mjs routing)
 ]);
 
 export function loadConfig(env = process.env) {
   return {
-    estariUrl: env.ESTARI_URL || "ws://127.0.0.1:8766",
+    estariUrl: env.ESTARI_URL || "ws://127.0.0.1:8765",
     estariToken: env.ESTARI_TOKEN || "change-me",
 
     debounceMs: num("BRAIN_DEBOUNCE_MS", 2500),

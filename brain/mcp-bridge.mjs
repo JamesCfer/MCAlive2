@@ -11,14 +11,14 @@
 // as plugin bridge commands, so there is nothing to forward.
 //
 // Env vars:
-//   ESTARI_URL    ws URL of the plugin bridge (default ws://127.0.0.1:8766)
+//   ESTARI_URL    ws URL of the plugin bridge (default ws://127.0.0.1:8765)
 //   ESTARI_TOKEN  auth token matching the Estari plugin's config
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-const URL_ = process.env.ESTARI_URL || "ws://127.0.0.1:8766";
+const URL_ = process.env.ESTARI_URL || "ws://127.0.0.1:8765";
 const TOKEN = process.env.ESTARI_TOKEN || "change-me";
 
 // ---------------- WebSocket bridge client ----------------
@@ -150,37 +150,29 @@ const scheduleEntry = z.object({
   radius: z.number().optional().describe("wander radius, default 8"),
 });
 pt("npc_spawn",
-  "Create a living NPC (mannequin default, skin by username) with a name, role, home/work places, and a daily schedule the plugin runs automatically.",
+  "Create a living NPC (mannequin default, skin by username) with a name, role, home/work places, and a daily schedule the plugin runs automatically. " +
+  "Personality, wants, and faction are narrative data the plugin does not store here - record them with ledger_put on the npcs collection instead.",
   {
     id: z.string().describe("unique short id, e.g. 'mara-baker'"),
     name: z.string(),
     ...pos,
     entityType: z.string().optional().describe("default MANNEQUIN"),
     skin: z.string().optional().describe("Minecraft username whose skin a MANNEQUIN NPC wears"),
-    personality: z.object({
-      drive: z.number().min(-3).max(3), warmth: z.number().min(-3).max(3),
-      boldness: z.number().min(-3).max(3), composure: z.number().min(-3).max(3),
-    }).optional(),
-    wants: z.array(z.object({ horizon: z.enum(["short", "long"]), text: z.string() })).optional(),
     home: posObj.optional(),
     work: posObj.optional(),
     schedule: z.array(scheduleEntry).optional(),
-    faction: z.string().optional(),
   });
-pt("npc_update", "Update an NPC's name, appearance, home, work, schedule, or faction.", {
+pt("npc_update",
+  "Update an NPC's name, appearance, home, work, or schedule. " +
+  "Personality, wants, and faction are narrative data the plugin does not store here - record them with ledger_put on the npcs collection instead.",
+  {
   id: z.string(),
   name: z.string().optional(),
   entityType: z.string().optional(),
   skin: z.string().optional(),
-  personality: z.object({
-    drive: z.number().min(-3).max(3), warmth: z.number().min(-3).max(3),
-    boldness: z.number().min(-3).max(3), composure: z.number().min(-3).max(3),
-  }).optional(),
-  wants: z.array(z.object({ horizon: z.enum(["short", "long"]), text: z.string() })).optional(),
   home: posObj.optional(),
   work: posObj.optional(),
   schedule: z.array(scheduleEntry).optional(),
-  faction: z.string().optional(),
 });
 pt("npc_remove", "Remove an NPC permanently.", { id: z.string() });
 pt("npc_revive", "Bring a dead NPC back to life (dead NPCs never auto-respawn). Use sparingly - death is meant to be meaningful.", {

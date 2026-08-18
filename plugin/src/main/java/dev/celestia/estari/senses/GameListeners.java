@@ -9,6 +9,9 @@ import dev.celestia.estari.npc.NpcManager;
 import dev.celestia.estari.util.Json;
 import io.papermc.paper.event.player.AsyncChatEvent;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
+import org.bukkit.Bukkit;
+import org.bukkit.Location;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -51,11 +54,45 @@ public class GameListeners implements Listener {
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onChat(AsyncChatEvent event) {
-        JsonObject data = new JsonObject();
-        data.addProperty("player", event.getPlayer().getName());
-        data.addProperty("message", PlainTextComponentSerializer.plainText().serialize(event.message()));
-        data.add("location", Json.locationJson(event.getPlayer().getLocation()));
-        bridge.broadcastEvent("player_chat", data);
+        // AsyncChatEvent fires off the main thread; text serialization is safe here, but
+        // location/entity lookups (the nearest-NPC search) are not, so hop to a sync task
+        // before touching Bukkit world/entity state and build+broadcast the payload there.
+        Player player = event.getPlayer();
+        String message = PlainTextComponentSerializer.plainText().serialize(event.message());
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            JsonObject data = new JsonObject();
+            data.addProperty("player", player.getName());
+            data.addProperty("message", message);
+            Location loc = player.getLocation();
+            data.add("location", Json.locationJson(loc));
+            NpcData nearest = nearestNpc(loc);
+            if (nearest != null) {
+                data.addProperty("nearNpcId", nearest.id);
+                data.addProperty("nearNpcName", nearest.name);
+            }
+            bridge.broadcastEvent("player_chat", data);
+        });
+    }
+
+    /** The nearest living NPC to a location within npc-chat-range blocks, or null if none. */
+    private NpcData nearestNpc(Location loc) {
+        if (loc == null || loc.getWorld() == null) return null;
+        double range = plugin.getConfig().getDouble("npc-chat-range", 8);
+        double bestDistSq = range * range;
+        NpcData nearest = null;
+        for (NpcData npc : npcs.all()) {
+            if (npc.dead) continue;
+            Entity entity = npcs.resolveEntity(npc);
+            if (entity == null || !entity.isValid()) continue;
+            Location npcLoc = entity.getLocation();
+            if (npcLoc.getWorld() != loc.getWorld()) continue;
+            double distSq = npcLoc.distanceSquared(loc);
+            if (distSq <= bestDistSq) {
+                bestDistSq = distSq;
+                nearest = npc;
+            }
+        }
+        return nearest;
     }
 
     @EventHandler

@@ -35,9 +35,9 @@ First message must be `{id, cmd:"auth", args:{token}}`.
   (plugin tracks visited cells in its data folder). Payload includes cell coords,
   biome sample, surface heightmap summary (min/max/median y over a 16-point grid),
   and notable features (water present, lava, village-distance if known).
-- `player_idle_scene` — every N minutes of active play without other events,
+- `player_idle_scene` (M2) — every N minutes of active play without other events,
   a light "heartbeat" scene so the director may (or may not) breathe life nearby.
-- `region_enter` / `region_exit` — named regions from the ledger (see below).
+- `region_enter` (M2) / `region_exit` (M2) — named regions from the ledger (see below).
 
 ### 2. Actuators (commands)
 World: `set_block`, `fill_region` (capped), `build_blueprint` (paste a JSON blueprint:

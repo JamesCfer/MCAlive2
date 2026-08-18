@@ -195,8 +195,8 @@ public class WorldActuators {
     /** Paste a blueprint: a JSON array of {dx,dy,dz,material,[data]} relative to an origin. */
     private JsonObject buildBlueprint(JsonObject args) {
         Location origin = Json.location(args);
-        JsonArray blocks = args.has("blueprint") && args.get("blueprint").isJsonArray()
-                ? args.getAsJsonArray("blueprint") : null;
+        JsonArray blocks = args.has("blocks") && args.get("blocks").isJsonArray()
+                ? args.getAsJsonArray("blocks") : null;
         List<BlueprintParser.BlockEntry> entries = BlueprintParser.parse(blocks, (int) fillCap(), BLUEPRINT_MAX_OFFSET);
 
         World world = origin.getWorld();
