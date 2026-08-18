@@ -139,6 +139,31 @@ export function listOrders(config) {
   return readOrders(config).slice().reverse(); // newest first
 }
 
+/** Orders with status "queued", oldest first (file order) - used by
+ * index.mjs on boot to re-push every order that was still pending when the
+ * process last stopped. The order text/status survive a restart on disk;
+ * the in-memory scheduler push that would have carried a "queued" one into
+ * a scene does not, so without this a queued order silently dies with the
+ * process that received it (DESIGN.md gap this closes). */
+export function queuedOrders(config) {
+  return readOrders(config).filter((o) => o && o.status === "queued");
+}
+
+/** Sets the status of the order matching this exact timestamp. No-op
+ * (returns false) if no such order exists, e.g. it already rolled off
+ * MAX_ORDERS. Used by index.mjs to mark an order "done" once its
+ * operator_order scene completes, or revert it to "queued" if that scene
+ * timed out (lib/timed-query.mjs), so the next restart retries it via
+ * queuedOrders() above. */
+export function setOrderStatus(config, timestamp, status) {
+  const existing = readOrders(config);
+  const order = existing.find((o) => o.timestamp === timestamp);
+  if (!order) return false;
+  order.status = status;
+  writeOrders(config, existing);
+  return true;
+}
+
 // ---------------- state/decisions.log tail ----------------
 
 function tailLines(filePath, n) {
@@ -420,13 +445,17 @@ function sendJson(res, status, obj, extraHeaders = {}) {
 
 /**
  * @param {object} config - loadConfig() result (consoleBind/consolePort/consoleToken/loreDir/stateDir)
- * @param {{ reloadLore: () => Promise<void> | void, submitOrder: (text: string) => void }} deps
+ * @param {{ reloadLore: () => Promise<void> | void, submitOrder: (text: string, orderTimestamp: string) => void }} deps
  *   - reloadLore is the exact reload lore.mjs's watcher uses on its own
  *   timer (index.mjs passes `loreWatch.tick`), invoked after every
  *   directive add/delete so the NEXT scene already sees the change.
  *   - submitOrder (index.mjs) pushes an "operator_order" scene event onto
  *   the director scheduler - see index.mjs's submitOrder for how an order
- *   becomes a director scene rather than lore.
+ *   becomes a director scene rather than lore. orderTimestamp is the exact
+ *   timestamp appendOrder() below assigned this order, threaded onto the
+ *   scene event so index.mjs's runScene can later mark this same orders.json
+ *   entry "done" (or revert it to "queued" on a timeout) once its scene
+ *   completes.
  * @returns {Promise<{ server: import('node:http').Server, port: number, stop: () => Promise<void> }>}
  */
 export function startConsoleServer(config, { reloadLore, submitOrder }) {
@@ -508,7 +537,7 @@ export function startConsoleServer(config, { reloadLore, submitOrder }) {
           return;
         }
         const timestamp = appendOrder(config, text);
-        submitOrder(text);
+        submitOrder(text, timestamp);
         log.info("operator_order_added", { timestamp, text: text.length > 120 ? text.slice(0, 117) + "..." : text });
         sendJson(res, 200, { ok: true, timestamp }, extraHeaders);
         return;

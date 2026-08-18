@@ -36,7 +36,7 @@ import { loadConfig, DIRECTOR_WAKE_EVENTS } from "./lib/config.mjs";
 import { log, nextSceneNumber } from "./lib/logger.mjs";
 import { journalSkip } from "./lib/decisions-journal.mjs";
 import { loadLore, watchLore } from "./lib/lore.mjs";
-import { startConsoleServer } from "./lib/console-server.mjs";
+import { startConsoleServer, queuedOrders, setOrderStatus } from "./lib/console-server.mjs";
 import { UsageTracker } from "./lib/usage-tracker.mjs";
 import { RateLimiter } from "./lib/rate-limiter.mjs";
 import { BridgeClient } from "./lib/bridge-client.mjs";
@@ -85,8 +85,8 @@ export async function main(env = process.env) {
   // pushes an "operator_order" scene event onto the SAME debounced director
   // scheduler that pushed bridge sense events use (scheduler.push below),
   // so the very next scene carries it as an event to act on, not as style.
-  function submitOrder(text) {
-    scheduler.push("operator_order", { text, at: new Date().toISOString() });
+  function submitOrder(text, orderTimestamp) {
+    scheduler.push("operator_order", { text, orderTimestamp, at: new Date().toISOString() });
   }
 
   let consoleServer = null;
@@ -189,9 +189,37 @@ export async function main(env = process.env) {
 
     const result = await runDirectorTurn({ batch, systemPrompt: lore.text, config, sceneNumber });
     if (result.totalTokens > 0) await usage.addTokens(result.totalTokens);
+
+    // Orders (Lore Console "order the world" - console-server.mjs) carry
+    // their orders.json timestamp on the scene event (see submitOrder
+    // above); once their scene finishes, flip that same entry to "done" so
+    // it's never replayed - unless the scene timed out (lib/timed-
+    // query.mjs), in which case it reverts to "queued" so the next restart
+    // (or the boot-time replay below) retries it rather than losing it.
+    for (const e of batch) {
+      if (e.event === "operator_order" && e.data && e.data.orderTimestamp) {
+        const newStatus = result.timedOut ? "queued" : "done";
+        setOrderStatus(config, e.data.orderTimestamp, newStatus);
+        log.info("order_status_updated", { timestamp: e.data.orderTimestamp, status: newStatus });
+      }
+    }
   }
 
   const scheduler = new DirectorScheduler({ debounceMs: config.debounceMs, runScene });
+
+  // Orders persisted to state/orders.json survive a restart on disk, but the
+  // scheduler push that would have carried a still-"queued" one into a scene
+  // does not - it only ever lived in memory. Re-queue every queued order
+  // here, oldest first, so a process that stopped (crash, self-update, a
+  // timed-out scene) resumes exactly where its operator left it instead of
+  // silently dropping the order.
+  for (const order of queuedOrders(config)) {
+    scheduler.push("operator_order", { text: order.text, orderTimestamp: order.timestamp, at: new Date().toISOString() });
+    log.info("order_requeued_on_boot", {
+      timestamp: order.timestamp,
+      text: order.text.length > 120 ? order.text.slice(0, 117) + "..." : order.text,
+    });
+  }
 
   // ---------------- Actor turn runner ----------------
 
@@ -331,6 +359,7 @@ export async function main(env = process.env) {
   const selfUpdater = new SelfUpdater({
     checkIntervalSec: config.updateCheckSec,
     waitForIdle: waitUntilIdle,
+    idleWaitCapSec: config.updateIdleWaitCapSec,
     restart: () => {
       stop();
       process.exit(75);

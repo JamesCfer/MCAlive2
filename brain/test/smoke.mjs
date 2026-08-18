@@ -47,7 +47,9 @@ import { ActorMemory } from "../lib/actor-memory.mjs";
 import { formatHumanLine, compactArgs } from "../lib/logger.mjs";
 import { journalScene } from "../lib/decisions-journal.mjs";
 import { SelfUpdater } from "../lib/self-update.mjs";
-import { maxTurnsFor } from "../lib/director-turn.mjs";
+import { runDirectorTurn, maxTurnsFor } from "../lib/director-turn.mjs";
+import { runActorTurn } from "../lib/actor-turn.mjs";
+import { DirectorScheduler } from "../lib/director-scheduler.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BRAIN_DIR = path.resolve(__dirname, "..");
@@ -95,6 +97,17 @@ async function waitFor(logs, predicate, timeoutMs) {
   while (Date.now() - start < timeoutMs) {
     if (logs.some(predicate)) return true;
     await wait(50);
+  }
+  return false;
+}
+
+/** Generic poll: waits until `predicate()` is truthy or `timeoutMs` elapses.
+ * Used by in-process tests (no spawned child, so no log array to scan). */
+async function waitForCondition(predicate, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (predicate()) return true;
+    await wait(20);
   }
   return false;
 }
@@ -416,6 +429,108 @@ async function main() {
     assert(maxConcurrentLsRemote <= 1, `overlapping ticks never run two checks concurrently (max concurrent ls-remote calls: ${maxConcurrentLsRemote})`);
     assert(lsRemoteCalls >= 2, `a slow check (120ms) still gets picked up again after it finishes, across a 400ms window of 50ms ticks (got ${lsRemoteCalls} checks)`);
     assert(lsRemoteCalls < 8, `overlapping ticks are skipped, not queued - far fewer checks ran than the ~8 ticks that fired in 400ms (got ${lsRemoteCalls})`);
+  }
+
+  console.log("\n1i. Self-update idle-wait cap forces a restart even with a turn presumed permanently in flight");
+  {
+    const runner = fakeRunner([
+      { match: (c, a) => c === "git" && has(a, "rev-parse", "--is-inside-work-tree"), result: ok() },
+      { match: (c, a) => c === "git" && has(a, "rev-parse", "HEAD"), result: ok("abc111\n") },
+      { match: (c, a) => c === "git" && has(a, "ls-remote"), result: ok("def222\trefs/heads/main\n") },
+      { match: (c, a) => c === "git" && has(a, "diff", "--name-only"), result: ok("brain/index.mjs\n") },
+      { match: (c, a) => c === "git" && has(a, "pull", "--ff-only"), result: ok() },
+      { match: (c) => c === "npm", result: ok() },
+    ]);
+    let restarted = false;
+    const su = new SelfUpdater({
+      checkIntervalSec: 10,
+      runner,
+      waitForIdle: () => new Promise(() => {}), // never resolves - simulates a permanently wedged turn
+      idleWaitCapSec: 0.1, // 100ms cap, test-only
+      restart: () => {
+        restarted = true;
+      },
+    });
+    const startedAt = Date.now();
+    const result = await su.checkOnce();
+    const elapsedMs = Date.now() - startedAt;
+    assert(result.action === "restarted", `idle-wait cap still results in a restart (got ${result.action})`);
+    assert(restarted, "restart callback was invoked despite waitForIdle() never resolving");
+    assert(result.idleCapped === true, "checkOnce reports idleCapped=true when the cap fired before idle was reached");
+    assert(elapsedMs < 2000, `restart happened near the idle-wait cap (~100ms), not after waiting forever (took ${elapsedMs}ms)`);
+  }
+
+  console.log("\n1j. Turn timeout: a wedged director turn times out, is journaled, and the scheduler unblocks to run the NEXT batch");
+  {
+    // A fake queryFn shaped like the real SDK's query(): called with
+    // {prompt, options}, returns an async generator of SDKMessage-shaped
+    // objects. This one never yields and never returns - simulating a
+    // genuinely wedged streamed query() call.
+    function hangingQueryFn() {
+      return (async function* () {
+        await new Promise(() => {}); // never resolves
+      })();
+    }
+    function instantOkQueryFn() {
+      return (async function* () {
+        yield { type: "result", subtype: "success", result: "handled the second batch fine", usage: { input_tokens: 5, output_tokens: 5 } };
+      })();
+    }
+
+    const timeoutStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "brain-timeout-"));
+    const timeoutConfig = { ...loadConfig({}), dryRun: false, turnTimeoutSec: 0.2, stateDir: timeoutStateDir };
+
+    let sceneRuns = 0;
+    const scheduler = new DirectorScheduler({
+      debounceMs: 10,
+      runScene: async (batch) => {
+        sceneRuns += 1;
+        const sceneNumber = sceneRuns;
+        const queryFn = sceneNumber === 1 ? hangingQueryFn : instantOkQueryFn;
+        return runDirectorTurn({ batch, systemPrompt: "", config: timeoutConfig, sceneNumber, queryFn });
+      },
+    });
+
+    scheduler.push("player_join", { player: "Steve" });
+    // Debounce (10ms) + timeout (200ms) + a little slack for abort/cleanup.
+    const firstDone = await waitForCondition(() => scheduler.scenesStarted === 1 && !scheduler.sceneRunning, 2000);
+    assert(firstDone, "the wedged first scene eventually finished (timed out) and the scheduler flag cleared");
+    assert(!scheduler.sceneRunning, "sceneRunning is false after the timeout - the scheduler is unblocked, not stuck forever");
+
+    const journalAfterFirst = fs.readFileSync(path.join(timeoutStateDir, "decisions.log"), "utf8");
+    assert(journalAfterFirst.includes("Decision: timed out after"), "the timed-out scene is journaled as \"Decision: timed out after Ns - aborted\"");
+    assert(/timed out after \d+s - aborted/.test(journalAfterFirst), "the journaled timeout decision names the elapsed seconds");
+
+    // Push a second, independent batch - proves the scheduler moved on
+    // rather than staying wedged behind the first (hung) scene forever.
+    scheduler.push("npc_death", {});
+    const secondDone = await waitForCondition(() => scheduler.scenesStarted === 2, 2000);
+    assert(secondDone, "the scheduler processed the NEXT batch after the timed-out scene, proving it is not permanently blocked");
+  }
+
+  console.log("\n1k. Turn timeout: a wedged actor turn also times out cleanly (never throws, timedOut is reported)");
+  {
+    function hangingQueryFn() {
+      return (async function* () {
+        await new Promise(() => {});
+      })();
+    }
+    const actorTimeoutStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "brain-actor-timeout-"));
+    const actorTimeoutConfig = { ...loadConfig({}), dryRun: false, turnTimeoutSec: 0.15, stateDir: actorTimeoutStateDir, maxActorSteps: 6 };
+    const result = await runActorTurn({
+      npc: { id: "mara-baker", name: "Mara" },
+      facts: [],
+      player: "Steve",
+      trigger: "npc_interact",
+      transcript: { summary: "", recent: [] },
+      config: actorTimeoutConfig,
+      queryFn: hangingQueryFn,
+    });
+    assert(result.timedOut === true, "a wedged actor turn reports timedOut=true instead of hanging the caller");
+    assert(result.dryRun === false, "a timed-out actor turn is not mistaken for a dry run");
+    assert(result.reportText === null, "a timed-out actor turn's reportText is null (never fed back as something the NPC said)");
+    const actorJournal = fs.readFileSync(path.join(actorTimeoutStateDir, "decisions.log"), "utf8");
+    assert(actorJournal.includes("Decision: timed out after"), "the timed-out actor turn is journaled the same way as a timed-out scene");
   }
 
   console.log("\n2. Director debounce, actor routing, knowledge isolation");
@@ -782,6 +897,136 @@ async function main() {
 
   brain5.child.kill();
   bridge5.child.kill();
+
+  console.log("\n7. Orders survive restarts: a pre-seeded queued order in state/orders.json is pushed into the scheduler on boot, reaches a director scene prompt, and flips to \"done\"");
+  const port6 = 8904;
+  const bridge6 = spawnNode([path.join(BRAIN_DIR, "test", "mock-bridge.mjs")], {
+    MOCK_BRIDGE_PORT: String(port6),
+    MOCK_BRIDGE_TOKEN: "test-token",
+  });
+  await wait(300);
+
+  const orderStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "brain-orders-boot-"));
+  const seededTimestamp = new Date(Date.now() - 60000).toISOString();
+  const seededOrderText = "Boot-replayed order: raise a watchtower at spawn.";
+  const alreadyDoneTimestamp = new Date(Date.now() - 30000).toISOString();
+  fs.writeFileSync(
+    path.join(orderStateDir, "orders.json"),
+    JSON.stringify(
+      [
+        { timestamp: alreadyDoneTimestamp, text: "an order finished before this restart", status: "done" },
+        { timestamp: seededTimestamp, text: seededOrderText, status: "queued" },
+      ],
+      null,
+      1
+    )
+  );
+
+  const brain6 = spawnNode([path.join(BRAIN_DIR, "index.mjs")], {
+    MCALIVE2_URL: `ws://127.0.0.1:${port6}`,
+    MCALIVE2_TOKEN: "test-token",
+    BRAIN_DEBOUNCE_MS: "300",
+    BRAIN_DRY_RUN: "1",
+    BRAIN_ENABLED: "1",
+    BRAIN_LORE_REFRESH_MS: "600000",
+    BRAIN_STATE_DIR: orderStateDir,
+    BRAIN_LOG_JSON: "1",
+    BRAIN_CONSOLE: "0",
+  });
+
+  const authed6 = await waitFor(brain6.logs, (l) => l.msg === "bridge_auth_ok", 5000);
+  assert(authed6, "orders-boot-replay brain instance authenticated against the bridge");
+
+  const gotRequeueLog = await waitFor(
+    brain6.logs,
+    (l) => l.msg === "order_requeued_on_boot" && l.timestamp === seededTimestamp,
+    5000
+  );
+  assert(gotRequeueLog, "the pre-seeded queued order was requeued on boot (order_requeued_on_boot logged)");
+
+  const gotOrderSceneOnBoot = await waitFor(
+    brain6.logs,
+    (l) => l.msg === "dry_run_director_turn" && typeof l.prompt === "string" && l.prompt.includes(seededOrderText),
+    5000
+  );
+  assert(gotOrderSceneOnBoot, "the boot-replayed order's text reached a director scene prompt");
+
+  const gotStatusUpdate = await waitFor(
+    brain6.logs,
+    (l) => l.msg === "order_status_updated" && l.timestamp === seededTimestamp && l.status === "done",
+    5000
+  );
+  assert(gotStatusUpdate, "order_status_updated logged the boot-replayed order flipping to \"done\" once its scene completed");
+
+  const ordersAfterBoot = JSON.parse(fs.readFileSync(path.join(orderStateDir, "orders.json"), "utf8"));
+  const seededAfter = ordersAfterBoot.find((o) => o.timestamp === seededTimestamp);
+  assert(seededAfter && seededAfter.status === "done", `boot-replayed order's status in orders.json is "done" after its scene completes (got ${seededAfter && seededAfter.status})`);
+  const alreadyDoneAfter = ordersAfterBoot.find((o) => o.timestamp === alreadyDoneTimestamp);
+  assert(alreadyDoneAfter && alreadyDoneAfter.status === "done", "an order already marked done before boot is left untouched (never requeued)");
+  assert(
+    !brain6.logs.some((l) => l.msg === "order_requeued_on_boot" && l.timestamp === alreadyDoneTimestamp),
+    "the already-done order was never requeued on boot (only status \"queued\" entries are replayed)"
+  );
+
+  brain6.child.kill();
+  bridge6.child.kill();
+
+  console.log("\n8. Order status transitions queued -> done for a freshly-submitted (non-boot) order too");
+  const port7 = 8905;
+  const bridge7 = spawnNode([path.join(BRAIN_DIR, "test", "mock-bridge.mjs")], {
+    MOCK_BRIDGE_PORT: String(port7),
+    MOCK_BRIDGE_TOKEN: "test-token",
+  });
+  await wait(300);
+
+  const freshOrderStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "brain-orders-fresh-"));
+  const freshConsoleToken = "fresh-order-token";
+  const brain7 = spawnNode([path.join(BRAIN_DIR, "index.mjs")], {
+    MCALIVE2_URL: `ws://127.0.0.1:${port7}`,
+    MCALIVE2_TOKEN: "test-token",
+    BRAIN_DEBOUNCE_MS: "300",
+    BRAIN_DRY_RUN: "1",
+    BRAIN_ENABLED: "1",
+    BRAIN_LORE_REFRESH_MS: "600000",
+    BRAIN_STATE_DIR: freshOrderStateDir,
+    BRAIN_LOG_JSON: "1",
+    BRAIN_CONSOLE: "1",
+    BRAIN_CONSOLE_BIND: "127.0.0.1",
+    BRAIN_CONSOLE_PORT: "0",
+    BRAIN_CONSOLE_TOKEN: freshConsoleToken,
+  });
+  const authed7 = await waitFor(brain7.logs, (l) => l.msg === "bridge_auth_ok", 5000);
+  assert(authed7, "fresh-order brain instance authenticated against the bridge");
+  const listening7 = await waitFor(brain7.logs, (l) => l.msg === "console_listening", 5000);
+  assert(listening7, "console_listening was logged for the fresh-order instance");
+  const consolePort7 = brain7.logs.find((l) => l.msg === "console_listening").port;
+
+  const freshOrderText = "Fresh order: build a small dock by the river.";
+  const freshOrderRes = await fetch(`http://127.0.0.1:${consolePort7}/order?token=${freshConsoleToken}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: freshOrderText }),
+  });
+  const freshOrderJson = await freshOrderRes.json();
+  assert(freshOrderRes.status === 200 && freshOrderJson.ok === true, "POST /order for the fresh order succeeded");
+
+  const ordersJsonPath7 = path.join(freshOrderStateDir, "orders.json");
+  const immediatelyAfterPost = JSON.parse(fs.readFileSync(ordersJsonPath7, "utf8"));
+  const freshOrderRow = immediatelyAfterPost.find((o) => o.text === freshOrderText);
+  assert(freshOrderRow && freshOrderRow.status === "queued", "the freshly-submitted order starts out with status \"queued\"");
+
+  const gotFreshStatusUpdate = await waitFor(
+    brain7.logs,
+    (l) => l.msg === "order_status_updated" && l.timestamp === freshOrderJson.timestamp && l.status === "done",
+    5000
+  );
+  assert(gotFreshStatusUpdate, "the fresh order's scene completed and flipped its status to \"done\"");
+  const ordersAfterFresh = JSON.parse(fs.readFileSync(ordersJsonPath7, "utf8"));
+  const freshOrderAfter = ordersAfterFresh.find((o) => o.timestamp === freshOrderJson.timestamp);
+  assert(freshOrderAfter && freshOrderAfter.status === "done", `orders.json reflects the queued -> done transition (got ${freshOrderAfter && freshOrderAfter.status})`);
+
+  brain7.child.kill();
+  bridge7.child.kill();
 
   await wait(200);
 

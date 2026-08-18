@@ -25,6 +25,7 @@
 import { log, compactArgs } from "./logger.mjs";
 import { MCP_SERVER_NAME, stripToolPrefix } from "./config.mjs";
 import { journalScene } from "./decisions-journal.mjs";
+import { consumeWithTimeout } from "./timed-query.mjs";
 
 // The briefing is deliberately structured like an actual duty briefing
 // rather than a raw event dump: STANDING ORDERS first (role + the explicit
@@ -145,7 +146,11 @@ export function buildPrompt(batch) {
  * @param {string} params.systemPrompt - concatenated lore (brain/lore/*.md)
  * @param {object} params.config - loadConfig() result
  * @param {number} params.sceneNumber - this process's monotonic scene counter value (lib/logger.mjs's nextSceneNumber()), for console/journal correlation
- * @returns {Promise<{ inputTokens: number, outputTokens: number, totalTokens: number, dryRun: boolean }>}
+ * @param {(args: {prompt: string, options: object}) => AsyncGenerator} [params.queryFn] - injectable
+ *   replacement for the real SDK's query(), for tests (e.g. a fake that
+ *   never yields, to exercise the timeout path offline). Defaults to the
+ *   real @anthropic-ai/claude-agent-sdk query().
+ * @returns {Promise<{ inputTokens: number, outputTokens: number, totalTokens: number, dryRun: boolean, timedOut: boolean }>}
  */
 /** Scenes containing an "operator_order" event get a higher turn ceiling
  * (BRAIN_ORDER_MAX_STEPS, default 80) than the normal maxDirectorSteps,
@@ -156,7 +161,7 @@ export function maxTurnsFor(batch, config) {
   return isOrderScene ? config.orderMaxSteps : config.maxDirectorSteps;
 }
 
-export async function runDirectorTurn({ batch, systemPrompt, config, sceneNumber }) {
+export async function runDirectorTurn({ batch, systemPrompt, config, sceneNumber, queryFn }) {
   const prompt = buildPrompt(batch);
   const maxTurns = maxTurnsFor(batch, config);
 
@@ -172,10 +177,10 @@ export async function runDirectorTurn({ batch, systemPrompt, config, sceneNumber
       maxTurns,
     });
     journalScene({ config, sceneNumber, batch, toolCalls: [], summary: null, dryRun: true });
-    return { inputTokens: 0, outputTokens: 0, totalTokens: 0, dryRun: true };
+    return { inputTokens: 0, outputTokens: 0, totalTokens: 0, dryRun: true, timedOut: false };
   }
 
-  const { query } = await import("@anthropic-ai/claude-agent-sdk");
+  const runQuery = queryFn || (await import("@anthropic-ai/claude-agent-sdk")).query;
 
   const options = {
     model: config.directorModel,
@@ -209,21 +214,38 @@ export async function runDirectorTurn({ batch, systemPrompt, config, sceneNumber
   // is a BetaMessage whose content blocks include tool_use), so a tool call
   // is visible the moment the model emits it, well before the turn's final
   // "result" message. This is what makes per-tool-call logging possible.
-  for await (const msg of query({ prompt, options })) {
-    if (msg.type === "assistant" && msg.message && Array.isArray(msg.message.content)) {
-      for (const block of msg.message.content) {
-        if (block.type === "tool_use") {
-          const tool = stripToolPrefix(block.name, MCP_SERVER_NAME);
-          const argsLine = compactArgs(block.input);
-          toolCalls.push({ tool, args: block.input });
-          log.info("tool_call", { role: "director", sceneNumber, tool, args: block.input, argsLine });
+  //
+  // The whole stream races BRAIN_TURN_TIMEOUT_SEC (lib/timed-query.mjs): a
+  // hung query() would otherwise block this scene - and, since director
+  // scenes never run concurrently (lib/director-scheduler.mjs), every
+  // subsequent event - forever.
+  const abortController = new AbortController();
+  options.abortController = abortController;
+  const { timedOut, elapsedMs } = await consumeWithTimeout({
+    startQuery: () => runQuery({ prompt, options }),
+    abortController,
+    timeoutSec: config.turnTimeoutSec,
+    onMessage: (msg) => {
+      if (msg.type === "assistant" && msg.message && Array.isArray(msg.message.content)) {
+        for (const block of msg.message.content) {
+          if (block.type === "tool_use") {
+            const tool = stripToolPrefix(block.name, MCP_SERVER_NAME);
+            const argsLine = compactArgs(block.input);
+            toolCalls.push({ tool, args: block.input });
+            log.info("tool_call", { role: "director", sceneNumber, tool, args: block.input, argsLine });
+          }
         }
       }
-    }
-    if (msg.type === "result") {
-      usage = msg.usage || usage;
-      resultText = msg.subtype === "success" ? msg.result : `error: ${msg.subtype}`;
-    }
+      if (msg.type === "result") {
+        usage = msg.usage || usage;
+        resultText = msg.subtype === "success" ? msg.result : `error: ${msg.subtype}`;
+      }
+    },
+  });
+
+  if (timedOut) {
+    resultText = `timed out after ${Math.round(elapsedMs / 1000)}s - aborted`;
+    log.warn("director_turn_timed_out", { sceneNumber, elapsedMs, timeoutSec: config.turnTimeoutSec });
   }
 
   const inputTokens = (usage.input_tokens || 0) + (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0);
@@ -234,11 +256,16 @@ export async function runDirectorTurn({ batch, systemPrompt, config, sceneNumber
     outputTokens,
     totalTokens: inputTokens + outputTokens,
     result: resultText,
+    timedOut,
   });
   // The required final summary paragraph is the audit trail for this scene
   // (DESIGN.md / adjudication procedure): log it as its own info line so it
   // is easy to grep/tail independent of the raw turn-complete record above.
   log.info("director_scene_summary", { sceneNumber, summary: resultText });
   journalScene({ config, sceneNumber, batch, toolCalls, summary: resultText, dryRun: false });
-  return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, dryRun: false };
+  // A timed-out turn still completes normally from the scheduler's point of
+  // view (see lib/director-scheduler.mjs and index.mjs's runScene) - it
+  // never throws, so the "a scene is running" flag always clears and the
+  // next debounced batch is free to run.
+  return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, dryRun: false, timedOut };
 }

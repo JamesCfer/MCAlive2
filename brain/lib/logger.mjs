@@ -174,6 +174,22 @@ export function formatHumanLine(level, msg, fields = {}, now = new Date()) {
       body = `⟳ restarting to apply update (waiting for idle, then exit 75)`;
       break;
 
+    case "self_update_restarting_with_turn_in_flight":
+      body = `⚠ idle-wait cap (${fields.idleWaitCapSec}s) hit with a turn presumed still in flight - restarting anyway`;
+      break;
+
+    case "director_turn_timed_out":
+      body = `⚠ scene #${fields.sceneNumber} timed out after ${Math.round((fields.elapsedMs || 0) / 1000)}s (cap ${fields.timeoutSec}s) - aborted`;
+      break;
+
+    case "actor_turn_timed_out":
+      body = `⚠ actor ${fields.npcId} <- ${fields.player} timed out after ${Math.round((fields.elapsedMs || 0) / 1000)}s (cap ${fields.timeoutSec}s) - aborted`;
+      break;
+
+    case "order_requeued_on_boot":
+      body = `↺ requeued order from state/orders.json (${fields.timestamp}): ${fields.text}`;
+      break;
+
     case "self_update_pull_failed":
       body = `⚠ self-update pull failed, skipping: ${fields.error}`;
       break;

@@ -119,6 +119,15 @@ export function loadConfig(env = process.env) {
     disabledFile: env.BRAIN_DISABLED_FILE || path.join(BRAIN_ROOT, "DISABLED"),
     mcpServerPath: env.BRAIN_MCP_SERVER_PATH || path.join(BRAIN_ROOT, "mcp-bridge.mjs"),
 
+    // Hard wall-clock cap on a single director/actor SDK turn (lib/timed-
+    // query.mjs). A hung streamed query() call would otherwise block
+    // forever - and since director scenes never run concurrently, that
+    // wedges every subsequent event (including operator orders) behind it
+    // forever too. On timeout the query is aborted, journaled as a timed-
+    // out decision, and still counts as a completed turn so the scheduler
+    // moves on to the next batch.
+    turnTimeoutSec: num("BRAIN_TURN_TIMEOUT_SEC", 300),
+
     maxDirectorSteps: num("BRAIN_MAX_DIRECTOR_STEPS", 12),
     maxActorSteps: num("BRAIN_MAX_ACTOR_STEPS", 6),
     // Scenes containing an "operator_order" event (a one-shot command from
@@ -139,6 +148,13 @@ export function loadConfig(env = process.env) {
     // read as a fallback for anyone who already exported it, converted to
     // seconds; BRAIN_UPDATE_CHECK_SEC wins when both are set.
     updateCheckSec: secWithMinFallback("BRAIN_UPDATE_CHECK_SEC", "BRAIN_UPDATE_CHECK_MIN", 10),
+
+    // Cap on how long self-update's restart will wait for the director
+    // scheduler / actor queue to go idle before restarting anyway (lib/
+    // self-update.mjs). Without this, a wedged turn (see turnTimeoutSec
+    // above - should now be rare) could also block self-update forever,
+    // since waitForIdle() previously had no way to give up.
+    updateIdleWaitCapSec: num("BRAIN_UPDATE_IDLE_WAIT_SEC", 600),
 
     npcChatRangeBlocks: num("BRAIN_NPC_CHAT_RANGE", 8),
     actorHistoryTurns: num("BRAIN_ACTOR_HISTORY_TURNS", 20),

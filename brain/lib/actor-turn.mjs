@@ -14,6 +14,7 @@
 import { log, compactArgs } from "./logger.mjs";
 import { MCP_SERVER_NAME, ACTOR_TOOLS, actorDisallowedTools, namespaceAll, stripToolPrefix } from "./config.mjs";
 import { journalActor } from "./decisions-journal.mjs";
+import { consumeWithTimeout } from "./timed-query.mjs";
 
 const STANDING_REMINDER = `You are voicing ONE character in the fantasy world of MCAlive2: an NPC actor,
 not the director. You know only what is in your character sheet and the
@@ -76,9 +77,12 @@ export function buildActorPrompt({ npc, facts, player, trigger, message, transcr
 }
 
 /**
- * @returns {Promise<{ inputTokens: number, outputTokens: number, totalTokens: number, dryRun: boolean, reportText: string|null }>}
+ * @param {(args: {prompt: string, options: object}) => AsyncGenerator} [params.queryFn] -
+ *   injectable replacement for the real SDK's query(), for tests. Defaults
+ *   to the real @anthropic-ai/claude-agent-sdk query().
+ * @returns {Promise<{ inputTokens: number, outputTokens: number, totalTokens: number, dryRun: boolean, timedOut: boolean, reportText: string|null }>}
  */
-export async function runActorTurn({ npc, facts, player, trigger, message, transcript, config }) {
+export async function runActorTurn({ npc, facts, player, trigger, message, transcript, config, queryFn }) {
   const prompt = buildActorPrompt({ npc, facts, player, trigger, message, transcript });
   const allowedTools = namespaceAll(ACTOR_TOOLS, MCP_SERVER_NAME);
   const disallowedTools = actorDisallowedTools(MCP_SERVER_NAME);
@@ -95,10 +99,10 @@ export async function runActorTurn({ npc, facts, player, trigger, message, trans
       disallowedTools,
     });
     journalActor({ config, npcId: npc.id, player, trigger, toolCalls: [], summary: null, dryRun: true });
-    return { inputTokens: 0, outputTokens: 0, totalTokens: 0, dryRun: true, reportText: null };
+    return { inputTokens: 0, outputTokens: 0, totalTokens: 0, dryRun: true, timedOut: false, reportText: null };
   }
 
-  const { query } = await import("@anthropic-ai/claude-agent-sdk");
+  const runQuery = queryFn || (await import("@anthropic-ai/claude-agent-sdk")).query;
 
   const options = {
     model: config.actorModel,
@@ -130,21 +134,38 @@ export async function runActorTurn({ npc, facts, player, trigger, message, trans
   // sdk.d.ts verification. Actors can only ever call the 3 allowed tools
   // (enforced by allowedTools/disallowedTools above), but every call they
   // do make is still worth surfacing to the operator.
-  for await (const msg of query({ prompt, options })) {
-    if (msg.type === "assistant" && msg.message && Array.isArray(msg.message.content)) {
-      for (const block of msg.message.content) {
-        if (block.type === "tool_use") {
-          const tool = stripToolPrefix(block.name, MCP_SERVER_NAME);
-          const argsLine = compactArgs(block.input);
-          toolCalls.push({ tool, args: block.input });
-          log.info("tool_call", { role: "actor", npcId: npc.id, player, tool, args: block.input, argsLine });
+  //
+  // Same BRAIN_TURN_TIMEOUT_SEC race as the director turn (lib/timed-
+  // query.mjs) - actor turns run immediately per (npc, player) conversation
+  // (index.mjs's queueActor), so a hung one would otherwise only wedge that
+  // one conversation's queue, but it should still never hang forever.
+  const abortController = new AbortController();
+  options.abortController = abortController;
+  const { timedOut, elapsedMs } = await consumeWithTimeout({
+    startQuery: () => runQuery({ prompt, options }),
+    abortController,
+    timeoutSec: config.turnTimeoutSec,
+    onMessage: (msg) => {
+      if (msg.type === "assistant" && msg.message && Array.isArray(msg.message.content)) {
+        for (const block of msg.message.content) {
+          if (block.type === "tool_use") {
+            const tool = stripToolPrefix(block.name, MCP_SERVER_NAME);
+            const argsLine = compactArgs(block.input);
+            toolCalls.push({ tool, args: block.input });
+            log.info("tool_call", { role: "actor", npcId: npc.id, player, tool, args: block.input, argsLine });
+          }
         }
       }
-    }
-    if (msg.type === "result") {
-      usage = msg.usage || usage;
-      resultText = msg.subtype === "success" ? msg.result : `error: ${msg.subtype}`;
-    }
+      if (msg.type === "result") {
+        usage = msg.usage || usage;
+        resultText = msg.subtype === "success" ? msg.result : `error: ${msg.subtype}`;
+      }
+    },
+  });
+
+  if (timedOut) {
+    resultText = `timed out after ${Math.round(elapsedMs / 1000)}s - aborted`;
+    log.warn("actor_turn_timed_out", { npcId: npc.id, player, elapsedMs, timeoutSec: config.turnTimeoutSec });
   }
 
   const inputTokens = (usage.input_tokens || 0) + (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0);
@@ -156,7 +177,12 @@ export async function runActorTurn({ npc, facts, player, trigger, message, trans
     outputTokens,
     totalTokens: inputTokens + outputTokens,
     result: resultText,
+    timedOut,
   });
   journalActor({ config, npcId: npc.id, player, trigger, toolCalls, summary: resultText, dryRun: false });
-  return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, dryRun: false, reportText: resultText };
+  // A timed-out turn's resultText is a synthetic "timed out" note, not
+  // anything the NPC actually said - never feed it back as reportText (that
+  // would both pollute actorMemory with a fake spoken line and get run
+  // through parseActorReport for nothing).
+  return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, dryRun: false, timedOut, reportText: timedOut ? null : resultText };
 }

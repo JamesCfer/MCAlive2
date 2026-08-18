@@ -218,6 +218,8 @@ locked down:
 |---|---|---|
 | Daily token budget (UTC reset, `brain/state/usage.json`) | 500,000 tokens/day | `BRAIN_DAILY_TOKEN_BUDGET` |
 | Turn rate limit (director scenes + actor turns combined) | 10/minute | `BRAIN_MAX_TURNS_PER_MIN` |
+| Turn timeout (director scene or actor turn) | 300 seconds | `BRAIN_TURN_TIMEOUT_SEC` |
+| Self-update idle-wait cap before restarting anyway | 600 seconds | `BRAIN_UPDATE_IDLE_WAIT_SEC` |
 | Kill switch | off (service runs) | `BRAIN_ENABLED=0`, or create the file `brain/DISABLED` |
 | Director model | `claude-sonnet-5` | `BRAIN_DIRECTOR_MODEL` |
 | Actor model | `claude-haiku-4-5-20251001` | `BRAIN_ACTOR_MODEL` |
@@ -229,6 +231,18 @@ before anything else: while active, the service still connects to the
 bridge and logs incoming events, it just never starts a turn. The budget
 and rate limit are shared across director scenes and actor turns (one pool,
 since actors are cheap but frequent and directors are rare but expensive).
+
+Every director scene and actor turn races `BRAIN_TURN_TIMEOUT_SEC` against
+the underlying Agent SDK call (`lib/timed-query.mjs`). Because director
+scenes never run concurrently (`lib/director-scheduler.mjs`), a single hung
+SDK call used to block every subsequent event — including operator orders —
+forever; on timeout the query is aborted (`AbortController` + `Query#close()`),
+journaled as `Decision: timed out after Ns - aborted`, and still counts as a
+completed turn, so the scheduler moves straight on to the next queued batch.
+Self-update's restart wait has its own, independent cap
+(`BRAIN_UPDATE_IDLE_WAIT_SEC`): if the director/actor idle point still isn't
+reached by the cap, self-update restarts anyway rather than waiting forever
+behind a turn that (with the timeout above) is now presumed wedged.
 
 `set_time` and all narration tools (`broadcast`/titles/action bar) are
 **absent by design**, not by a deny-list: they simply do not exist as
@@ -329,6 +343,17 @@ directives, amber for orders) so they're never confused:
   order may override taste and lore, never that. The page also lists recent
   orders with their timestamps and status.
 
+  Orders survive a restart: `state/orders.json` is the source of truth, not
+  the in-memory scheduler push. On boot, `index.mjs` reads every entry still
+  marked `"queued"` and re-pushes it onto the scheduler, oldest first,
+  logging `order_requeued_on_boot` for each — so an order that was queued
+  behind a wedged scene, or mid-flight when the process crashed or
+  self-updated, is retried automatically instead of silently dying with the
+  old process. Once an order's scene actually completes, its `orders.json`
+  entry flips to `"done"`; if that scene instead timed out
+  (`BRAIN_TURN_TIMEOUT_SEC`), it reverts to `"queued"` so the next restart
+  (or boot) retries it rather than losing it.
+
 Scenes triggered by an `operator_order` event get a much higher turn
 ceiling than a normal reactive scene — `BRAIN_ORDER_MAX_STEPS` (default
 `80`) instead of `BRAIN_MAX_DIRECTOR_STEPS` (default `12`) — since carrying
@@ -422,6 +447,7 @@ It exits non-zero if any assertion fails.
 | `BRAIN_STATE_DIR` | `brain/state` | Where `usage.json` (daily token counter) is kept |
 | `BRAIN_DISABLED_FILE` | `brain/DISABLED` | Presence of this file is the kill switch |
 | `BRAIN_MCP_SERVER_PATH` | `brain/mcp-bridge.mjs` | Path to the stdio MCP server the Agent SDK spawns for game/ledger tools |
+| `BRAIN_TURN_TIMEOUT_SEC` | `300` | Hard wall-clock cap on a single director scene or actor turn's Agent SDK call before it is aborted and treated as a completed (timed-out) turn |
 | `BRAIN_MAX_DIRECTOR_STEPS` | `12` | `maxTurns` passed to the Agent SDK per director scene (tool-call steps within one turn) |
 | `BRAIN_ORDER_MAX_STEPS` | `80` | `maxTurns` for a director scene triggered by an `operator_order` event, instead of `BRAIN_MAX_DIRECTOR_STEPS` (see Lore Console above) |
 | `BRAIN_MAX_ACTOR_STEPS` | `6` | `maxTurns` passed to the Agent SDK per actor turn |
@@ -437,6 +463,7 @@ It exits non-zero if any assertion fails.
 | `BRAIN_CONSOLE_TOKEN` | `MCALIVE2_TOKEN` | Shared token required on every Lore Console request |
 | `BRAIN_UPDATE_CHECK_SEC` | `10` | Seconds between self-update checks against `origin/main`; `0` disables self-update (see Auto-update above) |
 | `BRAIN_UPDATE_CHECK_MIN` | unset | Fallback (minutes, converted to seconds) if `BRAIN_UPDATE_CHECK_SEC` is unset; ignored otherwise |
+| `BRAIN_UPDATE_IDLE_WAIT_SEC` | `600` | Cap on how long self-update's restart waits for the director/actor idle point before restarting anyway (`<=0` waits forever) |
 | `BRAIN_DEBUG` | `0` | `1` = also show debug-level lines (e.g. self-update's "up to date" check) in the default human-readable console |
 
 ## Files

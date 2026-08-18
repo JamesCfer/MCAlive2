@@ -49,8 +49,15 @@ export class SelfUpdater {
    * @param {() => Promise<void>} [opts.waitForIdle] - resolves once no
    *   director scene / actor turn is in flight. Defaults to resolving
    *   immediately (only relevant for tests that skip index.mjs's wiring).
-   * @param {() => (void | Promise<void>)} [opts.restart] - called once idle;
-   *   expected to run the existing stop() path then process.exit(75).
+   * @param {number} [opts.idleWaitCapSec] - hard cap (seconds) on how long
+   *   to wait for waitForIdle() before restarting anyway. Without this, a
+   *   wedged director scene or actor turn (see lib/timed-query.mjs's own,
+   *   independent turn timeout - should now be rare) would block
+   *   self-update forever, since waitForIdle() previously had no way to
+   *   give up. <=0 disables the cap (waits forever, old behavior).
+   * @param {() => (void | Promise<void>)} [opts.restart] - called once idle
+   *   (or once the idle-wait cap is hit); expected to run the existing
+   *   stop() path then process.exit(75).
    * @param {(cmd: string, args: string[], opts: {cwd: string}) => Promise<{stdout:string, stderr:string}>} [opts.runner]
    *   injectable process runner, for tests.
    */
@@ -59,6 +66,7 @@ export class SelfUpdater {
     repoRoot = path.resolve(BRAIN_ROOT, ".."),
     brainDir = BRAIN_ROOT,
     waitForIdle = () => Promise.resolve(),
+    idleWaitCapSec = 600,
     restart = () => process.exit(75),
     runner = defaultRunner,
   } = {}) {
@@ -66,10 +74,43 @@ export class SelfUpdater {
     this.repoRoot = repoRoot;
     this.brainDir = brainDir;
     this.waitForIdle = waitForIdle;
+    this.idleWaitCapSec = idleWaitCapSec;
     this.restart = restart;
     this.runner = runner;
     this.timer = null;
     this._checking = false; // reentrancy guard: never overlap two checks
+  }
+
+  /** Awaits waitForIdle(), but never longer than idleWaitCapSec (<=0 = no
+   * cap, waits forever). Returns { capped } - true when the cap fired before
+   * waitForIdle() resolved, i.e. we are about to restart with a turn
+   * presumed still in flight. */
+  async _waitForIdleWithCap() {
+    const capMs = Math.max(0, Number(this.idleWaitCapSec) || 0) * 1000;
+    if (!capMs) {
+      await this.waitForIdle();
+      return { capped: false };
+    }
+    let idleReached = false;
+    const idle = Promise.resolve(this.waitForIdle()).then(() => {
+      idleReached = true;
+    });
+    // Deliberately NOT unref'd (unlike this file's periodic check timer):
+    // this is a short, bounded wait we actually need to fire to make
+    // forward progress, not a background timer that should let the process
+    // exit early if nothing else is pending.
+    let timer;
+    const cap = new Promise((resolve) => {
+      timer = setTimeout(resolve, capMs);
+    });
+    await Promise.race([idle, cap]);
+    clearTimeout(timer);
+    if (idleReached) return { capped: false };
+    // The cap fired first - never await `idle` itself (it may never
+    // resolve at all for a genuinely wedged turn); just note its eventual
+    // settlement can't produce an unhandled rejection.
+    idle.catch(() => {});
+    return { capped: true };
   }
 
   /** Start the periodic timer. No-op (logged) if disabled via <=0 seconds. */
@@ -191,9 +232,12 @@ export class SelfUpdater {
     }
 
     log.info("self_update_restarting", {});
-    await this.waitForIdle();
+    const { capped } = await this._waitForIdleWithCap();
+    if (capped) {
+      log.warn("self_update_restarting_with_turn_in_flight", { idleWaitCapSec: this.idleWaitCapSec });
+    }
     await this.restart();
-    return { action: "restarted", npmInstalled };
+    return { action: "restarted", npmInstalled, idleCapped: capped };
   }
 }
 
