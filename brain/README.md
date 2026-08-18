@@ -91,11 +91,19 @@ run-forever.cmd
 ```
 
 While running, `lib/self-update.mjs` checks `origin/main` every
-`BRAIN_UPDATE_CHECK_MIN` minutes (default `30`; `0` disables self-update
+`BRAIN_UPDATE_CHECK_SEC` seconds (default `10`; `0` disables self-update
 entirely). It's also disabled gracefully — logged once, no crash — when
 `brain/..` isn't a git checkout at all. Each check is a plain
-`git rev-parse HEAD` vs. `git ls-remote origin main` (no GitHub API, no
-token, works with any plain git install):
+`git rev-parse HEAD` vs. `git ls-remote origin main` — a lightweight git ref
+lookup, not a GitHub API call (no token, works with any plain git install,
+and there's no rate limit to worry about) — so checking every 10 seconds is
+fine. A reentrancy guard means a check that happens to run long (a slow
+network) can never stack up overlapping checks: while one is in flight, the
+timer's next tick just no-ops instead of queuing another one behind it.
+
+`BRAIN_UPDATE_CHECK_MIN` (minutes) is still read as a fallback for anyone
+who already has it exported — converted to seconds — but
+`BRAIN_UPDATE_CHECK_SEC` wins whenever both are set.
 
 - **Same commit** → nothing happens (logged at debug level only — set
   `BRAIN_DEBUG=1` to see it — since this fires on every check and there's
@@ -356,7 +364,8 @@ It exits non-zero if any assertion fails.
 | `BRAIN_CONSOLE_BIND` | `127.0.0.1` | Interface the Lore Console binds to; `0.0.0.0` to reach it from the LAN |
 | `BRAIN_CONSOLE_PORT` | `7777` | Port the Lore Console listens on |
 | `BRAIN_CONSOLE_TOKEN` | `MCALIVE2_TOKEN` | Shared token required on every Lore Console request |
-| `BRAIN_UPDATE_CHECK_MIN` | `30` | Minutes between self-update checks against `origin/main`; `0` disables self-update (see Auto-update above) |
+| `BRAIN_UPDATE_CHECK_SEC` | `10` | Seconds between self-update checks against `origin/main`; `0` disables self-update (see Auto-update above) |
+| `BRAIN_UPDATE_CHECK_MIN` | unset | Fallback (minutes, converted to seconds) if `BRAIN_UPDATE_CHECK_SEC` is unset; ignored otherwise |
 | `BRAIN_DEBUG` | `0` | `1` = also show debug-level lines (e.g. self-update's "up to date" check) in the default human-readable console |
 
 ## Files

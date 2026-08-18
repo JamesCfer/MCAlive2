@@ -37,11 +37,12 @@ to `main`" — everything after that is automatic:
    don't bump the version are no-ops.
 2. **Server staging.** Each running server's plugin checks `auto-update.github-repo`'s
    GitHub releases on startup and then again every `auto-update.check-minutes`
-   (default 60 minutes; 0 = startup-only). When it finds a newer release with an
-   `MCAlive2.jar` asset, it downloads it into `plugins/update/` and never re-downloads
-   a version it has already staged. Paper's own update-folder mechanism means the
-   update **stages on restart N and applies on restart N+1** — nothing changes on disk
-   for the currently running server until it restarts.
+   (default 2 minutes; 0 = startup-only; don't go below 1 — GitHub's unauthenticated
+   API allows 60 requests/hour). When it finds a newer release with an `MCAlive2.jar`
+   asset, it downloads it into `plugins/update/` and never re-downloads a version it
+   has already staged. Paper's own update-folder mechanism means the update **stages
+   on restart N and applies on restart N+1** — nothing changes on disk for the
+   currently running server until it restarts.
 3. **Applying it.** By default that restart is up to you (or your process manager).
    Optionally, set `auto-update.apply-when-empty: true` in `config.yml` to have the
    plugin call a full server shutdown once an update is staged *and* the server has
@@ -51,6 +52,14 @@ to `main`" — everything after that is automatic:
    Windows one), otherwise the server just goes down and stays down.
 
 Set `auto-update.enabled: false` in `config.yml` to disable the check entirely.
+
+**Typical timings end to end:** for the plugin, a release lands ~1-2 minutes after
+the version-bump push (CI build + publish), a running server stages it within ~2
+minutes after that (its own `check-minutes` poll), and it applies on the server's
+next restart (or automatically once empty, if `apply-when-empty` is on). `brain/`
+is much faster since it just tracks a git ref, not a GitHub release: a push to
+`main` reaches every running brain within ~10 seconds (`BRAIN_UPDATE_CHECK_SEC`),
+which then pulls, npm-installs if needed, and restarts itself.
 
 `brain/` updates itself separately from the plugin — see
 [`brain/README.md`](brain/README.md) for its own update/versioning story.

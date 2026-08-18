@@ -112,13 +112,26 @@ async function main() {
   assert(DIRECTOR_WAKE_EVENTS.has("region_enter"), "region_enter is a director wake event (M2 re-enabled)");
   assert(DIRECTOR_WAKE_EVENTS.has("region_exit"), "region_exit is a director wake event (M2 re-enabled)");
 
-  assert(loadConfig({}).updateCheckMin === 30, "BRAIN_UPDATE_CHECK_MIN defaults to 30 minutes");
+  assert(loadConfig({}).updateCheckSec === 10, "BRAIN_UPDATE_CHECK_SEC defaults to 10 seconds");
   // num()/bool01() read directly off process.env (matching every other
   // config field's existing behavior in this file), not off the `env`
   // param loadConfig was called with - so exercise it the same way section
   // 1g does for BRAIN_DECISIONS_MAX_BYTES.
-  process.env.BRAIN_UPDATE_CHECK_MIN = "0";
-  assert(loadConfig().updateCheckMin === 0, "BRAIN_UPDATE_CHECK_MIN=0 is honored (disables self-update)");
+  process.env.BRAIN_UPDATE_CHECK_SEC = "0";
+  assert(loadConfig().updateCheckSec === 0, "BRAIN_UPDATE_CHECK_SEC=0 is honored (disables self-update)");
+  delete process.env.BRAIN_UPDATE_CHECK_SEC;
+
+  // --- BRAIN_UPDATE_CHECK_MIN fallback (minutes -> seconds) when the new
+  // seconds-based var is unset ---
+  process.env.BRAIN_UPDATE_CHECK_MIN = "2";
+  assert(loadConfig().updateCheckSec === 120, "BRAIN_UPDATE_CHECK_MIN=2 falls back to 120 seconds when BRAIN_UPDATE_CHECK_SEC is unset");
+  delete process.env.BRAIN_UPDATE_CHECK_MIN;
+
+  // --- BRAIN_UPDATE_CHECK_SEC wins when both are set ---
+  process.env.BRAIN_UPDATE_CHECK_SEC = "5";
+  process.env.BRAIN_UPDATE_CHECK_MIN = "2";
+  assert(loadConfig().updateCheckSec === 5, "BRAIN_UPDATE_CHECK_SEC wins over BRAIN_UPDATE_CHECK_MIN when both are set");
+  delete process.env.BRAIN_UPDATE_CHECK_SEC;
   delete process.env.BRAIN_UPDATE_CHECK_MIN;
 
   console.log("\n1b. Actor report parsing (pure, no process needed)");
@@ -251,7 +264,7 @@ async function main() {
       { match: (c, a) => c === "git" && has(a, "ls-remote"), result: ok("abc123\trefs/heads/main\n") },
     ]);
     let restarted = false;
-    const su = new SelfUpdater({ checkIntervalMin: 30, runner, restart: () => { restarted = true; } });
+    const su = new SelfUpdater({ checkIntervalSec: 10, runner, restart: () => { restarted = true; } });
     const result = await su.checkOnce();
     assert(result.action === "up_to_date", `same local/remote HEAD -> up_to_date (got ${result.action})`);
     assert(!restarted, "same hash never triggers a restart");
@@ -269,7 +282,7 @@ async function main() {
       { match: (c) => c === "npm", result: ok() },
     ]);
     let restarted = false;
-    const su = new SelfUpdater({ checkIntervalMin: 30, runner, restart: () => { restarted = true; } });
+    const su = new SelfUpdater({ checkIntervalSec: 10, runner, restart: () => { restarted = true; } });
     const result = await su.checkOnce();
     assert(result.action === "restarted", `different HEAD with a clean pull -> restarted (got ${result.action})`);
     assert(restarted, "restart callback was invoked after a successful update");
@@ -289,7 +302,7 @@ async function main() {
       { match: (c) => c === "npm", result: ok() },
     ]);
     let restarted = false;
-    const su = new SelfUpdater({ checkIntervalMin: 30, runner, restart: () => { restarted = true; } });
+    const su = new SelfUpdater({ checkIntervalSec: 10, runner, restart: () => { restarted = true; } });
     const result = await su.checkOnce();
     assert(result.action === "restarted", `different HEAD with a lockfile change -> restarted (got ${result.action})`);
     assert(restarted, "restart callback was invoked after a successful update with a lock change");
@@ -309,7 +322,7 @@ async function main() {
       { match: (c, a) => c === "git" && has(a, "pull", "--ff-only"), result: fail("error: Your local changes would be overwritten by merge") },
     ]);
     let restarted = false;
-    const su = new SelfUpdater({ checkIntervalMin: 30, runner, restart: () => { restarted = true; } });
+    const su = new SelfUpdater({ checkIntervalSec: 10, runner, restart: () => { restarted = true; } });
     const result = await su.checkOnce();
     assert(result.action === "pull_failed", `a failed git pull --ff-only -> pull_failed, not thrown (got ${result.action})`);
     assert(!restarted, "restart is never triggered when the pull failed");
@@ -322,19 +335,56 @@ async function main() {
       { match: (c, a) => c === "git" && has(a, "rev-parse", "--is-inside-work-tree"), result: fail("fatal: not a git repository") },
     ]);
     let restarted = false;
-    const su = new SelfUpdater({ checkIntervalMin: 30, runner, restart: () => { restarted = true; } });
+    const su = new SelfUpdater({ checkIntervalSec: 10, runner, restart: () => { restarted = true; } });
     const result = await su.checkOnce();
     assert(result.action === "disabled_not_git", `a non-git brain/.. -> disabled_not_git, not thrown (got ${result.action})`);
     assert(!restarted, "restart is never triggered when brain/.. is not a git checkout");
     assert(runner.calls.length === 1, "non-git dir stops after the single is-inside-work-tree probe, no further git calls");
   }
 
-  // --- checkIntervalMin <= 0 disables the timer entirely (start() never schedules) ---
+  // --- checkIntervalSec <= 0 disables the timer entirely (start() never schedules) ---
   {
-    const suDisabled = new SelfUpdater({ checkIntervalMin: 0, runner: fakeRunner([]) });
+    const suDisabled = new SelfUpdater({ checkIntervalSec: 0, runner: fakeRunner([]) });
     suDisabled.start();
-    assert(suDisabled.timer === null, "checkIntervalMin=0 never starts the periodic timer");
+    assert(suDisabled.timer === null, "checkIntervalSec=0 never starts the periodic timer");
     suDisabled.stop();
+  }
+
+  // --- reentrancy guard at a short (10s-analog) interval: a check slower
+  // than the tick interval must never overlap with itself, i.e. the
+  // setInterval callback firing mid-check is dropped, not queued. Uses a
+  // real timer (short interval) with a runner that intentionally outlasts
+  // it, and counts concurrent in-flight ls-remote calls. ---
+  {
+    let concurrentLsRemote = 0;
+    let maxConcurrentLsRemote = 0;
+    let lsRemoteCalls = 0;
+    const slowRunner = async (cmd, args, opts) => {
+      if (cmd === "git" && args.includes("rev-parse") && args.includes("--is-inside-work-tree")) {
+        return { stdout: "", stderr: "" };
+      }
+      if (cmd === "git" && args.includes("rev-parse") && args.includes("HEAD")) {
+        return { stdout: "abc123\n", stderr: "" };
+      }
+      if (cmd === "git" && args.includes("ls-remote")) {
+        lsRemoteCalls += 1;
+        concurrentLsRemote += 1;
+        maxConcurrentLsRemote = Math.max(maxConcurrentLsRemote, concurrentLsRemote);
+        // Deliberately slower than the timer's own interval below, so a
+        // second tick fires while this one is still "in flight".
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        concurrentLsRemote -= 1;
+        return { stdout: "abc123\trefs/heads/main\n", stderr: "" }; // same hash - no pull/restart needed
+      }
+      throw new Error(`slowRunner: unexpected call ${cmd} ${args.join(" ")}`);
+    };
+    const suReentrant = new SelfUpdater({ checkIntervalSec: 0.05, runner: slowRunner }); // 50ms ticks
+    suReentrant.start();
+    await new Promise((resolve) => setTimeout(resolve, 400)); // several 50ms ticks across two ~120ms checks
+    suReentrant.stop();
+    assert(maxConcurrentLsRemote <= 1, `overlapping ticks never run two checks concurrently (max concurrent ls-remote calls: ${maxConcurrentLsRemote})`);
+    assert(lsRemoteCalls >= 2, `a slow check (120ms) still gets picked up again after it finishes, across a 400ms window of 50ms ticks (got ${lsRemoteCalls} checks)`);
+    assert(lsRemoteCalls < 8, `overlapping ticks are skipped, not queued - far fewer checks ran than the ~8 ticks that fired in 400ms (got ${lsRemoteCalls})`);
   }
 
   console.log("\n2. Director debounce, actor routing, knowledge isolation");

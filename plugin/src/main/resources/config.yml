@@ -33,7 +33,8 @@ auto-update:
 
   # Minutes between re-checks of GitHub releases, via a repeating async task.
   # 0 = check once, at startup only (the old behavior).
-  check-minutes: 60
+  # Do not go below 1 - GitHub's unauthenticated API allows 60 requests/hour.
+  check-minutes: 2
 
   # If true, once an update is staged AND the server has had zero players for
   # empty-minutes, the plugin calls a full server shutdown so the staged jar gets

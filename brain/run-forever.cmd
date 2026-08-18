@@ -4,7 +4,7 @@ REM crash recovery.
 REM
 REM Loop contract (matches lib/self-update.mjs's restart trigger):
 REM   - exit code 75  -> the brain pulled new code and asked to be restarted
-REM                      (see BRAIN_UPDATE_CHECK_MIN). Loop again immediately.
+REM                      (see BRAIN_UPDATE_CHECK_SEC). Loop again immediately.
 REM   - exit code 0   -> deliberate stop. Break the loop, exit 0.
 REM   - any other
 REM     nonzero code  -> crash. Wait 10 seconds, then loop again.

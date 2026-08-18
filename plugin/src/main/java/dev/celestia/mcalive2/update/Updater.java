@@ -61,7 +61,7 @@ public final class Updater {
 
         stagedVersion = readStagedVersion();
 
-        int checkMinutes = plugin.getConfig().getInt("auto-update.check-minutes", 60);
+        int checkMinutes = plugin.getConfig().getInt("auto-update.check-minutes", 2);
         if (checkMinutes > 0) {
             long periodTicks = checkMinutes * 60L * 20L;
             plugin.getServer().getScheduler()

@@ -310,14 +310,15 @@ export async function main(env = process.env) {
     if (consoleServer) return consoleServer.stop();
   };
 
-  // Self-update: check origin/main on a timer (BRAIN_UPDATE_CHECK_MIN,
-  // default 30min, 0=disabled); when it pulls new code it waits for the
+  // Self-update: check origin/main on a timer (BRAIN_UPDATE_CHECK_SEC,
+  // default 10s, 0=disabled; BRAIN_UPDATE_CHECK_MIN still honored as a
+  // fallback, converted to seconds); when it pulls new code it waits for the
   // director/actor idle point above, runs the same stop() path a manual
   // shutdown would, then exits 75 - run-forever.cmd (brain/run-forever.cmd)
   // interprets exit 75 as "restart me immediately", any other nonzero exit
   // as a crash (restart after a short delay), and 0 as a deliberate stop.
   const selfUpdater = new SelfUpdater({
-    checkIntervalMin: config.updateCheckMin,
+    checkIntervalSec: config.updateCheckSec,
     waitForIdle: waitUntilIdle,
     restart: () => {
       stop();

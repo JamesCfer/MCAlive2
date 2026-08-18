@@ -43,7 +43,7 @@ const LOCKFILE_PATHS = new Set(["brain/package-lock.json", "package-lock.json"])
 export class SelfUpdater {
   /**
    * @param {object} opts
-   * @param {number} opts.checkIntervalMin - minutes between checks; <=0 disables entirely.
+   * @param {number} opts.checkIntervalSec - seconds between checks; <=0 disables entirely.
    * @param {string} [opts.repoRoot] - git checkout root (brain/..).
    * @param {string} [opts.brainDir] - where `npm install` runs (brain/).
    * @param {() => Promise<void>} [opts.waitForIdle] - resolves once no
@@ -55,14 +55,14 @@ export class SelfUpdater {
    *   injectable process runner, for tests.
    */
   constructor({
-    checkIntervalMin,
+    checkIntervalSec,
     repoRoot = path.resolve(BRAIN_ROOT, ".."),
     brainDir = BRAIN_ROOT,
     waitForIdle = () => Promise.resolve(),
     restart = () => process.exit(75),
     runner = defaultRunner,
   } = {}) {
-    this.checkIntervalMin = checkIntervalMin;
+    this.checkIntervalSec = checkIntervalSec;
     this.repoRoot = repoRoot;
     this.brainDir = brainDir;
     this.waitForIdle = waitForIdle;
@@ -72,14 +72,19 @@ export class SelfUpdater {
     this._checking = false; // reentrancy guard: never overlap two checks
   }
 
-  /** Start the periodic timer. No-op (logged) if disabled via <=0 minutes. */
+  /** Start the periodic timer. No-op (logged) if disabled via <=0 seconds. */
   start() {
-    if (!this.checkIntervalMin || this.checkIntervalMin <= 0) {
-      log.info("self_update_disabled", { reason: "BRAIN_UPDATE_CHECK_MIN=0" });
+    if (!this.checkIntervalSec || this.checkIntervalSec <= 0) {
+      log.info("self_update_disabled", { reason: "BRAIN_UPDATE_CHECK_SEC=0" });
       return this;
     }
-    const intervalMs = this.checkIntervalMin * 60000;
+    const intervalMs = this.checkIntervalSec * 1000;
     this.timer = setInterval(() => {
+      // Reentrancy: checkOnce() below no-ops immediately (returns
+      // "skipped_already_checking") if a prior check is still in flight, so
+      // a check slower than the interval (e.g. a 15s network hiccup against
+      // a 10s timer) simply drops the overlapping tick rather than queuing
+      // a pile of pending checks behind it.
       this.checkOnce().catch((e) =>
         log.error("self_update_check_crashed", { error: String((e && e.stack) || e) })
       );
@@ -137,8 +142,8 @@ export class SelfUpdater {
     }
 
     if (remoteHead === localHead) {
-      // Debug-suppressed: this fires on every check (default every 30
-      // minutes) and "nothing to do" is not worth an operator's attention.
+      // Debug-suppressed: this fires on every check (default every 10
+      // seconds) and "nothing to do" is not worth an operator's attention.
       log.debug("self_update_up_to_date", { head: shortSha(localHead) });
       return { action: "up_to_date" };
     }
@@ -166,7 +171,7 @@ export class SelfUpdater {
     } catch (e) {
       // Dirty tree / diverged history / network blip - never leave the
       // checkout worse off than we found it, and never retry-loop hot: the
-      // next scheduled check (default 30min) will simply try again.
+      // next scheduled check (default 10s) will simply try again.
       log.warn("self_update_pull_failed", { error: describeErr(e) });
       return { action: "pull_failed" };
     }

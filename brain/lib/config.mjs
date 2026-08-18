@@ -22,6 +22,24 @@ function bool01(name, fallback) {
   return v === "1" || v.toLowerCase() === "true";
 }
 
+/** Seconds-based knob with a minutes-based fallback for anyone who already
+ * exported the old var: BRAIN_UPDATE_CHECK_SEC wins when set; otherwise
+ * BRAIN_UPDATE_CHECK_MIN (converted to seconds) is honored; otherwise
+ * `fallbackSec`. Mirrors num()'s "read straight off process.env" behavior. */
+function secWithMinFallback(secName, minName, fallbackSec) {
+  const secRaw = process.env[secName];
+  if (secRaw !== undefined && secRaw !== "") {
+    const n = Number(secRaw);
+    if (Number.isFinite(n)) return n;
+  }
+  const minRaw = process.env[minName];
+  if (minRaw !== undefined && minRaw !== "") {
+    const n = Number(minRaw);
+    if (Number.isFinite(n)) return n * 60;
+  }
+  return fallbackSec;
+}
+
 // The name the mcalive2 MCP tool server is registered under. Tool names as
 // seen by the model are namespaced "mcp__<this>__<toolName>".
 export const MCP_SERVER_NAME = "mcalive2";
@@ -95,10 +113,14 @@ export function loadConfig(env = process.env) {
     reconnectBaseMs: num("BRAIN_RECONNECT_BASE_MS", 1000),
     reconnectMaxMs: num("BRAIN_RECONNECT_MAX_MS", 30000),
 
-    // Self-update: minutes between checking origin/main for new brain code.
-    // 0 disables entirely; also disabled (gracefully) when brain/.. isn't a
-    // git checkout at all - see lib/self-update.mjs.
-    updateCheckMin: num("BRAIN_UPDATE_CHECK_MIN", 30),
+    // Self-update: seconds between checking origin/main for new brain code
+    // (each check is one lightweight `git ls-remote origin main`, not a
+    // GitHub API call, so a short interval is cheap). 0 disables entirely;
+    // also disabled (gracefully) when brain/.. isn't a git checkout at all -
+    // see lib/self-update.mjs. BRAIN_UPDATE_CHECK_MIN (minutes) is still
+    // read as a fallback for anyone who already exported it, converted to
+    // seconds; BRAIN_UPDATE_CHECK_SEC wins when both are set.
+    updateCheckSec: secWithMinFallback("BRAIN_UPDATE_CHECK_SEC", "BRAIN_UPDATE_CHECK_MIN", 10),
 
     npcChatRangeBlocks: num("BRAIN_NPC_CHAT_RANGE", 8),
     actorHistoryTurns: num("BRAIN_ACTOR_HISTORY_TURNS", 20),
