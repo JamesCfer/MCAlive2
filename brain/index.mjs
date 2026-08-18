@@ -14,10 +14,9 @@
 //     of an NPC (event carries data.nearNpcId)   -> an actor turn
 //   - player_chat with no nearby NPC, and every
 //     other sense event (join/death/explored/
-//     npc_attacked/npc_death)                    -> debounced into the
+//     npc_attacked/npc_death/player_idle_scene/
+//     region_enter/region_exit)                  -> debounced into the
 //                                                    director's scene queue
-//     (idle_scene/region_enter/exit are M2 - the
-//      plugin doesn't emit them yet)
 //   - player_quit                                -> presence tracking only,
 //                                                    never wakes anything
 //
@@ -27,6 +26,7 @@
 // two rapid interactions with the same NPC by the same player never race.
 
 import fs from "node:fs";
+import path from "node:path";
 import { loadConfig, DIRECTOR_WAKE_EVENTS } from "./lib/config.mjs";
 import { log } from "./lib/logger.mjs";
 import { loadLore, watchLore } from "./lib/lore.mjs";
@@ -37,6 +37,7 @@ import { DirectorScheduler } from "./lib/director-scheduler.mjs";
 import { ActorMemory } from "./lib/actor-memory.mjs";
 import { runDirectorTurn } from "./lib/director-turn.mjs";
 import { runActorTurn } from "./lib/actor-turn.mjs";
+import { parseActorReport } from "./lib/actor-report.mjs";
 
 export async function main(env = process.env) {
   const config = loadConfig(env);
@@ -54,7 +55,9 @@ export async function main(env = process.env) {
 
   const usage = await new UsageTracker(config.stateDir, config.dailyTokenBudget).load();
   const rateLimiter = new RateLimiter(config.maxTurnsPerMin, 60000);
-  const actorMemory = new ActorMemory(config.actorHistoryTurns);
+  const actorMemory = new ActorMemory(config.actorHistoryTurns, {
+    statePath: path.join(config.stateDir, "conversations.json"),
+  }).load();
 
   const lore = { text: await loadLore(config.loreDir) };
   const loreWatch = watchLore(config.loreDir, config.loreRefreshMs, (text) => {
@@ -168,24 +171,17 @@ export async function main(env = process.env) {
 
     if (!result.dryRun && result.reportText) {
       actorMemory.record(npcId, player, "npc", result.reportText);
-      const report = extractReport(result.reportText);
+      // Absent report = fine (parseActorReport returns null); malformed
+      // report = logged by parseActorReport itself and ignored - either
+      // way a broken actor reply never crashes the brain.
+      const report = parseActorReport(result.reportText);
       if (report) {
-        // Hand the actor's proposed facts/promises/quest offer to the
-        // DIRECTOR to validate into the ledger next scene, rather than
-        // trusting the (cheap, knowledge-isolated) actor to write the
-        // ledger itself.
+        // Hand the actor's proposed facts/promise/quest offer to the
+        // DIRECTOR (as structured JSON, not raw text) to validate into the
+        // ledger next scene, rather than trusting the (cheap,
+        // knowledge-isolated) actor to write the ledger itself.
         scheduler.push("actor_report", { npcId, player, report });
       }
-    }
-  }
-
-  function extractReport(text) {
-    const m = /```report\s*([\s\S]*?)```/.exec(text || "");
-    if (!m) return null;
-    try {
-      return JSON.parse(m[1]);
-    } catch {
-      return null;
     }
   }
 
@@ -249,6 +245,7 @@ export async function main(env = process.env) {
     stop() {
       bridge.stop();
       loreWatch.stop();
+      actorMemory.saveSync();
     },
   };
 }

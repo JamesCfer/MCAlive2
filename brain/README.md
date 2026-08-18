@@ -34,8 +34,8 @@ routes every pushed sense event one of two ways:
   default range `BRAIN_NPC_CHAT_RANGE=8` blocks, and stamps the nearby
   NPC's id on the event) → an actor turn for that NPC.
 - **Everything else** — `player_join`, `player_death`, `npc_attacked`,
-  `npc_death`, `player_explored` (`player_idle_scene` and `region_enter/exit`
-  are M2 - the plugin doesn't emit them yet), and `player_chat` with no
+  `npc_death`, `player_explored`, `player_idle_scene`, `region_enter`,
+  `region_exit`, and `player_chat` with no
   nearby NPC — is debounced (`BRAIN_DEBOUNCE_MS`,
   default 2500ms) into a batch and handed to **one director turn**
   ("scene"). Events arriving while a scene is mid-turn are queued for the

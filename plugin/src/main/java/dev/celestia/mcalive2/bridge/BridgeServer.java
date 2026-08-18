@@ -9,6 +9,7 @@ import org.java_websocket.server.WebSocketServer;
 
 import java.net.InetSocketAddress;
 import java.util.Collections;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -23,6 +24,12 @@ public class BridgeServer extends WebSocketServer {
     private final CommandDispatcher dispatcher;
     private final String token;
     private final Set<WebSocket> authed = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    /**
+     * Wall-clock time (millis) of the most recent broadcast event that involved each
+     * player, tracked centrally here since every event flows through {@link #broadcastEvent}.
+     * Backs the {@code player_idle_scene} sense (see {@link dev.celestia.mcalive2.senses.IdleSceneTracker}).
+     */
+    private final Map<String, Long> lastEventAt = new ConcurrentHashMap<>();
 
     public BridgeServer(InetSocketAddress address, MCAlive2Plugin plugin,
                          CommandDispatcher dispatcher, String token) {
@@ -88,6 +95,9 @@ public class BridgeServer extends WebSocketServer {
 
     /** Push an event to every authenticated client. Safe to call from any thread. */
     public void broadcastEvent(String event, JsonObject data) {
+        if (data != null && data.has("player") && !data.get("player").isJsonNull()) {
+            lastEventAt.put(data.get("player").getAsString(), System.currentTimeMillis());
+        }
         JsonObject msg = new JsonObject();
         msg.addProperty("event", event);
         msg.add("data", data);
@@ -95,6 +105,11 @@ public class BridgeServer extends WebSocketServer {
         for (WebSocket ws : authed) {
             if (ws.isOpen()) ws.send(s);
         }
+    }
+
+    /** Millis-since-epoch of the last broadcast event involving this player, or null if none seen yet. */
+    public Long lastEventAt(String player) {
+        return lastEventAt.get(player);
     }
 
     public int clientCount() {

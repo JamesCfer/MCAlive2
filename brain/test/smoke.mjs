@@ -22,6 +22,17 @@
 //   9. the daily usage budget file is written on startup
 //   10. reconnect-with-backoff against a refused port keeps the process
 //      alive and keeps retrying instead of exiting
+//   11. the re-enabled M2 wake events (player_idle_scene, region_enter,
+//      region_exit) reach the director's scene queue, batched together
+//   12. the director's dry-run prompt is a structured briefing: a SCENE
+//      section grouped per player, and a STANDING ORDERS section carrying
+//      the adjudication procedure and the actor-report validation rule
+//   13. actor-report parsing (pure, no process): a well-formed
+//      ```report``` block parses to structured JSON, an absent or
+//      malformed block is ignored without crashing
+//   14. actor conversation memory persists to conversations.json and
+//      reloads correctly across a simulated restart, capped at the
+//      most-recently-active pairs
 //
 // Exits non-zero on any failure.
 
@@ -30,7 +41,9 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
-import { namespacedTool, MCP_SERVER_NAME, ACTOR_TOOLS, actorDisallowedTools } from "../lib/config.mjs";
+import { namespacedTool, MCP_SERVER_NAME, ACTOR_TOOLS, actorDisallowedTools, DIRECTOR_WAKE_EVENTS } from "../lib/config.mjs";
+import { parseActorReport } from "../lib/actor-report.mjs";
+import { ActorMemory } from "../lib/actor-memory.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BRAIN_DIR = path.resolve(__dirname, "..");
@@ -91,6 +104,48 @@ async function main() {
   assert(disallowed.includes(namespacedTool("npc_context", MCP_SERVER_NAME)), "npc_context (knowledge isolation bypass risk) is denied to actors");
   assert(disallowed.includes(namespacedTool("ledger_put", MCP_SERVER_NAME)), "ledger_put is denied to actors");
   assert(disallowed.includes(namespacedTool("set_block", MCP_SERVER_NAME)), "set_block is denied to actors");
+
+  assert(DIRECTOR_WAKE_EVENTS.has("player_idle_scene"), "player_idle_scene is a director wake event (M2 re-enabled)");
+  assert(DIRECTOR_WAKE_EVENTS.has("region_enter"), "region_enter is a director wake event (M2 re-enabled)");
+  assert(DIRECTOR_WAKE_EVENTS.has("region_exit"), "region_exit is a director wake event (M2 re-enabled)");
+
+  console.log("\n1b. Actor report parsing (pure, no process needed)");
+  const wellFormed = parseActorReport(
+    'Hello there!\n```report\n{"facts": [{"text": "The well ran dry.", "knownBy": ["mara-baker"]}], "promise": {"toWhom": "Steve", "text": "flour by dawn"}, "questOffered": null, "mood": "worried"}\n```'
+  );
+  assert(wellFormed && Array.isArray(wellFormed.facts) && wellFormed.facts[0].text === "The well ran dry.", "well-formed report block parses to structured JSON");
+  assert(wellFormed && wellFormed.facts[0].knownBy[0] === "mara-baker", "parsed report preserves knownBy on facts");
+  assert(wellFormed && wellFormed.promise.toWhom === "Steve", "parsed report preserves the promise object");
+  assert(wellFormed && wellFormed.mood === "worried", "parsed report preserves mood");
+
+  assert(parseActorReport("just dialogue, no report block") === null, "absent report block parses to null without crashing");
+  assert(parseActorReport(undefined) === null, "undefined actor text parses to null without crashing");
+  const malformed = parseActorReport('Hi!\n```report\n{not valid json at all\n```');
+  assert(malformed === null, "malformed report block (bad JSON) is ignored, not thrown");
+  const nonObject = parseActorReport('Hi!\n```report\n["just", "an", "array"]\n```');
+  assert(nonObject === null, "a report block that parses to a non-object is ignored");
+
+  console.log("\n1c. Actor memory persistence across a simulated restart");
+  const memStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "brain-conv-"));
+  const memStatePath = path.join(memStateDir, "conversations.json");
+  const mem1 = new ActorMemory(20, { statePath: memStatePath, saveDebounceMs: 50 }).load();
+  mem1.record("mara-baker", "Steve", "player", "hello there");
+  mem1.record("mara-baker", "Steve", "npc", "welcome to the bakery");
+  mem1.saveSync();
+  assert(fs.existsSync(memStatePath), "conversations.json was written to disk");
+
+  const mem2 = new ActorMemory(20, { statePath: memStatePath, saveDebounceMs: 50 }).load();
+  const reloaded = mem2.transcript("mara-baker", "Steve");
+  assert(reloaded.recent.length === 2, `reloaded transcript has both turns after a simulated restart (got ${reloaded.recent.length})`);
+  assert(reloaded.recent[0].text === "hello there", "reloaded transcript preserves turn order/content across restart");
+
+  console.log("\n1d. Actor memory caps at the most-recently-active pairs");
+  const mem3 = new ActorMemory(20, { statePath: path.join(memStateDir, "capped.json"), maxPairs: 3, saveDebounceMs: 50 });
+  for (let i = 0; i < 5; i++) {
+    mem3.record(`npc-${i}`, "Steve", "player", `msg ${i}`);
+  }
+  assert(mem3.sessions.size === 3, `actor memory caps at maxPairs (got ${mem3.sessions.size})`);
+  assert(mem3.sessions.has("npc-4::Steve") && mem3.sessions.has("npc-3::Steve") && mem3.sessions.has("npc-2::Steve"), "cap evicts the least-recently-active pairs first, keeping the most recent ones");
 
   console.log("\n2. Director debounce, actor routing, knowledge isolation");
   const port1 = 8899;
@@ -176,6 +231,31 @@ async function main() {
   if (second) {
     assert(second.events.includes("npc_death"), "second scene is for the npc_death event");
     assert(second.batchSize === 1, `second scene was not merged with the first (batchSize=${second.batchSize})`);
+  }
+
+  // --- re-enabled M2 wake events (player_idle_scene/region_enter/region_exit) ---
+  const gotThirdScene = await waitFor(brain1.logs, () => sceneStarts().length >= 3, 3000);
+  assert(gotThirdScene, "a third director scene started for the region_enter/region_exit/player_idle_scene events");
+  const third = sceneStarts()[2];
+  if (third) {
+    assert(third.events.includes("region_enter"), "third scene includes region_enter");
+    assert(third.events.includes("region_exit"), "third scene includes region_exit");
+    assert(third.events.includes("player_idle_scene"), "third scene includes player_idle_scene");
+    assert(third.batchSize === 3, `third scene batched all three re-enabled M2 events together (got batchSize=${third.batchSize})`);
+  }
+
+  // --- director briefing structure: SCENE grouping + adjudication procedure ---
+  const directorDryRun = brain1.logs.find((l) => l.msg === "dry_run_director_turn");
+  assert(directorDryRun, "director dry-run prompt was logged");
+  if (directorDryRun) {
+    assert(directorDryRun.prompt.includes("STANDING ORDERS"), "director prompt has a STANDING ORDERS section");
+    assert(directorDryRun.prompt.includes("SCENE"), "director prompt has a SCENE section");
+    assert(directorDryRun.prompt.includes("ADJUDICATION PROCEDURE"), "director prompt has an explicit adjudication procedure section");
+    assert(directorDryRun.prompt.includes("Is it plausible in fiction given ledger facts"), "director prompt includes the adjudication procedure steps");
+    assert(directorDryRun.prompt.includes("Silence and inaction remain first-class choices"), "director prompt states silence/inaction as first-class choices");
+    assert(directorDryRun.prompt.includes("REQUIRED FINAL SUMMARY"), "director prompt requires a final summary paragraph");
+    assert(directorDryRun.prompt.includes("Actors propose, the director disposes"), "director prompt instructs validating actor reports before ledger writes");
+    assert(directorDryRun.prompt.includes("Player: Steve"), "director prompt groups the scene per player");
   }
 
   brain1.child.kill();

@@ -24,15 +24,17 @@ npc_look_at and npc_pose for small physical beats. You have no other
 abilities: you cannot change the world, spawn anything, or edit the ledger.
 
 If something noteworthy happens in this conversation that the world should
-remember (a new fact you revealed, a promise you made, a quest you offered),
-end your reply with a single fenced block:
+remember (a new fact you revealed, a promise you made, a quest you offered,
+or your mood shifting), end your reply with a single fenced block:
 
 \`\`\`report
-{"facts": [{"text": "..."}], "promises": [{"text": "...", "toWhom": "..."}], "questOffered": null}
+{"facts": [{"text": "...", "knownBy": ["your-npc-id"]}], "promise": {"toWhom": "...", "text": "...", "due": null}, "questOffered": null, "mood": "..."}
 \`\`\`
 
-Omit fields that do not apply. The director validates and records this into
-the ledger - you never write to the ledger yourself.`;
+Omit fields (or the whole block) that do not apply - this is a proposal,
+not a ledger write: the director validates it against the ledger before
+anything is recorded, and may discard any part of it. You never write to
+the ledger yourself.`;
 
 /**
  * @param {object} params

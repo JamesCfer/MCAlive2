@@ -15,33 +15,79 @@
 import { log } from "./logger.mjs";
 import { MCP_SERVER_NAME } from "./config.mjs";
 
-const STANDING_REMINDER = `You are the DIRECTOR of this fantasy world (MCAlive2) - the single AI that
+// The briefing is deliberately structured like an actual duty briefing
+// rather than a raw event dump: STANDING ORDERS first (role + the explicit
+// adjudication procedure - unchanged from turn to turn), then the SCENE
+// (this turn's batched events, grouped per player with timestamps
+// collapsed), then the required final summary instruction. The lore itself
+// (brain/lore/*.md) is carried unchanged as the system prompt - this
+// STANDING ORDERS section restates the operating procedure, it does not
+// replace the lore.
+const STANDING_ORDERS = `You are the DIRECTOR of this fantasy world (MCAlive2) - the single AI that
 adjudicates everything that is not direct NPC dialogue. You run event-driven
-and unattended: the JSON below is a batch of sense events that happened just
-now. Follow the standing rules carried in your system prompt (brain/lore/)
-exactly. In particular:
+and unattended. Follow the standing rules carried in your system prompt
+(brain/lore/) exactly - they are unchanged and still govern everything below.
 
-1. Perceive the event batch below.
-2. Remember: use ledger_query / ledger_get / npc_context to pull the ledger
-   facts, NPCs, places, quests relevant to these events before deciding
-   anything. Do not invent facts the ledger does not support.
-3. Decide: silence is a first-class outcome - if nothing warrants a
-   reaction, do nothing and say nothing. If a player declared or attempted
-   an action with real stakes, adjudicate it from fiction + ledger facts
-   only (no randomness, no dice): is it possible, what does it cost, what
-   changes as a result? Any consequence you decide MUST be written into the
-   world via actuators (npc_say, world/NPC tools, etc.) - never as plain
-   narration text in your reply, since chat is dialogue-only and there is
-   no narration channel.
-4. Act & record: make the actuator calls, then write every consequential
-   decision into the ledger (facts learned, promises made, quest beats
-   advanced, places created) via ledger_put. If you don't record it, it
-   didn't happen for next time.
+ADJUDICATION PROCEDURE
+For each player intention expressed in chat or by deed:
+  1. Is it plausible in fiction given ledger facts?
+  2. What does it cost or risk?
+  3. Decide the outcome - no randomness, outcomes flow from fiction and
+     established facts.
+  4. Express the outcome ONLY through world tools (never chat), and speak
+     ONLY through npc_say when an NPC is present with a reason to speak.
+  5. Record consequences to the ledger (facts with correct knownBy,
+     promises, quest beats, player history).
+Silence and inaction remain first-class choices - most heartbeat scenes
+deserve nothing. Before deciding anything, use ledger_query / ledger_get /
+npc_context to pull the facts, NPCs, places, and quests relevant to this
+scene. Do not invent facts the ledger does not support.
 
-Offers are offers, never railroads. Do not force outcomes on players.`;
+ACTOR REPORTS
+If the scene below includes an "actor_report" event, its facts/promise/
+questOffered/mood are PROPOSALS from a cheap, knowledge-isolated NPC actor -
+never pre-validated. Actors propose, the director disposes: check each
+proposal against the ledger and the fiction before writing anything via
+ledger_put, and discard anything implausible, contradictory, or out of
+character. Never write an actor's proposal to the ledger unexamined.
+
+Offers are offers, never railroads. Do not force outcomes on players.
+
+REQUIRED FINAL SUMMARY
+End your reply with one short paragraph stating what you decided and why,
+or plainly "no action" if you did nothing. This is the audit trail for this
+scene - it is required even when the outcome is silence.`;
+
+/** Group a debounced event batch by player (falling back to "world" for
+ * events with no player), and collapse per-event timestamps down to a
+ * single scene time span rather than repeating a full ISO timestamp on
+ * every line. */
+export function formatScene(batch) {
+  if (!batch.length) return "(empty batch)";
+
+  const groups = new Map();
+  for (const e of batch) {
+    const player = (e.data && e.data.player) || "world";
+    if (!groups.has(player)) groups.set(player, []);
+    groups.get(player).push(e);
+  }
+
+  const times = batch.map((e) => e.at).filter(Boolean).sort();
+  const span = times.length ? (times[0] === times[times.length - 1] ? times[0] : `${times[0]} .. ${times[times.length - 1]}`) : "unknown";
+
+  const lines = [`Scene span: ${span}`, ""];
+  for (const [player, events] of groups) {
+    lines.push(`Player: ${player}`);
+    for (const e of events) {
+      const { player: _p, ...rest } = e.data || {};
+      lines.push(`  - ${e.event}: ${JSON.stringify(rest)}`);
+    }
+  }
+  return lines.join("\n");
+}
 
 export function buildPrompt(batch) {
-  return `${STANDING_REMINDER}\n\nEvent batch (JSON):\n${JSON.stringify(batch, null, 1)}`;
+  return `STANDING ORDERS\n${STANDING_ORDERS}\n\nSCENE\n${formatScene(batch)}`;
 }
 
 /**
@@ -108,5 +154,9 @@ export async function runDirectorTurn({ batch, systemPrompt, config }) {
     totalTokens: inputTokens + outputTokens,
     result: resultText,
   });
+  // The required final summary paragraph is the audit trail for this scene
+  // (DESIGN.md / adjudication procedure): log it as its own info line so it
+  // is easy to grep/tail independent of the raw turn-complete record above.
+  log.info("director_scene_summary", { summary: resultText });
   return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, dryRun: false };
 }

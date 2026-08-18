@@ -19,3 +19,13 @@ npc-chat-radius: 20.0
 # Radius in blocks within which player chat is tagged with the nearest NPC
 # (nearNpcId/nearNpcName), routing the brain to an actor turn for that NPC.
 npc-chat-range: 8
+
+# Minutes a player must go with zero other broadcast events (join/chat/explored/combat/
+# etc) before a light player_idle_scene heartbeat fires for them. 0 disables this sense.
+idle-scene-minutes: 12
+
+# Self-update: on startup, checks GitHub releases and stages a newer MCAlive2.jar in
+# plugins/update/ (Paper applies it automatically on the next server restart).
+auto-update:
+  enabled: true
+  github-repo: JamesCfer/MCAlive2

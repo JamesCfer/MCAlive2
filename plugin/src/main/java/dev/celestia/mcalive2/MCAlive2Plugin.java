@@ -9,6 +9,9 @@ import dev.celestia.mcalive2.bridge.CommandDispatcher;
 import dev.celestia.mcalive2.npc.NpcManager;
 import dev.celestia.mcalive2.senses.ExploredTracker;
 import dev.celestia.mcalive2.senses.GameListeners;
+import dev.celestia.mcalive2.senses.IdleSceneTracker;
+import dev.celestia.mcalive2.senses.RegionSense;
+import dev.celestia.mcalive2.update.Updater;
 import net.kyori.adventure.text.Component;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
@@ -65,6 +68,21 @@ public final class MCAlive2Plugin extends JavaPlugin {
             ledgerActuators.save();
             exploredTracker.saveIfDirty();
         }, 6000L, 6000L);
+
+        // player_idle_scene heartbeat sense, period from config (0 = disabled)
+        int idleMinutes = getConfig().getInt("idle-scene-minutes", 12);
+        if (idleMinutes > 0) {
+            IdleSceneTracker idleTracker = new IdleSceneTracker(this, bridge);
+            long idlePeriodTicks = idleMinutes * 60L * 20L;
+            getServer().getScheduler().runTaskTimer(this, idleTracker::tick, idlePeriodTicks, idlePeriodTicks);
+        }
+
+        // region_enter / region_exit sense, every 20 ticks (1s)
+        RegionSense regionSense = new RegionSense(bridge, ledgerActuators.ledger());
+        getServer().getScheduler().runTaskTimer(this, regionSense::tick, 20L, 20L);
+
+        // self-update check against GitHub releases
+        new Updater(this).checkAsync();
 
         getLogger().info("MCAlive2 bridge listening on ws://" + host + ":" + port);
         if ("change-me".equals(token)) {

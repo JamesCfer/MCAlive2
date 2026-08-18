@@ -13,6 +13,9 @@
 //   t=900ms   player_chat WITH nearNpcId -> kess-smith (also an ACTOR turn;
 //             proves this NPC only ever sees ITS OWN facts, not mara's)
 //   t=2200ms  npc_death (well outside the debounce window -> its own scene)
+//   t=3000ms  region_enter   \
+//   t=3050ms  region_exit     } re-enabled M2 wake events, batched into a
+//   t=3100ms  player_idle_scene / THIRD scene, separate from npc_death
 //
 // Env:
 //   MOCK_BRIDGE_PORT   port to listen on (default 8899)
@@ -89,6 +92,9 @@ function scheduleEvents(sock) {
     [700, "npc_interact", { npcId: "mara-baker", player: "Steve", location: { x: 500, y: 75, z: 2 } }],
     [900, "player_chat", { player: "Steve", message: "what have you found?", nearNpcId: "kess-smith", location: { x: 505, y: 75, z: -3 } }],
     [2200, "npc_death", { npcId: "sella", npcName: "Sella", dead: true, location: { x: 502, y: 75, z: 2 } }],
+    [3000, "region_enter", { player: "Steve", regionId: "village-square", regionName: "Village Square", location: { x: 490, y: 75, z: 3 } }],
+    [3050, "region_exit", { player: "Steve", regionId: "village-square", regionName: "Village Square", location: { x: 492, y: 75, z: 3 } }],
+    [3100, "player_idle_scene", { player: "Steve", location: { x: 493, y: 75, z: 3 }, minutesQuiet: 5 }],
   ];
   for (const [delay, event, data] of timeline) {
     setTimeout(() => send(sock, { event, data }), delay);
