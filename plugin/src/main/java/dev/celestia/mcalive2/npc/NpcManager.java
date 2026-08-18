@@ -57,6 +57,8 @@ public class NpcManager {
     private final Map<String, NpcData> npcs = new ConcurrentHashMap<>();
     private final Map<String, BukkitTask> walkers = new ConcurrentHashMap<>();
     private final Random random = new Random();
+    /** Notified (with the NPC id) whenever an NPC is permanently killed or removed - e.g. JobManager uses this to cancel any running job. */
+    private final List<java.util.function.Consumer<String>> removalListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     public NpcManager(MCAlive2Plugin plugin) {
         this.plugin = plugin;
@@ -82,6 +84,15 @@ public class NpcManager {
 
     public int count() {
         return npcs.size();
+    }
+
+    /** Register a callback fired (with the NPC id) whenever an NPC is permanently killed or removed. */
+    public void onRemoval(java.util.function.Consumer<String> listener) {
+        removalListeners.add(listener);
+    }
+
+    private void notifyRemoved(String id) {
+        for (java.util.function.Consumer<String> l : removalListeners) l.accept(id);
     }
 
     /** Spawn the backing entity for an NPC record and register it. */
@@ -163,6 +174,7 @@ public class NpcManager {
             if (entity != null) entity.remove();
         }
         removeTaggedEntities(id, null);
+        notifyRemoved(id);
         return true;
     }
 
@@ -190,6 +202,7 @@ public class NpcManager {
         cancelWalk(data.id);
         data.entityUuid = null;
         save();
+        notifyRemoved(data.id);
     }
 
     /** Bring a previously dead NPC back, spawning a fresh entity at the given location. */

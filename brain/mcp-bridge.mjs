@@ -249,6 +249,68 @@ pt("npc_context", "The knowledge-isolation tool: returns an NPC's own sheet plus
   npcId: z.string(),
 });
 
+// --- formulas ---
+// Formulas are runtime-authored, reusable tools: recipes stored plugin-side
+// as a sequence of steps over EXISTING bridge commands (never new game
+// logic), with ${...} expressions (params, i, rand(a,b), randint(a,b),
+// floor) evaluated per step per iteration. Build once ("a lightning storm
+// with params for center/radius/count/explosion power"), then run it again
+// and again with different arguments instead of re-composing the same
+// multi-step spectacle from scratch every time.
+const formulaStep = z.object({
+  cmd: z.string().describe("bridge command to run for this step, e.g. strike_lightning, spawn_entity, set_block"),
+  args: z.record(z.string(), z.any()).describe("args for cmd; string values may contain ${...} expressions (params, i, rand(a,b), randint(a,b), floor)"),
+  delayTicks: z.number().optional().describe("ticks to wait before running this step"),
+});
+pt("formula_define",
+  "Define (or redefine) a reusable formula: a named, parameterized recipe over existing bridge commands. " +
+  "Use this instead of wishing for a tool that doesn't exist - compose the capability once from primitives you already have " +
+  "(a lightning storm, a meteor shower, a fountain, a mob ambush are all formulas), give it clear params, and run it again later with different inputs. " +
+  "Check formula_list first; prefer refining an existing formula over duplicating one.", {
+  id: z.string().describe("unique short id, e.g. 'lightning-storm'"),
+  description: z.string(),
+  params: z.array(z.object({
+    name: z.string(),
+    default: z.any().optional(),
+  })).describe("named parameters callers supply via formula_run's args, referenced in steps as ${paramName}"),
+  steps: z.array(formulaStep),
+  loop: z.object({
+    count: z.union([z.number(), z.string()]).describe("number or a ${...} expression, e.g. \"${count}\""),
+    intervalTicks: z.union([z.number(), z.string()]).describe("number or a ${...} expression"),
+  }).optional().describe("repeat the whole step sequence this many times, spaced intervalTicks apart; ${i} is the 0-based iteration index inside step expressions"),
+});
+pt("formula_run", "Run a previously defined formula with concrete argument values for its params. Runs plugin-side over time and returns {runId} immediately; a 'sequence_done' event ({sequenceId, kind:\"formula:<id>\", count}) is pushed when it finishes, and a 'formula_error' event ({runId, formulaId, step, error}) is pushed if a step fails - plan the next phase off those events rather than sleeping.", {
+  id: z.string(),
+  args: z.record(z.string(), z.any()).optional().describe("values for the formula's declared params; params with a default may be omitted"),
+});
+pt("formula_list", "List all defined formulas (id + description) - your growing spellbook. Check this before defining a new formula.", {});
+pt("formula_get", "Read one formula's full definition (params, steps, loop) by id.", { id: z.string() });
+pt("formula_delete", "Delete a formula definition by id.", { id: z.string() });
+
+// --- NPC jobs ---
+// NPCs can physically work: walk to a real station, withdraw REAL, finite
+// items from a real chest, work for a duration, and deposit real outputs -
+// making a village genuinely produce and consume rather than just look busy.
+const jobItem = z.object({ material: z.string(), count: z.number() });
+pt("npc_assign_job",
+  "Send an NPC to physically work a job: walk to a station, withdraw real inputs from a real inventory chest (finite - can run out), " +
+  "work for workTicks, then deposit real outputs to an output chest, repeating up to `repeats` times. " +
+  "Use this to make villages genuinely produce and consume - a smithy that turns ore into tools, a bakery that turns wheat into bread - " +
+  "not scenery. React in story when npc_job_blocked reports resources ran out.", {
+  npcId: z.string(),
+  job: z.object({
+    station: posObj.describe("where the NPC stands and works"),
+    inputChest: posObj.optional().describe("chest the NPC withdraws inputs from, if this job consumes items"),
+    outputChest: posObj.optional().describe("chest the NPC deposits outputs into, if this job produces items"),
+    inputs: z.array(jobItem).describe("items consumed per work cycle; empty if the job produces without consuming"),
+    outputs: z.array(jobItem).describe("items produced per work cycle; empty if the job consumes without producing"),
+    workTicks: z.number().describe("ticks spent working per cycle before outputs are produced"),
+    repeats: z.number().describe("number of work cycles to run before the job ends"),
+    workSound: z.string().optional().describe("sound to play periodically while working, e.g. block.anvil.use"),
+  }),
+});
+pt("npc_job_cancel", "Cancel an NPC's assigned job, stopping it wherever it currently is in the cycle.", { npcId: z.string() });
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
 console.error(`[mcalive2-mcp-bridge] ready, bridging to ${URL_}`);

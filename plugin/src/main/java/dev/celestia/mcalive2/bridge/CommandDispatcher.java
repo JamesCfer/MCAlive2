@@ -38,6 +38,24 @@ public class CommandDispatcher {
         handlers.put(name, handler);
     }
 
+    /** Whether a command name has a registered handler (used by formula_define to validate steps). */
+    public boolean isRegistered(String name) {
+        return handlers.containsKey(name);
+    }
+
+    /**
+     * Invoke a registered handler directly, in-process, bypassing the WebSocket reply
+     * path. Used by the formula engine to run steps through the exact same handlers the
+     * bridge uses, without needing a client connection. Caller is responsible for being
+     * on the main thread (handlers assume Bukkit API access).
+     */
+    public JsonObject invoke(String cmd, JsonObject args) throws Exception {
+        Handler handler = handlers.get(cmd);
+        if (handler == null) throw new IllegalArgumentException("unknown command: " + cmd);
+        JsonObject data = handler.handle(args);
+        return data == null ? new JsonObject() : data;
+    }
+
     public void dispatch(WebSocket conn, String id, String cmd, JsonObject args) {
         Handler handler = handlers.get(cmd);
         if (handler == null) {

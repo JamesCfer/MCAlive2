@@ -24,6 +24,11 @@ npc-chat-range: 8
 # etc) before a light player_idle_scene heartbeat fires for them. 0 disables this sense.
 idle-scene-minutes: 12
 
+# Monsters exist only as story - the brain places them deliberately (spawn_entity, spawn
+# eggs, and commands still work). When true, natural hostile-mob spawn paths (NATURAL,
+# SPAWNER, PATROL, RAID, REINFORCEMENTS, NETHER_PORTAL) are cancelled outright.
+suppress-hostile-spawns: true
+
 # Self-update: periodically checks GitHub releases and stages a newer MCAlive2.jar in
 # plugins/update/ (Paper applies it automatically on the next server restart). A
 # version already staged is never re-downloaded.

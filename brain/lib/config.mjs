@@ -65,6 +65,10 @@ export const ALL_TOOLS = [
   "ledger_put", "ledger_get", "ledger_query", "ledger_delete", "npc_context",
   // Info
   "get_server_info", "get_block", "sample_terrain",
+  // Formulas - reusable, parameterized recipes over the tools above
+  "formula_define", "formula_run", "formula_list", "formula_get", "formula_delete",
+  // NPC jobs - NPCs physically working real stations/chests with finite items
+  "npc_assign_job", "npc_job_cancel",
 ];
 
 // NPC actors may ONLY call these three tools (DESIGN.md "NPC actors").
@@ -87,7 +91,10 @@ export const DIRECTOR_WAKE_EVENTS = new Set([
   "region_exit",
   "player_chat", // only when NOT routed to an actor (see index.mjs routing)
   "operator_order", // Lore Console "order the world" - see console-server.mjs/index.mjs submitOrder
-  "sequence_done", // plugin-side timed spectacle sequence (e.g. strike_lightning) finished
+  "sequence_done", // plugin-side timed spectacle sequence (e.g. strike_lightning or formula_run) finished
+  "formula_error", // a formula_run step failed plugin-side
+  "npc_job_done", // an NPC's assigned job finished all its repeats
+  "npc_job_blocked", // an NPC's assigned job stalled (e.g. missing inputs)
 ]);
 
 export function loadConfig(env = process.env) {

@@ -122,6 +122,16 @@ async function main() {
     assert(actorDisallowedTools(MCP_SERVER_NAME).includes(namespacedTool(t, MCP_SERVER_NAME)), `${t} is in the actor disallow-list`);
   }
 
+  console.log("\n1a².5. Formula + NPC job tools: present in ALL_TOOLS, absent from ACTOR_TOOLS");
+  for (const t of ["formula_define", "formula_run", "formula_list", "formula_get", "formula_delete", "npc_assign_job", "npc_job_cancel"]) {
+    assert(ALL_TOOLS.includes(t), `${t} is in ALL_TOOLS`);
+    assert(!ACTOR_TOOLS.includes(t), `${t} is NOT in ACTOR_TOOLS (director-only by omission)`);
+    assert(actorDisallowedTools(MCP_SERVER_NAME).includes(namespacedTool(t, MCP_SERVER_NAME)), `${t} is in the actor disallow-list`);
+  }
+  assert(DIRECTOR_WAKE_EVENTS.has("formula_error"), "formula_error is a director wake event");
+  assert(DIRECTOR_WAKE_EVENTS.has("npc_job_done"), "npc_job_done is a director wake event");
+  assert(DIRECTOR_WAKE_EVENTS.has("npc_job_blocked"), "npc_job_blocked is a director wake event");
+
   console.log("\n1a³. Order scenes get the higher BRAIN_ORDER_MAX_STEPS turn ceiling");
   const cfgDefault = loadConfig({});
   assert(cfgDefault.orderMaxSteps === 80, `BRAIN_ORDER_MAX_STEPS defaults to 80 (got ${cfgDefault.orderMaxSteps})`);
@@ -521,6 +531,16 @@ async function main() {
     assert(directorDryRun.prompt.includes("REQUIRED FINAL SUMMARY"), "director prompt requires a final summary paragraph");
     assert(directorDryRun.prompt.includes("Actors propose, the director disposes"), "director prompt instructs validating actor reports before ledger writes");
     assert(directorDryRun.prompt.includes("Player: Steve"), "director prompt groups the scene per player");
+    assert(directorDryRun.prompt.includes("FORMULAS"), "director prompt has a FORMULAS section");
+    assert(directorDryRun.prompt.includes("COMPOSE it as a formula"), "director prompt instructs composing formulas instead of wishing for tools");
+    assert(directorDryRun.prompt.includes("JOBS"), "director prompt has a JOBS section");
+    assert(directorDryRun.prompt.includes("npc_assign_job"), "director prompt's JOBS section mentions npc_assign_job");
+  }
+
+  // --- lore load: bestiary text reaches the director's system prompt ---
+  if (directorDryRun) {
+    assert(typeof directorDryRun.systemPrompt === "string" && directorDryRun.systemPrompt.includes("monsters are story, never weather"), "director system prompt (lore) includes the bestiary file's core line");
+    assert(directorDryRun.systemPrompt.includes("Zombies and skeletons do not arise on their own"), "director system prompt includes the bestiary's necromancer canon");
   }
 
   brain1.child.kill();

@@ -246,6 +246,26 @@ plus their own character sheet instead — see `lib/actor-turn.mjs`):
   decision lands in the ledger, NPC death is permanent, copper-age tier.
 - `10-world.md` — a short stub: the world is unwritten, and the director
   authors it as players explore (fantasy, low-tier copper age start).
+- `20-bestiary.md` — monsters are story, never weather: natural hostile
+  spawns are suppressed server-wide, so every monster the director places
+  (`spawn_entity`) must be deliberate and rooted in place/lore (spider
+  woods, necromancer-made zombies/skeletons, rare dreaded creepers).
+
+### Formulas & jobs
+
+Two more director tool families, alongside the world/NPC/player/ledger/info
+set: **formulas** (`formula_define`/`formula_run`/`formula_list`/
+`formula_get`/`formula_delete`) let the director compose a reusable,
+parameterized recipe over existing bridge commands instead of wishing for a
+tool that doesn't exist — a lightning storm, a meteor shower, a fountain, a
+mob ambush are all formulas, runnable again later with different arguments.
+A `formula_run` fires `sequence_done` (`kind: "formula:<id>"`) when it
+finishes, or `formula_error` if a step fails — both director wake events.
+**NPC jobs** (`npc_assign_job`/`npc_job_cancel`) send an NPC to physically
+walk to a real station and chest, withdraw real (finite) items, work, and
+deposit real outputs — making villages genuinely produce and consume.
+`npc_job_done` and `npc_job_blocked` (e.g. missing inputs) are director wake
+events too.
 
 Edit these files freely — the service re-reads `brain/lore/` on a timer
 (`BRAIN_LORE_REFRESH_MS`, default 10 minutes) and picks up changes without

@@ -7,11 +7,14 @@ import dev.celestia.mcalive2.actuators.SpectacleActuators;
 import dev.celestia.mcalive2.actuators.WorldActuators;
 import dev.celestia.mcalive2.bridge.BridgeServer;
 import dev.celestia.mcalive2.bridge.CommandDispatcher;
+import dev.celestia.mcalive2.formula.FormulaActuators;
+import dev.celestia.mcalive2.npc.JobManager;
 import dev.celestia.mcalive2.npc.NpcManager;
 import dev.celestia.mcalive2.senses.ExploredTracker;
 import dev.celestia.mcalive2.senses.GameListeners;
 import dev.celestia.mcalive2.senses.IdleSceneTracker;
 import dev.celestia.mcalive2.senses.RegionSense;
+import dev.celestia.mcalive2.senses.SpawnGate;
 import dev.celestia.mcalive2.update.Updater;
 import net.kyori.adventure.text.Component;
 import org.bukkit.command.Command;
@@ -26,6 +29,7 @@ public final class MCAlive2Plugin extends JavaPlugin {
     private NpcManager npcManager;
     private LedgerActuators ledgerActuators;
     private ExploredTracker exploredTracker;
+    private FormulaActuators formulaActuators;
 
     @Override
     public void onEnable() {
@@ -45,6 +49,10 @@ public final class MCAlive2Plugin extends JavaPlugin {
         new PlayerActuators(this).register(dispatcher);
         new NpcActuators(this, npcManager).register(dispatcher);
         ledgerActuators.register(dispatcher);
+        new JobManager(this, npcManager).register(dispatcher);
+        formulaActuators = new FormulaActuators(this, dispatcher);
+        formulaActuators.load();
+        formulaActuators.register(dispatcher);
 
         String host = getConfig().getString("bridge.host", "127.0.0.1");
         int port = getConfig().getInt("bridge.port", 8765);
@@ -55,6 +63,7 @@ public final class MCAlive2Plugin extends JavaPlugin {
 
         getServer().getPluginManager().registerEvents(
                 new GameListeners(this, npcManager, bridge, ledgerActuators, exploredTracker), this);
+        getServer().getPluginManager().registerEvents(new SpawnGate(this), this);
 
         // clean up any duplicate/orphaned NPC entities once the world has settled
         getServer().getScheduler().runTaskLater(this, () -> {
@@ -69,6 +78,7 @@ public final class MCAlive2Plugin extends JavaPlugin {
             npcManager.save();
             ledgerActuators.save();
             exploredTracker.saveIfDirty();
+            formulaActuators.save();
         }, 6000L, 6000L);
 
         // player_idle_scene heartbeat sense, period from config (0 = disabled)
@@ -97,6 +107,7 @@ public final class MCAlive2Plugin extends JavaPlugin {
         if (npcManager != null) npcManager.save();
         if (ledgerActuators != null) ledgerActuators.save();
         if (exploredTracker != null) exploredTracker.save();
+        if (formulaActuators != null) formulaActuators.save();
         if (bridge != null) {
             try {
                 bridge.stop(1000);
