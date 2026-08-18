@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// A tiny stand-in for the Estari plugin's WebSocket bridge, for testing
+// A tiny stand-in for the MCAlive2 plugin's WebSocket bridge, for testing
 // brain/ with no real Minecraft server. Performs the same auth handshake as
 // the real bridge, RECORDS every command it receives (so the smoke test can
 // assert on npc_context calls in particular), answers canned npc_context

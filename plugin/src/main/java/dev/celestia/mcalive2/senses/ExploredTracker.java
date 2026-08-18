@@ -1,10 +1,10 @@
-package dev.celestia.estari.senses;
+package dev.celestia.mcalive2.senses;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import dev.celestia.estari.EstariPlugin;
+import dev.celestia.mcalive2.MCAlive2Plugin;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
 
@@ -22,13 +22,13 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class ExploredTracker {
 
-    private final EstariPlugin plugin;
+    private final MCAlive2Plugin plugin;
     private final int cellChunks;
     /** world name -> set of packed (cellX,cellZ) keys already explored by anyone */
     private final Map<String, Set<Long>> visited = new ConcurrentHashMap<>();
     private volatile boolean dirty = false;
 
-    public ExploredTracker(EstariPlugin plugin) {
+    public ExploredTracker(MCAlive2Plugin plugin) {
         this.plugin = plugin;
         this.cellChunks = Math.max(1, plugin.getConfig().getInt("explored-cell-chunks", 8));
         load();

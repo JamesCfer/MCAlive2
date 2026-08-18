@@ -1,12 +1,12 @@
-package dev.celestia.estari.senses;
+package dev.celestia.mcalive2.senses;
 
 import com.google.gson.JsonObject;
-import dev.celestia.estari.EstariPlugin;
-import dev.celestia.estari.actuators.LedgerActuators;
-import dev.celestia.estari.bridge.BridgeServer;
-import dev.celestia.estari.npc.NpcData;
-import dev.celestia.estari.npc.NpcManager;
-import dev.celestia.estari.util.Json;
+import dev.celestia.mcalive2.MCAlive2Plugin;
+import dev.celestia.mcalive2.actuators.LedgerActuators;
+import dev.celestia.mcalive2.bridge.BridgeServer;
+import dev.celestia.mcalive2.npc.NpcData;
+import dev.celestia.mcalive2.npc.NpcManager;
+import dev.celestia.mcalive2.util.Json;
 import io.papermc.paper.event.player.AsyncChatEvent;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
@@ -30,13 +30,13 @@ import org.bukkit.inventory.EquipmentSlot;
 /** Forwards the interesting things happening in the world to the brain as pushed events. */
 public class GameListeners implements Listener {
 
-    private final EstariPlugin plugin;
+    private final MCAlive2Plugin plugin;
     private final NpcManager npcs;
     private final BridgeServer bridge;
     private final LedgerActuators ledger;
     private final ExploredTracker explored;
 
-    public GameListeners(EstariPlugin plugin, NpcManager npcs, BridgeServer bridge,
+    public GameListeners(MCAlive2Plugin plugin, NpcManager npcs, BridgeServer bridge,
                           LedgerActuators ledger, ExploredTracker explored) {
         this.plugin = plugin;
         this.npcs = npcs;

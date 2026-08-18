@@ -1,4 +1,4 @@
-package dev.celestia.estari.senses;
+package dev.celestia.mcalive2.senses;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;

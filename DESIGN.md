@@ -1,6 +1,6 @@
-# Estari — an AI decision brain that runs a fantasy RPG inside Minecraft
+# MCAlive2 — an AI decision brain that runs a fantasy RPG inside Minecraft
 
-Successor to the MinecraftAlive prototype, designed from zero. One AI **director**
+Successor to the MinecraftAlive prototype, designed from zero (briefly codenamed Estari). One AI **director**
 runs the world; cheap per-NPC **actors** hold conversations. Minecraft itself is the
 description layer: the world tells the story through structures, NPCs, sound, light,
 and weather. **Chat is exclusively for dialogue** — no narration text, ever.
@@ -10,14 +10,14 @@ facts, and stakes, and answers with consequences in the world.
 ## Components
 
 ```
-players ⇄ Paper server ⇄ Estari plugin (senses, actuators, ledger, NPC runtime)
+players ⇄ Paper server ⇄ MCAlive2 plugin (senses, actuators, ledger, NPC runtime)
                               ⇅ WebSocket (token auth, JSON)
                         brain/ (Node, Claude Agent SDK)
                           ├─ director loop (scene → memory → decision → action)
                           └─ NPC actors (one cheap call per conversation turn)
 ```
 
-- `plugin/` — Java 21, Paper API 26.2, Maven (shade Java-WebSocket). Plugin name `Estari`.
+- `plugin/` — Java 21, Paper API 26.2, Maven (shade Java-WebSocket). Plugin name `MCAlive2`.
 - `brain/` — Node >= 22 ESM, `@anthropic-ai/claude-agent-sdk`.
 
 ## Protocol (plugin ⇄ brain)

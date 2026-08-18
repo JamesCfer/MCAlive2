@@ -1,12 +1,12 @@
-package dev.celestia.estari.actuators;
+package dev.celestia.mcalive2.actuators;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
-import dev.celestia.estari.EstariPlugin;
-import dev.celestia.estari.bridge.CommandDispatcher;
-import dev.celestia.estari.ledger.Ledger;
-import dev.celestia.estari.ledger.NpcContext;
-import dev.celestia.estari.util.Json;
+import dev.celestia.mcalive2.MCAlive2Plugin;
+import dev.celestia.mcalive2.bridge.CommandDispatcher;
+import dev.celestia.mcalive2.ledger.Ledger;
+import dev.celestia.mcalive2.ledger.NpcContext;
+import dev.celestia.mcalive2.util.Json;
 
 import java.io.File;
 
@@ -17,10 +17,10 @@ import java.io.File;
  */
 public class LedgerActuators {
 
-    private final EstariPlugin plugin;
+    private final MCAlive2Plugin plugin;
     private final Ledger ledger = new Ledger();
 
-    public LedgerActuators(EstariPlugin plugin) {
+    public LedgerActuators(MCAlive2Plugin plugin) {
         this.plugin = plugin;
     }
 

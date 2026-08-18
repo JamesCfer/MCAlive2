@@ -1,4 +1,4 @@
-package dev.celestia.estari.util;
+package dev.celestia.mcalive2.util;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;

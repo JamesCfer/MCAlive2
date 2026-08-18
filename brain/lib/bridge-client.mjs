@@ -1,4 +1,4 @@
-// The brain's OWN WebSocket connection to the Estari plugin bridge, used to:
+// The brain's OWN WebSocket connection to the MCAlive2 plugin bridge, used to:
 //   (a) receive pushed sense events (the director's wake-up signal), and
 //   (b) issue direct request/response commands the ROUTING layer needs
 //       before an agent turn even starts - chiefly `npc_context`, which
@@ -115,7 +115,7 @@ export class BridgeClient {
     sock.onclose = () => {
       this.ws = null;
       this.authed = false;
-      for (const [, p] of this.pending) p.reject(new Error("connection to Estari plugin lost"));
+      for (const [, p] of this.pending) p.reject(new Error("connection to MCAlive2 plugin lost"));
       this.pending.clear();
       this._flushReadyWaiters(new Error("connection closed before auth completed"));
       if (!this.stopped) this._scheduleReconnect();

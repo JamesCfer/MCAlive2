@@ -1,4 +1,4 @@
-package dev.celestia.estari.ledger;
+package dev.celestia.mcalive2.ledger;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -24,7 +24,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class Ledger {
 
-    /** The seven collections Estari M1 knows about. */
+    /** The seven collections MCAlive2 M1 knows about. */
     public static final Set<String> COLLECTIONS = Set.of(
             "npcs", "factions", "places", "quests", "facts", "promises", "players");
 

@@ -102,8 +102,8 @@ async function main() {
 
   const stateDir1 = fs.mkdtempSync(path.join(os.tmpdir(), "brain-usage-"));
   const brain1 = spawnNode([path.join(BRAIN_DIR, "index.mjs")], {
-    ESTARI_URL: `ws://127.0.0.1:${port1}`,
-    ESTARI_TOKEN: "test-token",
+    MCALIVE2_URL: `ws://127.0.0.1:${port1}`,
+    MCALIVE2_TOKEN: "test-token",
     BRAIN_DEBOUNCE_MS: "300",
     BRAIN_DRY_RUN: "1",
     BRAIN_ENABLED: "1",
@@ -197,8 +197,8 @@ async function main() {
   fs.writeFileSync(disabledFile, "");
 
   const brain2 = spawnNode([path.join(BRAIN_DIR, "index.mjs")], {
-    ESTARI_URL: `ws://127.0.0.1:${port2}`,
-    ESTARI_TOKEN: "test-token",
+    MCALIVE2_URL: `ws://127.0.0.1:${port2}`,
+    MCALIVE2_TOKEN: "test-token",
     BRAIN_DEBOUNCE_MS: "300",
     BRAIN_DRY_RUN: "1",
     BRAIN_ENABLED: "1",
@@ -223,8 +223,8 @@ async function main() {
   console.log("\n4. Connect failure keeps retrying instead of exiting");
   const deadPort = 8901; // nothing listening here
   const brain3 = spawnNode([path.join(BRAIN_DIR, "index.mjs")], {
-    ESTARI_URL: `ws://127.0.0.1:${deadPort}`,
-    ESTARI_TOKEN: "test-token",
+    MCALIVE2_URL: `ws://127.0.0.1:${deadPort}`,
+    MCALIVE2_TOKEN: "test-token",
     BRAIN_DEBOUNCE_MS: "300",
     BRAIN_DRY_RUN: "1",
     BRAIN_ENABLED: "1",

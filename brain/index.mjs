@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Estari brain: the director loop + NPC actor routing described in
+// MCAlive2 brain: the director loop + NPC actor routing described in
 // DESIGN.md's "Brain" section.
 //
 // Opens ONE WebSocket connection to the plugin bridge (lib/bridge-client.mjs)
@@ -49,7 +49,7 @@ export async function main(env = process.env) {
     debounceMs: config.debounceMs,
     dailyTokenBudget: config.dailyTokenBudget,
     maxTurnsPerMin: config.maxTurnsPerMin,
-    estariUrl: config.estariUrl,
+    mcalive2Url: config.mcalive2Url,
   });
 
   const usage = await new UsageTracker(config.stateDir, config.dailyTokenBudget).load();
@@ -205,8 +205,8 @@ export async function main(env = process.env) {
   // ---------------- Event routing ----------------
 
   const bridge = new BridgeClient({
-    url: config.estariUrl,
-    token: config.estariToken,
+    url: config.mcalive2Url,
+    token: config.mcalive2Token,
     baseMs: config.reconnectBaseMs,
     maxMs: config.reconnectMaxMs,
     onEvent(event, data) {

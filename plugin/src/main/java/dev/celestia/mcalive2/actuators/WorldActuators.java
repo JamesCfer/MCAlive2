@@ -1,12 +1,12 @@
-package dev.celestia.estari.actuators;
+package dev.celestia.mcalive2.actuators;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
-import dev.celestia.estari.EstariPlugin;
-import dev.celestia.estari.bridge.CommandDispatcher;
-import dev.celestia.estari.ledger.BlueprintParser;
-import dev.celestia.estari.senses.TerrainSampler;
-import dev.celestia.estari.util.Json;
+import dev.celestia.mcalive2.MCAlive2Plugin;
+import dev.celestia.mcalive2.bridge.CommandDispatcher;
+import dev.celestia.mcalive2.ledger.BlueprintParser;
+import dev.celestia.mcalive2.senses.TerrainSampler;
+import dev.celestia.mcalive2.util.Json;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -25,9 +25,9 @@ public class WorldActuators {
     /** Cap on |dx|,|dy|,|dz| for a single build_blueprint entry, independent of the block-count cap. */
     private static final int BLUEPRINT_MAX_OFFSET = 256;
 
-    private final EstariPlugin plugin;
+    private final MCAlive2Plugin plugin;
 
-    public WorldActuators(EstariPlugin plugin) {
+    public WorldActuators(MCAlive2Plugin plugin) {
         this.plugin = plugin;
     }
 

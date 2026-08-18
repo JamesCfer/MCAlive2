@@ -5,10 +5,10 @@
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>dev.celestia</groupId>
-  <artifactId>estari</artifactId>
+  <artifactId>mcalive2</artifactId>
   <version>0.1.0</version>
   <packaging>jar</packaging>
-  <name>Estari</name>
+  <name>MCAlive2</name>
 
   <properties>
     <maven.compiler.release>21</maven.compiler.release>
@@ -54,7 +54,7 @@
   </dependencies>
 
   <build>
-    <finalName>Estari</finalName>
+    <finalName>MCAlive2</finalName>
     <resources>
       <resource>
         <directory>src/main/resources</directory>
@@ -79,7 +79,7 @@
               <relocations>
                 <relocation>
                   <pattern>org.java_websocket</pattern>
-                  <shadedPattern>dev.celestia.estari.libs.websocket</shadedPattern>
+                  <shadedPattern>dev.celestia.mcalive2.libs.websocket</shadedPattern>
                 </relocation>
               </relocations>
               <filters>

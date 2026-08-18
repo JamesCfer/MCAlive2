@@ -1,14 +1,14 @@
-package dev.celestia.estari;
+package dev.celestia.mcalive2;
 
-import dev.celestia.estari.actuators.LedgerActuators;
-import dev.celestia.estari.actuators.NpcActuators;
-import dev.celestia.estari.actuators.PlayerActuators;
-import dev.celestia.estari.actuators.WorldActuators;
-import dev.celestia.estari.bridge.BridgeServer;
-import dev.celestia.estari.bridge.CommandDispatcher;
-import dev.celestia.estari.npc.NpcManager;
-import dev.celestia.estari.senses.ExploredTracker;
-import dev.celestia.estari.senses.GameListeners;
+import dev.celestia.mcalive2.actuators.LedgerActuators;
+import dev.celestia.mcalive2.actuators.NpcActuators;
+import dev.celestia.mcalive2.actuators.PlayerActuators;
+import dev.celestia.mcalive2.actuators.WorldActuators;
+import dev.celestia.mcalive2.bridge.BridgeServer;
+import dev.celestia.mcalive2.bridge.CommandDispatcher;
+import dev.celestia.mcalive2.npc.NpcManager;
+import dev.celestia.mcalive2.senses.ExploredTracker;
+import dev.celestia.mcalive2.senses.GameListeners;
 import net.kyori.adventure.text.Component;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
@@ -16,7 +16,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 import java.net.InetSocketAddress;
 
-public final class EstariPlugin extends JavaPlugin {
+public final class MCAlive2Plugin extends JavaPlugin {
 
     private BridgeServer bridge;
     private NpcManager npcManager;
@@ -66,7 +66,7 @@ public final class EstariPlugin extends JavaPlugin {
             exploredTracker.saveIfDirty();
         }, 6000L, 6000L);
 
-        getLogger().info("Estari bridge listening on ws://" + host + ":" + port);
+        getLogger().info("MCAlive2 bridge listening on ws://" + host + ":" + port);
         if ("change-me".equals(token)) {
             getLogger().warning("bridge.token is still the default! Set a real token in config.yml.");
         }
@@ -97,13 +97,13 @@ public final class EstariPlugin extends JavaPlugin {
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length > 0 && args[0].equalsIgnoreCase("status")) {
-            sender.sendMessage(Component.text("[Estari] bridge clients: " + bridge.clientCount()
+            sender.sendMessage(Component.text("[MCAlive2] bridge clients: " + bridge.clientCount()
                     + ", NPCs: " + npcManager.count()));
             return true;
         }
         if (args.length > 0 && args[0].equalsIgnoreCase("reload")) {
             reloadConfig();
-            sender.sendMessage(Component.text("[Estari] config reloaded (bridge restart requires server restart)"));
+            sender.sendMessage(Component.text("[MCAlive2] config reloaded (bridge restart requires server restart)"));
             return true;
         }
         return false;

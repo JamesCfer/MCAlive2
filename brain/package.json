@@ -1,7 +1,7 @@
 {
-  "name": "estari-brain",
+  "name": "mcalive2-brain",
   "version": "0.1.0",
-  "description": "Estari brain: director loop + NPC actors on the Claude Agent SDK",
+  "description": "MCAlive2 brain: director loop + NPC actors on the Claude Agent SDK",
   "type": "module",
   "private": true,
   "engines": {

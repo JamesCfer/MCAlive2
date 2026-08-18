@@ -15,7 +15,7 @@
 import { log } from "./logger.mjs";
 import { MCP_SERVER_NAME } from "./config.mjs";
 
-const STANDING_REMINDER = `You are the DIRECTOR of this fantasy world (Estari) - the single AI that
+const STANDING_REMINDER = `You are the DIRECTOR of this fantasy world (MCAlive2) - the single AI that
 adjudicates everything that is not direct NPC dialogue. You run event-driven
 and unattended: the JSON below is a batch of sense events that happened just
 now. Follow the standing rules carried in your system prompt (brain/lore/)
@@ -77,8 +77,8 @@ export async function runDirectorTurn({ batch, systemPrompt, config }) {
         command: "node",
         args: [config.mcpServerPath],
         env: {
-          ESTARI_URL: config.estariUrl,
-          ESTARI_TOKEN: config.estariToken,
+          MCALIVE2_URL: config.mcalive2Url,
+          MCALIVE2_TOKEN: config.mcalive2Token,
         },
       },
     },

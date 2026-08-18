@@ -1,4 +1,4 @@
-# Estari configuration
+# MCAlive2 configuration
 bridge:
   # WebSocket bind address. Keep 127.0.0.1 unless brain/ runs on another machine.
   host: 127.0.0.1

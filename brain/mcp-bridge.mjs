@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Estari MCP bridge: connects to the plugin's WebSocket and exposes the
+// MCAlive2 MCP bridge: connects to the plugin's WebSocket and exposes the
 // actuator/ledger/info command set from DESIGN.md ("Plugin subsystems") as
 // MCP tools over stdio, for the Claude Agent SDK to use. Pure passthrough -
 // every tool here is a 1:1 forward of a plugin bridge command; this file
@@ -11,15 +11,15 @@
 // as plugin bridge commands, so there is nothing to forward.
 //
 // Env vars:
-//   ESTARI_URL    ws URL of the plugin bridge (default ws://127.0.0.1:8765)
-//   ESTARI_TOKEN  auth token matching the Estari plugin's config
+//   MCALIVE2_URL    ws URL of the plugin bridge (default ws://127.0.0.1:8765)
+//   MCALIVE2_TOKEN  auth token matching the MCAlive2 plugin's config
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-const URL_ = process.env.ESTARI_URL || "ws://127.0.0.1:8765";
-const TOKEN = process.env.ESTARI_TOKEN || "change-me";
+const URL_ = process.env.MCALIVE2_URL || "ws://127.0.0.1:8765";
+const TOKEN = process.env.MCALIVE2_TOKEN || "change-me";
 
 // ---------------- WebSocket bridge client ----------------
 
@@ -62,9 +62,9 @@ function connect() {
     sock.onclose = () => {
       ws = null;
       wsReady = null;
-      for (const [, p] of pending) p.reject(new Error("connection to Estari plugin lost"));
+      for (const [, p] of pending) p.reject(new Error("connection to MCAlive2 plugin lost"));
       pending.clear();
-      if (!authed) reject(new Error(`could not connect to ${URL_} - is the server running with the Estari plugin?`));
+      if (!authed) reject(new Error(`could not connect to ${URL_} - is the server running with the MCAlive2 plugin?`));
     };
     sock.onerror = () => { /* onclose fires after */ };
   });
@@ -88,7 +88,7 @@ async function call(cmd, args = {}) {
 
 // ---------------- MCP server ----------------
 
-const server = new McpServer({ name: "estari", version: "0.1.0" });
+const server = new McpServer({ name: "mcalive2", version: "0.1.0" });
 
 function tool(name, description, shape, handler) {
   server.registerTool(name, { description, inputSchema: shape }, async (args) => {
@@ -227,4 +227,4 @@ pt("npc_context", "The knowledge-isolation tool: returns an NPC's own sheet plus
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error(`[estari-mcp-bridge] ready, bridging to ${URL_}`);
+console.error(`[mcalive2-mcp-bridge] ready, bridging to ${URL_}`);

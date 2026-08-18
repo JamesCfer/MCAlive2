@@ -22,9 +22,9 @@ function bool01(name, fallback) {
   return v === "1" || v.toLowerCase() === "true";
 }
 
-// The name the estari MCP tool server is registered under. Tool names as
+// The name the mcalive2 MCP tool server is registered under. Tool names as
 // seen by the model are namespaced "mcp__<this>__<toolName>".
-export const MCP_SERVER_NAME = "estari";
+export const MCP_SERVER_NAME = "mcalive2";
 
 // The full actuator/ledger/info command set exposed by brain/mcp-bridge.mjs,
 // per DESIGN.md "Plugin subsystems" section. This is the DIRECTOR's toolset
@@ -68,8 +68,8 @@ export const DIRECTOR_WAKE_EVENTS = new Set([
 
 export function loadConfig(env = process.env) {
   return {
-    estariUrl: env.ESTARI_URL || "ws://127.0.0.1:8765",
-    estariToken: env.ESTARI_TOKEN || "change-me",
+    mcalive2Url: env.MCALIVE2_URL || "ws://127.0.0.1:8765",
+    mcalive2Token: env.MCALIVE2_TOKEN || "change-me",
 
     debounceMs: num("BRAIN_DEBOUNCE_MS", 2500),
     loreRefreshMs: num("BRAIN_LORE_REFRESH_MS", 600000),

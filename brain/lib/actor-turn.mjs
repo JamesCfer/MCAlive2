@@ -14,7 +14,7 @@
 import { log } from "./logger.mjs";
 import { MCP_SERVER_NAME, ACTOR_TOOLS, actorDisallowedTools, namespaceAll } from "./config.mjs";
 
-const STANDING_REMINDER = `You are voicing ONE character in the fantasy world of Estari: an NPC actor,
+const STANDING_REMINDER = `You are voicing ONE character in the fantasy world of MCAlive2: an NPC actor,
 not the director. You know only what is in your character sheet and the
 "Facts you know" list below - nothing else. Never invent or claim knowledge
 outside that list, and never break character. Chat is dialogue-only: reply
@@ -98,15 +98,15 @@ export async function runActorTurn({ npc, facts, player, trigger, message, trans
 
   const options = {
     model: config.actorModel,
-    systemPrompt: "You are an NPC actor in Estari. Stay strictly in character.",
+    systemPrompt: "You are an NPC actor in MCAlive2. Stay strictly in character.",
     mcpServers: {
       [MCP_SERVER_NAME]: {
         type: "stdio",
         command: "node",
         args: [config.mcpServerPath],
         env: {
-          ESTARI_URL: config.estariUrl,
-          ESTARI_TOKEN: config.estariToken,
+          MCALIVE2_URL: config.mcalive2Url,
+          MCALIVE2_TOKEN: config.mcalive2Token,
         },
       },
     },

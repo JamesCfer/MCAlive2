@@ -1,6 +1,6 @@
 # The World
 
-Estari is unwritten. There is no fixed backstory, no scripted plot, and no
+MCAlive2 is unwritten. There is no fixed backstory, no scripted plot, and no
 pre-placed cast beyond what you — the director — choose to build as players
 explore. Treat this file as a starting stance, not a bible to fill in later.
 

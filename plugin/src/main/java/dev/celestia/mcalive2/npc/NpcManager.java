@@ -1,11 +1,11 @@
-package dev.celestia.estari.npc;
+package dev.celestia.mcalive2.npc;
 
 import com.destroystokyo.paper.profile.PlayerProfile;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import dev.celestia.estari.EstariPlugin;
+import dev.celestia.mcalive2.MCAlive2Plugin;
 import io.papermc.paper.datacomponent.DataComponentTypes;
 import io.papermc.paper.datacomponent.item.ResolvableProfile;
 import net.kyori.adventure.text.Component;
@@ -52,13 +52,13 @@ public class NpcManager {
 
     private static final long RESPAWN_COOLDOWN_MS = 60_000;
 
-    private final EstariPlugin plugin;
+    private final MCAlive2Plugin plugin;
     private final NamespacedKey npcKey;
     private final Map<String, NpcData> npcs = new ConcurrentHashMap<>();
     private final Map<String, BukkitTask> walkers = new ConcurrentHashMap<>();
     private final Random random = new Random();
 
-    public NpcManager(EstariPlugin plugin) {
+    public NpcManager(MCAlive2Plugin plugin) {
         this.plugin = plugin;
         this.npcKey = new NamespacedKey(plugin, "npc_id");
     }

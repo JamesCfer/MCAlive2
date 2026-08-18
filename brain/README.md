@@ -1,15 +1,15 @@
-# brain/ — Estari director + NPC actors
+# brain/ — MCAlive2 director + NPC actors
 
-The AI side of Estari (see `../DESIGN.md` for the full contract). One
+The AI side of MCAlive2 (see `../DESIGN.md` for the full contract). One
 **director** (default `claude-sonnet-5`) runs the world event-driven and
 unattended; cheap per-NPC **actors** (default `claude-haiku-4-5-20251001`)
 hold knowledge-isolated conversations. Neither reimplements a game ability —
-both talk to the Estari Paper plugin exclusively through `mcp-bridge.mjs`,
+both talk to the MCAlive2 Paper plugin exclusively through `mcp-bridge.mjs`,
 a stdio MCP server that passes every actuator/ledger/info command straight
 through to the plugin's WebSocket bridge.
 
 ```
-Estari plugin (ws://.../8765)
+MCAlive2 plugin (ws://.../8765)
    │
    ├─ brain/index.mjs's OWN ws connection (lib/bridge-client.mjs)
    │     ├─ receives pushed sense events (the wake-up signal, auto-reconnect)
@@ -26,7 +26,7 @@ Estari plugin (ws://.../8765)
 
 ## Director loop vs. NPC actor routing
 
-`index.mjs` owns one WebSocket connection to the plugin (`ESTARI_URL`) and
+`index.mjs` owns one WebSocket connection to the plugin (`MCALIVE2_URL`) and
 routes every pushed sense event one of two ways:
 
 - **`npc_interact`** → always an actor turn for that NPC.
@@ -71,8 +71,8 @@ ledger; the actor never writes to the ledger itself.
 cd brain
 npm install
 export ANTHROPIC_API_KEY=sk-ant-...     # needed for real (non-dry-run) turns
-export ESTARI_URL=ws://127.0.0.1:8765   # matches the plugin's bridge config
-export ESTARI_TOKEN=pick-a-long-random-token
+export MCALIVE2_URL=ws://127.0.0.1:8765   # matches the plugin's bridge config
+export MCALIVE2_TOKEN=pick-a-long-random-token
 npm start
 ```
 
@@ -173,8 +173,8 @@ It exits non-zero if any assertion fails.
 
 | Var | Default | Meaning |
 |---|---|---|
-| `ESTARI_URL` | `ws://127.0.0.1:8765` | Plugin bridge WebSocket URL (both the brain's own event connection and the MCP tool server it spawns) |
-| `ESTARI_TOKEN` | `change-me` | Auth token matching the plugin's config |
+| `MCALIVE2_URL` | `ws://127.0.0.1:8765` | Plugin bridge WebSocket URL (both the brain's own event connection and the MCP tool server it spawns) |
+| `MCALIVE2_TOKEN` | `change-me` | Auth token matching the plugin's config |
 | `BRAIN_DEBOUNCE_MS` | `2500` | Director scene debounce window |
 | `BRAIN_LORE_REFRESH_MS` | `600000` | How often to re-read `brain/lore/*.md` |
 | `BRAIN_DAILY_TOKEN_BUDGET` | `500000` | Cumulative input+output tokens/day (UTC reset) before new turns stop starting |

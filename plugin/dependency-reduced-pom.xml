@@ -2,8 +2,8 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
   <modelVersion>4.0.0</modelVersion>
   <groupId>dev.celestia</groupId>
-  <artifactId>estari</artifactId>
-  <name>Estari</name>
+  <artifactId>mcalive2</artifactId>
+  <name>MCAlive2</name>
   <version>0.1.0</version>
   <build>
     <resources>
@@ -12,7 +12,7 @@
         <directory>src/main/resources</directory>
       </resource>
     </resources>
-    <finalName>Estari</finalName>
+    <finalName>MCAlive2</finalName>
     <plugins>
       <plugin>
         <artifactId>maven-surefire-plugin</artifactId>
@@ -31,7 +31,7 @@
               <relocations>
                 <relocation>
                   <pattern>org.java_websocket</pattern>
-                  <shadedPattern>dev.celestia.estari.libs.websocket</shadedPattern>
+                  <shadedPattern>dev.celestia.mcalive2.libs.websocket</shadedPattern>
                 </relocation>
               </relocations>
               <filters>

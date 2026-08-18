@@ -1,13 +1,13 @@
-package dev.celestia.estari.actuators;
+package dev.celestia.mcalive2.actuators;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import dev.celestia.estari.EstariPlugin;
-import dev.celestia.estari.bridge.CommandDispatcher;
-import dev.celestia.estari.npc.NpcData;
-import dev.celestia.estari.npc.NpcManager;
-import dev.celestia.estari.util.Json;
+import dev.celestia.mcalive2.MCAlive2Plugin;
+import dev.celestia.mcalive2.bridge.CommandDispatcher;
+import dev.celestia.mcalive2.npc.NpcData;
+import dev.celestia.mcalive2.npc.NpcManager;
+import dev.celestia.mcalive2.util.Json;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.minimessage.MiniMessage;
@@ -28,11 +28,11 @@ import java.util.Locale;
 /** Spawning, directing, and voicing NPCs. */
 public class NpcActuators {
 
-    private final EstariPlugin plugin;
+    private final MCAlive2Plugin plugin;
     private final NpcManager npcs;
     private final MiniMessage mm = MiniMessage.miniMessage();
 
-    public NpcActuators(EstariPlugin plugin, NpcManager npcs) {
+    public NpcActuators(MCAlive2Plugin plugin, NpcManager npcs) {
         this.plugin = plugin;
         this.npcs = npcs;
     }

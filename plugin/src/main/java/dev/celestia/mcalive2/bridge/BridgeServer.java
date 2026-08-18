@@ -1,8 +1,8 @@
-package dev.celestia.estari.bridge;
+package dev.celestia.mcalive2.bridge;
 
 import com.google.gson.JsonObject;
-import dev.celestia.estari.EstariPlugin;
-import dev.celestia.estari.util.Json;
+import dev.celestia.mcalive2.MCAlive2Plugin;
+import dev.celestia.mcalive2.util.Json;
 import org.java_websocket.WebSocket;
 import org.java_websocket.handshake.ClientHandshake;
 import org.java_websocket.server.WebSocketServer;
@@ -19,12 +19,12 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class BridgeServer extends WebSocketServer {
 
-    private final EstariPlugin plugin;
+    private final MCAlive2Plugin plugin;
     private final CommandDispatcher dispatcher;
     private final String token;
     private final Set<WebSocket> authed = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
-    public BridgeServer(InetSocketAddress address, EstariPlugin plugin,
+    public BridgeServer(InetSocketAddress address, MCAlive2Plugin plugin,
                          CommandDispatcher dispatcher, String token) {
         super(address);
         this.plugin = plugin;
