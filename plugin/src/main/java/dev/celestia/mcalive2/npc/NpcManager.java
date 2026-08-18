@@ -6,6 +6,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import dev.celestia.mcalive2.MCAlive2Plugin;
+import dev.celestia.mcalive2.util.Standing;
 import io.papermc.paper.datacomponent.DataComponentTypes;
 import io.papermc.paper.datacomponent.item.ResolvableProfile;
 import net.kyori.adventure.text.Component;
@@ -51,6 +52,8 @@ import java.util.concurrent.ConcurrentHashMap;
 public class NpcManager {
 
     private static final long RESPAWN_COOLDOWN_MS = 60_000;
+    /** How far above/below a requested y {@link #safeStanding} will scan for solid ground. */
+    private static final int STANDING_SCAN_RADIUS = 12;
 
     private final MCAlive2Plugin plugin;
     private final NamespacedKey npcKey;
@@ -95,8 +98,15 @@ public class NpcManager {
         for (java.util.function.Consumer<String> l : removalListeners) l.accept(id);
     }
 
-    /** Spawn the backing entity for an NPC record and register it. */
+    /** Spawn the backing entity for an NPC record and register it, snapping to safe ground. */
     public Entity spawn(NpcData data, Location loc) {
+        return spawn(data, loc, true);
+    }
+
+    /** Spawn the backing entity for an NPC record and register it.
+     *  @param snap if true (the default), the location is passed through {@link #safeStanding}
+     *              first so the NPC never spawns floating or embedded in a wall. */
+    public Entity spawn(NpcData data, Location loc, boolean snap) {
         EntityType type;
         try {
             type = EntityType.valueOf(data.entityType.toUpperCase(Locale.ROOT));
@@ -104,14 +114,43 @@ public class NpcManager {
             throw new IllegalArgumentException("unknown entity type: " + data.entityType);
         }
         loc.getChunk().load();
+        Location target = snap ? safeStanding(loc) : loc;
         // never allow two entities for the same NPC: clear any loaded stragglers first
         removeTaggedEntities(data.id, null);
-        Entity entity = loc.getWorld().spawnEntity(loc, type);
+        Entity entity = loc.getWorld().spawnEntity(target, type);
         applyIdentity(entity, data);
         data.entityUuid = entity.getUniqueId();
-        data.lastLocation = loc.clone();
+        data.lastLocation = target.clone();
         npcs.put(data.id, data);
         return entity;
+    }
+
+    /**
+     * Resolve the nearest safe standing location to {@code loc}: scans y +/- {@link
+     * #STANDING_SCAN_RADIUS} for a spot with passable feet and head blocks and solid ground
+     * underfoot (see {@link Standing}). Deliberately NOT {@code getHighestBlockYAt} - that
+     * would drop an NPC standing near a floating island straight into the crater below it
+     * instead of onto the island surface.
+     */
+    public Location safeStanding(Location loc) {
+        World world = loc.getWorld();
+        int bx = loc.getBlockX();
+        int bz = loc.getBlockZ();
+        int minY = world.getMinHeight();
+        int maxY = world.getMaxHeight() - 1;
+        int requestedY = Math.max(minY, Math.min(maxY, loc.getBlockY()));
+        int resolvedY;
+        try {
+            resolvedY = Standing.resolve(requestedY, minY, maxY, STANDING_SCAN_RADIUS,
+                    y -> y >= minY && y <= maxY && world.getBlockAt(bx, y, bz).isPassable());
+        } catch (IllegalStateException e) {
+            throw new IllegalStateException("no safe standing spot near " + world.getName()
+                    + " " + bx + "," + requestedY + "," + bz + " (scanned +/-" + STANDING_SCAN_RADIUS
+                    + " blocks): " + e.getMessage());
+        }
+        Location safe = loc.clone();
+        safe.setY(resolvedY);
+        return safe;
     }
 
     private void applyIdentity(Entity entity, NpcData data) {
@@ -320,15 +359,25 @@ public class NpcManager {
 
     // ---- movement ----
 
-    /** Walk an NPC toward a target: mob pathfinding when available, stepped walking for mannequins. */
+    /** Walk an NPC toward a target (snapping to safe ground first): mob pathfinding when
+     *  available, stepped walking for mannequins. */
     public boolean walkTo(NpcData data, Location target, double speed) {
+        return walkTo(data, target, speed, true);
+    }
+
+    /** Walk an NPC toward a target: mob pathfinding when available, stepped walking for
+     *  mannequins.
+     *  @param snap if true (the default), the target is passed through {@link #safeStanding}
+     *              first so a walk order never sends the NPC into a wall or off into the air. */
+    public boolean walkTo(NpcData data, Location target, double speed, boolean snap) {
         Entity entity = resolveEntity(data);
         if (entity == null || target == null || target.getWorld() != entity.getWorld()) return false;
+        Location dest = snap ? safeStanding(target) : target;
         if (entity instanceof Mob mob) {
-            return mob.getPathfinder().moveTo(target, speed);
+            return mob.getPathfinder().moveTo(dest, speed);
         }
         if (entity instanceof LivingEntity living) {
-            startStepWalk(data.id, living, target.clone(), speed);
+            startStepWalk(data.id, living, dest.clone(), speed);
             return true;
         }
         return false;

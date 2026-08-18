@@ -16,6 +16,8 @@ import org.bukkit.block.data.BlockData;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.EntityType;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 
@@ -42,6 +44,7 @@ public class WorldActuators {
         d.register("spawn_particles", this::spawnParticles);
         d.register("play_sound", this::playSound);
         d.register("sample_terrain", this::sampleTerrain);
+        d.register("scan_area", this::scanArea);
         d.register("build_blueprint", this::buildBlueprint);
     }
 
@@ -192,7 +195,22 @@ public class WorldActuators {
         return TerrainSampler.sampleRect(world, minX, minZ, maxX, maxZ);
     }
 
-    /** Paste a blueprint: a JSON array of {dx,dy,dz,material,[data]} relative to an origin. */
+    private JsonObject scanArea(JsonObject args) {
+        World world = Json.world(args);
+        int x1 = (int) Json.reqDouble(args, "x1"), z1 = (int) Json.reqDouble(args, "z1");
+        int x2 = (int) Json.reqDouble(args, "x2"), z2 = (int) Json.reqDouble(args, "z2");
+        Integer yHint = args.has("yHint") && !args.get("yHint").isJsonNull()
+                ? (int) args.get("yHint").getAsDouble() : null;
+        int minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
+        int minZ = Math.min(z1, z2), maxZ = Math.max(z1, z2);
+        return TerrainSampler.scanArea(world, minX, minZ, maxX, maxZ, yHint);
+    }
+
+    /** Paste a blueprint: a JSON array of {dx,dy,dz,material,[data]} relative to an origin.
+     *  Optional {@code settle: "surface"} shifts the paste so the blueprint's lowest layer
+     *  sits on the actual terrain instead of hovering/sinking; optional {@code clearAbove:
+     *  true} clears the blueprint's bounding box to air first so trees/hillside can't
+     *  interpenetrate the build. */
     private JsonObject buildBlueprint(JsonObject args) {
         Location origin = Json.location(args);
         JsonArray blocks = args.has("blocks") && args.get("blocks").isJsonArray()
@@ -200,13 +218,33 @@ public class WorldActuators {
         List<BlueprintParser.BlockEntry> entries = BlueprintParser.parse(blocks, (int) fillCap(), BLUEPRINT_MAX_OFFSET);
 
         World world = origin.getWorld();
+        int originX = origin.getBlockX();
+        int originZ = origin.getBlockZ();
+        int originY = origin.getBlockY();
+
+        if ("surface".equalsIgnoreCase(Json.optString(args, "settle", null))) {
+            originY += settleShift(world, originX, originY, originZ, entries);
+        }
+
+        int minDx = Integer.MAX_VALUE, maxDx = Integer.MIN_VALUE;
+        int minDy = Integer.MAX_VALUE, maxDy = Integer.MIN_VALUE;
+        int minDz = Integer.MAX_VALUE, maxDz = Integer.MIN_VALUE;
+        for (BlueprintParser.BlockEntry e : entries) {
+            minDx = Math.min(minDx, e.dx()); maxDx = Math.max(maxDx, e.dx());
+            minDy = Math.min(minDy, e.dy()); maxDy = Math.max(maxDy, e.dy());
+            minDz = Math.min(minDz, e.dz()); maxDz = Math.max(maxDz, e.dz());
+        }
+
+        if (Json.optBool(args, "clearAbove", false)) {
+            clearBoundingBox(world,
+                    originX + minDx, originY + minDy, originZ + minDz,
+                    originX + maxDx, originY + maxDy, originZ + maxDz);
+        }
+
         int placed = 0;
         for (BlueprintParser.BlockEntry entry : entries) {
             Material mat = material(entry.material());
-            Block block = world.getBlockAt(
-                    origin.getBlockX() + entry.dx(),
-                    origin.getBlockY() + entry.dy(),
-                    origin.getBlockZ() + entry.dz());
+            Block block = world.getBlockAt(originX + entry.dx(), originY + entry.dy(), originZ + entry.dz());
             if (entry.data() != null && !entry.data().isBlank()) {
                 BlockData bd = Bukkit.createBlockData(mat, entry.data());
                 block.setBlockData(bd, false);
@@ -218,5 +256,46 @@ public class WorldActuators {
         JsonObject out = new JsonObject();
         out.addProperty("blocksPlaced", placed);
         return out;
+    }
+
+    /** How far to shift originY so the blueprint's lowest dy layer sits on the median
+     *  terrain surface under its footprint, rather than hovering above or sinking into it. */
+    private int settleShift(World world, int originX, int originY, int originZ, List<BlueprintParser.BlockEntry> entries) {
+        int minDy = entries.stream().mapToInt(BlueprintParser.BlockEntry::dy).min().orElse(0);
+        java.util.Set<Long> seen = new java.util.HashSet<>();
+        List<int[]> footprint = new ArrayList<>();
+        for (BlueprintParser.BlockEntry e : entries) {
+            if (e.dy() != minDy) continue;
+            long key = (((long) e.dx()) << 32) ^ (e.dz() & 0xffffffffL);
+            if (seen.add(key)) footprint.add(new int[]{e.dx(), e.dz()});
+        }
+        int[] surfaces = new int[footprint.size()];
+        for (int i = 0; i < footprint.size(); i++) {
+            int x = originX + footprint.get(i)[0];
+            int z = originZ + footprint.get(i)[1];
+            surfaces[i] = TerrainSampler.surfaceY(world, x, z, originY);
+        }
+        int[] sorted = surfaces.clone();
+        Arrays.sort(sorted);
+        int medianSurfaceY = sorted.length % 2 == 0
+                ? (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2
+                : sorted[sorted.length / 2];
+        int currentLowestWorldY = originY + minDy;
+        return medianSurfaceY - currentLowestWorldY;
+    }
+
+    private void clearBoundingBox(World world, int x1, int y1, int z1, int x2, int y2, int z2) {
+        long volume = (long) (x2 - x1 + 1) * (y2 - y1 + 1) * (z2 - z1 + 1);
+        long cap = fillCap();
+        if (volume > cap) {
+            throw new IllegalArgumentException("clearAbove bounding box too large: " + volume + " blocks (cap " + cap + ")");
+        }
+        for (int x = x1; x <= x2; x++) {
+            for (int y = y1; y <= y2; y++) {
+                for (int z = z1; z <= z2; z++) {
+                    world.getBlockAt(x, y, z).setType(Material.AIR, false);
+                }
+            }
+        }
     }
 }

@@ -55,3 +55,9 @@ auto-update:
 
   # Minutes of continuous zero-player time required before apply-when-empty triggers.
   empty-minutes: 10
+
+gadgets:
+  # Runtime code-injection host: lets the brain grow new server-side capabilities by
+  # compiling Java sent over the (token-authed) bridge. Set false to freeze - no new
+  # gadgets compile or run.
+  enabled: true

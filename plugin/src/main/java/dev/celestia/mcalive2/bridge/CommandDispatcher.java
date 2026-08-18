@@ -38,6 +38,11 @@ public class CommandDispatcher {
         handlers.put(name, handler);
     }
 
+    /** Removes a previously registered command, if present. Used by gadget_delete. */
+    public void unregister(String name) {
+        handlers.remove(name);
+    }
+
     /** Whether a command name has a registered handler (used by formula_define to validate steps). */
     public boolean isRegistered(String name) {
         return handlers.containsKey(name);

@@ -145,6 +145,43 @@ async function main() {
   assert(DIRECTOR_WAKE_EVENTS.has("npc_job_done"), "npc_job_done is a director wake event");
   assert(DIRECTOR_WAKE_EVENTS.has("npc_job_blocked"), "npc_job_blocked is a director wake event");
 
+  console.log("\n1a².55. Gadget tools: present in ALL_TOOLS, absent from ACTOR_TOOLS, schema declared in mcp-bridge.mjs");
+  for (const t of ["gadget_define", "gadget_run", "gadget_list", "gadget_get", "gadget_delete"]) {
+    assert(ALL_TOOLS.includes(t), `${t} is in ALL_TOOLS`);
+    assert(!ACTOR_TOOLS.includes(t), `${t} is NOT in ACTOR_TOOLS (director-only by omission)`);
+    assert(actorDisallowedTools(MCP_SERVER_NAME).includes(namespacedTool(t, MCP_SERVER_NAME)), `${t} is in the actor disallow-list`);
+  }
+  {
+    const bridgeSrcForGadgets = fs.readFileSync(path.join(BRAIN_DIR, "mcp-bridge.mjs"), "utf8");
+    assert(/pt\("gadget_define"/.test(bridgeSrcForGadgets), "mcp-bridge.mjs registers a gadget_define tool");
+    const gadgetDefineSrc = bridgeSrcForGadgets.slice(bridgeSrcForGadgets.indexOf('pt("gadget_define"'), bridgeSrcForGadgets.indexOf('pt("gadget_run"'));
+    assert(/id: z\.string\(\)/.test(gadgetDefineSrc), "gadget_define schema accepts id");
+    assert(/source: z\.string\(\)/.test(gadgetDefineSrc), "gadget_define schema accepts source");
+    assert(/description: z\.string\(\)/.test(gadgetDefineSrc), "gadget_define schema accepts description");
+  }
+
+  console.log("\n1a².6. Placement-safety tools/args: scan_area in ALL_TOOLS (director-only), build_blueprint/npc_spawn/npc_walk_to schemas carry the new args");
+  assert(ALL_TOOLS.includes("scan_area"), "scan_area is in ALL_TOOLS");
+  assert(!ACTOR_TOOLS.includes("scan_area"), "scan_area is NOT in ACTOR_TOOLS (director-only by omission)");
+  assert(actorDisallowedTools(MCP_SERVER_NAME).includes(namespacedTool("scan_area", MCP_SERVER_NAME)), "scan_area is in the actor disallow-list");
+
+  // mcp-bridge.mjs registers its tool schemas at module load time via a
+  // top-level `await server.connect(transport)` over stdio, so importing it
+  // directly here would hang the test process waiting for a client. Assert
+  // against the source text instead - it is a thin, hand-written zod schema
+  // file, so a substring check on the shape declarations is a faithful proxy
+  // for "the schema accepts this field".
+  const bridgeSrc = fs.readFileSync(path.join(BRAIN_DIR, "mcp-bridge.mjs"), "utf8");
+  assert(/pt\("scan_area"/.test(bridgeSrc), "mcp-bridge.mjs registers a scan_area tool");
+  assert(/x1: z\.number\(\), z1: z\.number\(\), x2: z\.number\(\), z2: z\.number\(\),\s*\n\s*world: z\.string\(\)\.optional\(\),\s*\n\s*yHint: z\.number\(\)\.optional\(\)/.test(bridgeSrc), "scan_area schema accepts x1/z1/x2/z2/world/yHint");
+  const buildBlueprintSrc = bridgeSrc.slice(bridgeSrc.indexOf('pt("build_blueprint"'), bridgeSrc.indexOf('pt("sample_terrain"'));
+  assert(/settle: z\.enum\(\["surface"\]\)\.optional\(\)/.test(buildBlueprintSrc), "build_blueprint schema accepts settle:\"surface\"");
+  assert(/clearAbove: z\.boolean\(\)\.optional\(\)/.test(buildBlueprintSrc), "build_blueprint schema accepts clearAbove");
+  const npcSpawnSrc = bridgeSrc.slice(bridgeSrc.indexOf('pt("npc_spawn"'), bridgeSrc.indexOf('pt("npc_update"'));
+  assert(/snap: z\.boolean\(\)\.optional\(\)/.test(npcSpawnSrc), "npc_spawn schema accepts snap");
+  const npcWalkToSrc = bridgeSrc.slice(bridgeSrc.indexOf('pt("npc_walk_to"'), bridgeSrc.indexOf('pt("npc_look_at"'));
+  assert(/snap: z\.boolean\(\)\.optional\(\)/.test(npcWalkToSrc), "npc_walk_to schema accepts snap");
+
   console.log("\n1a³. Order scenes get the higher BRAIN_ORDER_MAX_STEPS turn ceiling");
   const cfgDefault = loadConfig({});
   assert(cfgDefault.orderMaxSteps === 80, `BRAIN_ORDER_MAX_STEPS defaults to 80 (got ${cfgDefault.orderMaxSteps})`);
@@ -650,6 +687,14 @@ async function main() {
     assert(directorDryRun.prompt.includes("COMPOSE it as a formula"), "director prompt instructs composing formulas instead of wishing for tools");
     assert(directorDryRun.prompt.includes("JOBS"), "director prompt has a JOBS section");
     assert(directorDryRun.prompt.includes("npc_assign_job"), "director prompt's JOBS section mentions npc_assign_job");
+    assert(directorDryRun.prompt.includes("BUILDING DISCIPLINE"), "director prompt has a BUILDING DISCIPLINE section");
+    assert(directorDryRun.prompt.includes("scan_area the footprint"), "BUILDING DISCIPLINE section instructs scanning the footprint before building");
+    assert(directorDryRun.prompt.includes('settle:"surface"'), "BUILDING DISCIPLINE section mentions settle:\"surface\"");
+    assert(directorDryRun.prompt.includes("clearAbove:true"), "BUILDING DISCIPLINE section mentions clearAbove:true");
+    assert(directorDryRun.prompt.includes("floors are where you thought they were"), "BUILDING DISCIPLINE section text is proper English (no stray non-English word)");
+    assert(directorDryRun.prompt.includes("CAPABILITY LADDER"), "director prompt has a CAPABILITY LADDER section");
+    assert(directorDryRun.prompt.includes("GADGET"), "director prompt's capability ladder mentions writing a GADGET");
+    assert(directorDryRun.prompt.includes("gadget_define"), "director prompt's capability ladder mentions gadget_define");
   }
 
   // --- lore load: bestiary text reaches the director's system prompt ---

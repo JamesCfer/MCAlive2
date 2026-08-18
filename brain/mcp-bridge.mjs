@@ -129,9 +129,16 @@ pt("build_blueprint", "Paste a JSON blueprint (list of {dx,dy,dz,material[,data]
     material: z.string(),
     data: z.string().optional(),
   })),
+  settle: z.enum(["surface"]).optional().describe("if \"surface\", the paste is shifted vertically so its lowest layer sits on the median footprint surface (see scan_area) instead of pasting at the literal y given"),
+  clearAbove: z.boolean().optional().describe("clear the blueprint's bounding box (to air) before pasting, so structures don't paste into existing terrain/clutter"),
 });
 pt("sample_terrain", "Grid summary (heightmap, biome, notable features) for a rectangular area - the director's eyes when planning a build.", {
   x1: z.number(), z1: z.number(), x2: z.number(), z2: z.number(), world: z.string().optional(),
+});
+pt("scan_area", "Build-resolution surface scanner for a footprint - use before placing any structure. Returns {minY,maxY,medianY,flat,columns?}: columns (capped at 4096, per-column material/height detail only for areas <= 256 columns) let you see exactly what's underfoot. Pass yHint near your intended build level - on floating terrain the scanner resolves to the surface NEAREST that y (e.g. a floating island's top, not the ground far below).", {
+  x1: z.number(), z1: z.number(), x2: z.number(), z2: z.number(),
+  world: z.string().optional(),
+  yHint: z.number().optional().describe("y level to search near; the scanner finds the surface nearest this height (important on floating terrain, where there may be multiple candidate surfaces)"),
 });
 pt("spawn_entity", "Spawn a plain (non-NPC) entity, e.g. ZOMBIE, SHEEP, IRON_GOLEM.", { ...pos, type: z.string() });
 pt("remove_entity", "Remove a loaded entity by uuid.", { uuid: z.string() });
@@ -181,6 +188,7 @@ pt("npc_spawn",
     home: posObj.optional(),
     work: posObj.optional(),
     schedule: z.array(scheduleEntry).optional(),
+    snap: z.boolean().optional().describe("ground-snap the NPC to the nearest valid standing spot within +-12 of the requested y (default true); pass false to trust the exact coordinates given"),
   });
 pt("npc_update",
   "Update an NPC's name, appearance, home, work, or schedule. " +
@@ -205,6 +213,7 @@ pt("npc_walk_to", "Walk an NPC to a position (pauses its daily routine for holdS
   id: z.string(), ...pos,
   speed: z.number().optional(),
   holdSeconds: z.number().optional(),
+  snap: z.boolean().optional().describe("ground-snap the destination to the nearest valid standing spot within +-12 of the requested y (default true); pass false to trust the exact coordinates given"),
 });
 pt("npc_look_at", "Turn an NPC to face a position or player.", { id: z.string(), x: z.number().optional(), y: z.number().optional(), z: z.number().optional(), player: z.string().optional() });
 pt("npc_equip", "Equip an NPC with an item in a given slot.", { id: z.string(), slot: z.enum(["hand", "offhand", "head", "chest", "legs", "feet"]), material: z.string() });
@@ -310,6 +319,33 @@ pt("npc_assign_job",
   }),
 });
 pt("npc_job_cancel", "Cancel an NPC's assigned job, stopping it wherever it currently is in the cycle.", { npcId: z.string() });
+
+// --- gadgets ---
+// Gadgets are the third rung of the capability ladder (tool -> formula ->
+// gadget): real Java source, compiled ON the running server and registered
+// immediately as bridge command "gadget:<id>" - no plugin release, no
+// restart. Reserve them for genuinely new primitives (new physics, new
+// senses, algorithms like pathfinding) that cannot be composed from existing
+// tools/formulas.
+pt("gadget_define",
+  "Inject a NEW PRIMITIVE into the running server as Java source - no plugin release, no restart. " +
+  "Source is a Java class implementing the plugin's GadgetContract: " +
+  "`public com.google.gson.JsonObject run(com.google.gson.JsonObject args, dev.celestia.mcalive2.gadget.GadgetContext ctx)` " +
+  "- ctx exposes plugin(), server(), world(String), a dispatcher-invoke(cmd, args) helper to call other bridge commands, and scheduler helpers. " +
+  "Compiled on the server the moment you call this; on success it registers immediately as bridge command \"gadget:<id>\" and persists across restarts. " +
+  "On a compile failure you get back an ERROR RESULT whose message contains the full javac diagnostics - read them, fix the source, and call gadget_define " +
+  "again with the same id to redefine it. Keep gadgets small and single-purpose; check gadget_list before writing a new one - you may already have it.", {
+  id: z.string().describe("unique short id, e.g. 'pathfind-flat-route'"),
+  source: z.string().describe("full Java source for a class implementing GadgetContract's run(JsonObject, GadgetContext)"),
+  description: z.string(),
+});
+pt("gadget_run", "Run a previously defined gadget with concrete argument values - equivalent to calling bridge command \"gadget:<id>\" directly. Returns whatever the gadget's run() returns.", {
+  id: z.string(),
+  args: z.record(z.string(), z.any()).optional(),
+});
+pt("gadget_list", "List all defined gadgets (id + description) - check this before writing a new gadget in case you already have the capability.", {});
+pt("gadget_get", "Read one gadget's full definition (id, description, source) by id.", { id: z.string() });
+pt("gadget_delete", "Delete a gadget definition by id.", { id: z.string() });
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

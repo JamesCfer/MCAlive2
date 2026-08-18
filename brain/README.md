@@ -281,6 +281,32 @@ deposit real outputs — making villages genuinely produce and consume.
 `npc_job_done` and `npc_job_blocked` (e.g. missing inputs) are director wake
 events too.
 
+### Gadgets
+
+A third director tool family, alongside formulas and jobs: **gadgets**
+(`gadget_define`/`gadget_run`/`gadget_list`/`gadget_get`/`gadget_delete`) are
+the top rung of the director's capability ladder:
+
+1. An existing tool or gadget — use it (check `gadget_list` first).
+2. Composable from existing tools — define a **formula** (see above).
+3. A genuinely new primitive (new physics, new senses, an algorithm like
+   pathfinding) — write a **gadget**: real Java source, injected and
+   compiled ON the running server via `gadget_define`, registered
+   immediately as bridge command `gadget:<id>` with no plugin release and no
+   restart. `gadget_run {id, args}` calls it exactly like any other bridge
+   command.
+
+The contract: a gadget's source is a Java class implementing the plugin's
+`GadgetContract` — `JsonObject run(JsonObject args, GadgetContext ctx)` —
+where `ctx` exposes `plugin()`, `server()`, `world(String)`, a
+dispatcher-invoke helper to call other bridge commands, and scheduler
+helpers. A failed compile comes back as an ERROR RESULT carrying the full
+`javac` diagnostics in the message; the director is briefed to read them,
+fix the source, and call `gadget_define` again with the same id to iterate
+until it compiles — then test it with `gadget_run` on safe inputs before
+relying on it in a scene. Gadgets are meant to be kept small and
+single-purpose.
+
 Edit these files freely — the service re-reads `brain/lore/` on a timer
 (`BRAIN_LORE_REFRESH_MS`, default 10 minutes) and picks up changes without
 a restart. Add more numbered files to grow the lore; the numeric prefix
@@ -370,6 +396,15 @@ exist specifically for this, director-only (absent from `ACTOR_TOOLS`):
 `create_explosion {x,y,z,power,fire,breakBlocks}`, `strike_lightning
 {x,z,count,radiusBlocks,intervalTicks,explosionPower} -> {sequenceId}`, and
 `move_region {x1,y1,z1,x2,y2,z2,dx,dy,dz,clearSource}`.
+
+Placement safety: `scan_area {x1,z1,x2,z2,world?,yHint?}` is a build-resolution
+surface scanner (`yHint` resolves to the surface nearest that height, so
+floating terrain scans the island top rather than the ground far below) the
+director is briefed to call before every build; `build_blueprint` accepts
+`settle:"surface"` (shifts the paste so its lowest layer sits on the scanned
+surface) and `clearAbove:true` (clears the bounding box first), and
+`npc_spawn`/`npc_walk_to` ground-snap NPCs to the nearest valid standing spot
+within ±12 of the requested y by default (`snap:false` to opt out).
 
 | Var | Default | Meaning |
 |---|---|---|

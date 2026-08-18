@@ -64,11 +64,13 @@ export const ALL_TOOLS = [
   // Ledger
   "ledger_put", "ledger_get", "ledger_query", "ledger_delete", "npc_context",
   // Info
-  "get_server_info", "get_block", "sample_terrain",
+  "get_server_info", "get_block", "sample_terrain", "scan_area",
   // Formulas - reusable, parameterized recipes over the tools above
   "formula_define", "formula_run", "formula_list", "formula_get", "formula_delete",
   // NPC jobs - NPCs physically working real stations/chests with finite items
   "npc_assign_job", "npc_job_cancel",
+  // Gadgets - runtime-injected Java primitives compiled on the running server
+  "gadget_define", "gadget_run", "gadget_list", "gadget_get", "gadget_delete",
 ];
 
 // NPC actors may ONLY call these three tools (DESIGN.md "NPC actors").

@@ -8,6 +8,8 @@ import dev.celestia.mcalive2.actuators.WorldActuators;
 import dev.celestia.mcalive2.bridge.BridgeServer;
 import dev.celestia.mcalive2.bridge.CommandDispatcher;
 import dev.celestia.mcalive2.formula.FormulaActuators;
+import dev.celestia.mcalive2.gadget.GadgetActuators;
+import dev.celestia.mcalive2.gadget.GadgetManager;
 import dev.celestia.mcalive2.npc.JobManager;
 import dev.celestia.mcalive2.npc.NpcManager;
 import dev.celestia.mcalive2.senses.ExploredTracker;
@@ -30,6 +32,7 @@ public final class MCAlive2Plugin extends JavaPlugin {
     private LedgerActuators ledgerActuators;
     private ExploredTracker exploredTracker;
     private FormulaActuators formulaActuators;
+    private GadgetManager gadgetManager;
 
     @Override
     public void onEnable() {
@@ -53,6 +56,10 @@ public final class MCAlive2Plugin extends JavaPlugin {
         formulaActuators = new FormulaActuators(this, dispatcher);
         formulaActuators.load();
         formulaActuators.register(dispatcher);
+
+        gadgetManager = new GadgetManager(this, dispatcher);
+        gadgetManager.loadAll();
+        new GadgetActuators(this, gadgetManager).register(dispatcher);
 
         String host = getConfig().getString("bridge.host", "127.0.0.1");
         int port = getConfig().getInt("bridge.port", 8765);

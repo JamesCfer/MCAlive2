@@ -76,7 +76,8 @@ public class NpcActuators {
         data.skin = Json.optString(args, "skin", null);
         applyPlaces(data, args);
         Location loc = Json.location(args);
-        npcs.spawn(data, loc);
+        boolean snap = Json.optBool(args, "snap", true);
+        npcs.spawn(data, loc, snap);
         applySchedule(data, args);
         npcs.save();
         return npcs.toJson(data);
@@ -168,9 +169,10 @@ public class NpcActuators {
         NpcData data = require(args);
         Location target = Json.location(args);
         double speed = Json.optDouble(args, "speed", 1.0);
+        boolean snap = Json.optBool(args, "snap", true);
         // pause the daily routine so the walk isn't overridden
         data.manualOverrideUntilMs = System.currentTimeMillis() + (long) (Json.optDouble(args, "holdSeconds", 60) * 1000);
-        boolean started = npcs.walkTo(data, target, speed);
+        boolean started = npcs.walkTo(data, target, speed, snap);
         JsonObject out = new JsonObject();
         out.addProperty("pathStarted", started);
         return out;
