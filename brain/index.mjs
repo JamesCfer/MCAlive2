@@ -31,6 +31,7 @@ import { loadConfig, DIRECTOR_WAKE_EVENTS } from "./lib/config.mjs";
 import { log, nextSceneNumber } from "./lib/logger.mjs";
 import { journalSkip } from "./lib/decisions-journal.mjs";
 import { loadLore, watchLore } from "./lib/lore.mjs";
+import { startConsoleServer } from "./lib/console-server.mjs";
 import { UsageTracker } from "./lib/usage-tracker.mjs";
 import { RateLimiter } from "./lib/rate-limiter.mjs";
 import { BridgeClient } from "./lib/bridge-client.mjs";
@@ -65,6 +66,17 @@ export async function main(env = process.env) {
     lore.text = text;
     log.info("lore_reloaded", { bytes: text.length });
   });
+
+  // Lore Console: operator-facing HTML page for typing free-text lore
+  // directives without touching files by hand (lib/console-server.mjs).
+  // Reuses loreWatch's own `tick` - the exact function lore.mjs's timer
+  // calls - so a directive lands in `lore.text` immediately instead of
+  // waiting up to BRAIN_LORE_REFRESH_MS.
+  let consoleServer = null;
+  if (config.consoleEnabled) {
+    consoleServer = await startConsoleServer(config, { reloadLore: loreWatch.tick });
+    log.info("console_listening", { bind: config.consoleBind, port: consoleServer.port });
+  }
 
   const onlinePlayers = new Set();
   const actorQueues = new Map(); // `${npcId}::${player}` -> Promise chain
@@ -270,6 +282,7 @@ export async function main(env = process.env) {
       bridge.stop();
       loreWatch.stop();
       actorMemory.saveSync();
+      if (consoleServer) return consoleServer.stop();
     },
   };
 }

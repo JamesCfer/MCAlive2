@@ -200,6 +200,48 @@ Edit these files freely — the service re-reads `brain/lore/` on a timer
 a restart. Add more numbered files to grow the lore; the numeric prefix
 just controls read order.
 
+## Lore Console
+
+A tiny local (or LAN) HTML page for the operator to type a free-text
+instruction that the DIRECTOR must fold into the world — e.g. "add a ruined
+tower somewhere in the eastern mountains with a hermit who knows about the
+old war" — without touching any files by hand. On by default:
+
+```
+http://127.0.0.1:7777/?token=YOUR-TOKEN
+```
+
+The token is `BRAIN_CONSOLE_TOKEN` (defaults to `MCALIVE2_TOKEN`, so it's
+already set if you've configured the plugin connection). Visit once with
+`?token=...` in the URL and the page sets an `HttpOnly` cookie so its own
+page (the textarea, the delete buttons, the auto-refreshing decisions tail)
+keeps working without the token in the address bar. Any request without a
+valid token — cookie or query param — gets a `401` telling you to append
+`?token=YOUR-TOKEN`. Bind `BRAIN_CONSOLE_BIND=0.0.0.0` to reach it from
+another machine on the LAN (the token is the only thing standing between
+that and anyone on the network, so pick a real one).
+
+The page is a textarea + "Send to the world" button, a list of past
+directives (newest first, each deletable if you change your mind), and a
+live tail of the last ~40 lines of `state/decisions.log` (auto-refreshing
+every 5s).
+
+Sending a directive appends a dated block to
+`brain/lore/90-operator-directives.md` (created on first use) and
+immediately triggers the same lore reload `lib/lore.mjs`'s watcher uses on
+its own timer — so the change is live for the **next** scene, no restart
+and no waiting for `BRAIN_LORE_REFRESH_MS`. The `90-` prefix sorts this file
+LAST among `lore/*.md`, so operator directives land at the very end of the
+director's system prompt, and the file's header line makes the priority
+explicit: they override taste, never the standing rules in `00-rules.md`.
+
+| Var | Default | Meaning |
+|---|---|---|
+| `BRAIN_CONSOLE` | `1` | Set to `0` to disable the console entirely (it won't bind a port) |
+| `BRAIN_CONSOLE_BIND` | `127.0.0.1` | Interface to bind; `0.0.0.0` to reach it from the LAN |
+| `BRAIN_CONSOLE_PORT` | `7777` | Port to listen on |
+| `BRAIN_CONSOLE_TOKEN` | `MCALIVE2_TOKEN` | Shared token required on every request |
+
 ## Testing (no API key, no Minecraft server required)
 
 ```bash
@@ -230,6 +272,13 @@ scripted event timeline), runs `index.mjs` against it with
 - the kill switch (`BRAIN_DISABLED_FILE` / `brain/DISABLED`) blocks both
   director scenes and actor turns entirely
 - the daily usage budget file (`usage.json`) is written to `BRAIN_STATE_DIR`
+- Lore Console: requests without a valid token get `401`; posting a
+  directive with a valid token appends it to
+  `lore/90-operator-directives.md` AND a subsequent director scene's
+  dry-run system prompt already contains it (proving the immediate
+  hot-reload, not just the file write); the page lists it, deleting it
+  removes it from both the file and the page; the console never binds a
+  port when `BRAIN_CONSOLE=0`
 
 It exits non-zero if any assertion fails.
 
@@ -259,12 +308,16 @@ It exits non-zero if any assertion fails.
 | `BRAIN_NPC_CONTEXT_TIMEOUT_MS` | `8000` | Timeout for the direct `npc_context` bridge call made before an actor turn |
 | `BRAIN_LOG_JSON` | `0` | `1` = emit one-JSON-object-per-line logs instead of the default human-readable console narration |
 | `BRAIN_DECISIONS_MAX_BYTES` | `1048576` (1MB) | Size threshold at which `brain/state/decisions.log` rotates to `decisions.log.1` (mainly for tests) |
+| `BRAIN_CONSOLE` | `1` | Set to `0` to disable the Lore Console (see above) entirely |
+| `BRAIN_CONSOLE_BIND` | `127.0.0.1` | Interface the Lore Console binds to; `0.0.0.0` to reach it from the LAN |
+| `BRAIN_CONSOLE_PORT` | `7777` | Port the Lore Console listens on |
+| `BRAIN_CONSOLE_TOKEN` | `MCALIVE2_TOKEN` | Shared token required on every Lore Console request |
 
 ## Files
 
 - `index.mjs` — wires everything together: the bridge connection, event
   routing (director vs. actor), guardrail checks, director scene scheduler,
-  actor turn queueing.
+  actor turn queueing, the Lore Console.
 - `mcp-bridge.mjs` — stdio MCP server exposing DESIGN.md's actuator/ledger/
   info command set as tools, pure passthrough to the plugin WebSocket
   (pattern reference: `minecraftalive/mcp/server.mjs`).
@@ -296,6 +349,10 @@ It exits non-zero if any assertion fails.
   rotation.
 - `lib/rate-limiter.mjs` — sliding-window turns-per-minute limiter.
 - `lib/lore.mjs` — loads and watches `brain/lore/*.md`.
+- `lib/console-server.mjs` — the Lore Console: a `node:http` server (token
+  auth via query param + cookie) serving the operator page, and the
+  `lore/90-operator-directives.md` add/list/delete logic, triggering an
+  immediate lore reload after every change.
 - `lore/` — the world's lore, loaded into the director's system prompt.
 - `blueprints/` — reserved for M3 (`build_blueprint` JSON blueprint
   library); empty for M1.

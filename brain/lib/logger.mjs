@@ -150,6 +150,10 @@ export function formatHumanLine(level, msg, fields = {}, now = new Date()) {
       body = `bridge reconnecting (attempt ${fields.attempt}, in ${fields.delayMs}ms)`;
       break;
 
+    case "console_listening":
+      body = `console listening on http://${fields.bind}:${fields.port} (token required)`;
+      break;
+
     default: {
       const rest = Object.entries(fields)
         .map(([k, v]) => `${k}=${typeof v === "object" && v !== null ? compactArgs(v, 60) : v}`)

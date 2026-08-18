@@ -390,6 +390,128 @@ async function main() {
 
   brain3.child.kill();
 
+  console.log("\n5. Lore Console: auth, directive add/hot-reload/list, delete, GET off by default");
+  const port4 = 8902;
+  const consoleToken = "console-test-token";
+  const bridge4 = spawnNode([path.join(BRAIN_DIR, "test", "mock-bridge.mjs")], {
+    MOCK_BRIDGE_PORT: String(port4),
+    MOCK_BRIDGE_TOKEN: "test-token",
+  });
+  await wait(300);
+
+  const consoleLoreDir = fs.mkdtempSync(path.join(os.tmpdir(), "brain-console-lore-"));
+  const brain4 = spawnNode([path.join(BRAIN_DIR, "index.mjs")], {
+    MCALIVE2_URL: `ws://127.0.0.1:${port4}`,
+    MCALIVE2_TOKEN: "test-token",
+    BRAIN_DEBOUNCE_MS: "300",
+    BRAIN_DRY_RUN: "1",
+    BRAIN_ENABLED: "1",
+    BRAIN_LORE_REFRESH_MS: "600000",
+    BRAIN_LORE_DIR: consoleLoreDir,
+    BRAIN_STATE_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "brain-console-state-")),
+    BRAIN_LOG_JSON: "1",
+    BRAIN_CONSOLE: "1",
+    BRAIN_CONSOLE_BIND: "127.0.0.1",
+    BRAIN_CONSOLE_PORT: "0", // ephemeral - read the actual bound port back from the console_listening log line
+    BRAIN_CONSOLE_TOKEN: consoleToken,
+  });
+
+  const authed4 = await waitFor(brain4.logs, (l) => l.msg === "bridge_auth_ok", 5000);
+  assert(authed4, "console-test brain authenticated against the bridge");
+
+  const gotListening = await waitFor(brain4.logs, (l) => l.msg === "console_listening", 5000);
+  assert(gotListening, "console_listening was logged at startup");
+  const listening = brain4.logs.find((l) => l.msg === "console_listening");
+  const consolePort = listening && listening.port;
+  assert(typeof consolePort === "number" && consolePort > 0, `console_listening logged an actual bound port (got ${consolePort})`);
+
+  const base = `http://127.0.0.1:${consolePort}`;
+
+  const unauthed = await fetch(`${base}/`);
+  assert(unauthed.status === 401, `GET / with no token is rejected (got ${unauthed.status})`);
+  const unauthedBody = await unauthed.text();
+  assert(unauthedBody.includes("?token="), "401 page tells the operator to append ?token=YOUR-TOKEN");
+
+  // Deliberately NOT the same wording as the page's textarea placeholder
+  // example, so "page still contains directiveText" is an unambiguous
+  // signal about the directives list, not a false positive off the
+  // placeholder text.
+  const directiveText = "Add a sunken shrine east of the river, guarded by a retired sellsword who remembers the old war.";
+  const postRes = await fetch(`${base}/directive?token=${consoleToken}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: directiveText }),
+  });
+  const postJson = await postRes.json();
+  assert(postRes.status === 200 && postJson.ok === true, `POST /directive with a valid token succeeds (got ${postRes.status} ${JSON.stringify(postJson)})`);
+  assert(typeof postJson.timestamp === "string" && postJson.timestamp.length > 0, "POST /directive returns the new block's timestamp");
+
+  const directivesFile = path.join(consoleLoreDir, "90-operator-directives.md");
+  assert(fs.existsSync(directivesFile), "lore/90-operator-directives.md was created");
+  const directivesFileText = fs.readFileSync(directivesFile, "utf8");
+  assert(directivesFileText.includes("Operator Directives"), "directives file carries its explanatory header on first use");
+  assert(directivesFileText.includes(directiveText), "directives file contains the appended directive text");
+
+  const gotHotReload = await waitFor(
+    brain4.logs,
+    (l) => l.msg === "dry_run_director_turn" && typeof l.systemPrompt === "string" && l.systemPrompt.includes(directiveText),
+    5000
+  );
+  assert(gotHotReload, "a director scene's dry-run system prompt contains the directive text (hot-reload path, no restart needed)");
+
+  const pageRes = await fetch(`${base}/?token=${consoleToken}`);
+  const pageHtml = await pageRes.text();
+  assert(pageRes.status === 200, `GET / with a valid token succeeds (got ${pageRes.status})`);
+  assert(pageHtml.includes(directiveText), "GET / page HTML lists the directive text");
+  assert(pageHtml.includes("Send to the world"), "GET / page has the directive textarea/button");
+
+  const decisionsRes = await fetch(`${base}/decisions?token=${consoleToken}`);
+  assert(decisionsRes.status === 200, `GET /decisions with a valid token succeeds (got ${decisionsRes.status})`);
+
+  const deleteRes = await fetch(`${base}/directive/delete?token=${consoleToken}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ timestamp: postJson.timestamp }),
+  });
+  const deleteJson = await deleteRes.json();
+  assert(deleteRes.status === 200 && deleteJson.ok === true, `POST /directive/delete removes the block (got ${deleteRes.status} ${JSON.stringify(deleteJson)})`);
+  const afterDelete = fs.readFileSync(directivesFile, "utf8");
+  assert(!afterDelete.includes(directiveText), "directive text is gone from the file after delete");
+
+  const pageAfterDelete = await fetch(`${base}/?token=${consoleToken}`);
+  const pageAfterDeleteHtml = await pageAfterDelete.text();
+  assert(!pageAfterDeleteHtml.includes(directiveText), "GET / page no longer lists the deleted directive");
+
+  brain4.child.kill();
+  bridge4.child.kill();
+
+  console.log("\n6. Lore Console does not start when BRAIN_CONSOLE=0");
+  const port5 = 8903;
+  const bridge5 = spawnNode([path.join(BRAIN_DIR, "test", "mock-bridge.mjs")], {
+    MOCK_BRIDGE_PORT: String(port5),
+    MOCK_BRIDGE_TOKEN: "test-token",
+  });
+  await wait(300);
+
+  const brain5 = spawnNode([path.join(BRAIN_DIR, "index.mjs")], {
+    MCALIVE2_URL: `ws://127.0.0.1:${port5}`,
+    MCALIVE2_TOKEN: "test-token",
+    BRAIN_DEBOUNCE_MS: "300",
+    BRAIN_DRY_RUN: "1",
+    BRAIN_ENABLED: "1",
+    BRAIN_LORE_REFRESH_MS: "600000",
+    BRAIN_STATE_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "brain-console-off-")),
+    BRAIN_LOG_JSON: "1",
+    BRAIN_CONSOLE: "0",
+  });
+  const authed5 = await waitFor(brain5.logs, (l) => l.msg === "bridge_auth_ok", 5000);
+  assert(authed5, "BRAIN_CONSOLE=0 brain instance still authenticates against the bridge normally");
+  await wait(500);
+  assert(!brain5.logs.some((l) => l.msg === "console_listening"), "no console_listening log line when BRAIN_CONSOLE=0");
+
+  brain5.child.kill();
+  bridge5.child.kill();
+
   await wait(200);
 
   console.log(`\n${failures === 0 ? "ALL CHECKS PASSED" : failures + " CHECK(S) FAILED"}`);

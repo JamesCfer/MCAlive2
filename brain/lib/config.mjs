@@ -67,9 +67,10 @@ export const DIRECTOR_WAKE_EVENTS = new Set([
 ]);
 
 export function loadConfig(env = process.env) {
+  const mcalive2Token = env.MCALIVE2_TOKEN || "change-me";
   return {
     mcalive2Url: env.MCALIVE2_URL || "ws://127.0.0.1:8765",
-    mcalive2Token: env.MCALIVE2_TOKEN || "change-me",
+    mcalive2Token,
 
     debounceMs: num("BRAIN_DEBOUNCE_MS", 2500),
     loreRefreshMs: num("BRAIN_LORE_REFRESH_MS", 600000),
@@ -96,6 +97,14 @@ export function loadConfig(env = process.env) {
     npcChatRangeBlocks: num("BRAIN_NPC_CHAT_RANGE", 8),
     actorHistoryTurns: num("BRAIN_ACTOR_HISTORY_TURNS", 20),
     npcContextTimeoutMs: num("BRAIN_NPC_CONTEXT_TIMEOUT_MS", 8000),
+
+    // Lore Console: a tiny local HTTP page for the operator to type
+    // free-text directives ("add a ruined tower...") that get folded into
+    // the world's lore - see lib/console-server.mjs.
+    consoleEnabled: bool01("BRAIN_CONSOLE", true),
+    consoleBind: env.BRAIN_CONSOLE_BIND || "127.0.0.1",
+    consolePort: num("BRAIN_CONSOLE_PORT", 7777),
+    consoleToken: env.BRAIN_CONSOLE_TOKEN || mcalive2Token,
   };
 }
 
