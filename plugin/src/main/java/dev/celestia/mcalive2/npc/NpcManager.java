@@ -200,17 +200,24 @@ public class NpcManager {
         save();
     }
 
-    /** A player head representing this NPC, wearing their skin if known. Suitable as a memorial drop. */
+    /**
+     * A player head representing this NPC, wearing their skin if known. Suitable as a
+     * memorial drop, and PDC-stamped with the NPC's id (same {@link #npcKey} used to tag
+     * the living entity) so it doubles as a provable revival token - see
+     * {@code npc_head_taken} / {@code npc_head_check}.
+     */
     public ItemStack headOf(NpcData data) {
         ItemStack item = new ItemStack(Material.PLAYER_HEAD);
         Component name = Component.text(data.name, NamedTextColor.GOLD).decoration(TextDecoration.ITALIC, false);
         Component lore = Component.text("In memoriam.", NamedTextColor.GRAY).decoration(TextDecoration.ITALIC, false);
+        Component lingers = Component.text("Something of them lingers.", NamedTextColor.GRAY).decoration(TextDecoration.ITALIC, false);
         if (data.skin != null) {
             item.setData(DataComponentTypes.PROFILE, ResolvableProfile.resolvableProfile().name(data.skin).build());
         }
         item.editMeta(meta -> {
             meta.displayName(name);
-            meta.lore(List.of(lore));
+            meta.lore(List.of(lore, lingers));
+            meta.getPersistentDataContainer().set(npcKey, PersistentDataType.STRING, data.id);
         });
         return item;
     }

@@ -189,6 +189,10 @@ pt("npc_walk_to", "Walk an NPC to a position (pauses its daily routine for holdS
 pt("npc_look_at", "Turn an NPC to face a position or player.", { id: z.string(), x: z.number().optional(), y: z.number().optional(), z: z.number().optional(), player: z.string().optional() });
 pt("npc_equip", "Equip an NPC with an item in a given slot.", { id: z.string(), slot: z.enum(["hand", "offhand", "head", "chest", "legs", "feet"]), material: z.string() });
 pt("npc_pose", "Set a small physical pose/animation beat for an NPC (e.g. wave, sit, point).", { id: z.string(), pose: z.string() });
+pt("npc_head_check", "Check whether the item a player holds is a dead NPC's head - the revival token. Returns npcId/npcName/dead.", {
+  player: z.string(),
+  slot: z.number().int().optional().describe("hotbar slot 0-8; defaults to the player's main hand"),
+});
 
 // --- players ---
 pt("list_players", "Online players with location, health, hunger, level, held item.", {});

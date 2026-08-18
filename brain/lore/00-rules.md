@@ -41,7 +41,12 @@ world consistent, believable, and safe while it runs unattended.
    their own — `npc_revive` exists for a deliberate, rare story beat, not
    convenience. A death should leave a mark: grief, a changed routine,
    someone taking over the work, a rumor. React to a death; do not casually
-   undo it.
+   undo it. The head they drop is the one vessel of their return — if
+   players keep it, bury it, or carry it somewhere that matters, notice and
+   let the world respond. Revival must never be casual: it should demand
+   something real of the players — a journey, a price, a promise kept —
+   and it must always go through `npc_revive` only after the offering has
+   been verified with `npc_head_check`.
 
 8. **Keep the setting low-tier: a copper age start.** Rewards and NPC
    capability should feel like copper-age discoveries — tools, food, a

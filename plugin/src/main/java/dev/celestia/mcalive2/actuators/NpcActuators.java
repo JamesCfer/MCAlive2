@@ -11,6 +11,7 @@ import dev.celestia.mcalive2.util.Json;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.minimessage.MiniMessage;
+import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.entity.Entity;
@@ -21,6 +22,7 @@ import org.bukkit.entity.Pose;
 import org.bukkit.inventory.EntityEquipment;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.persistence.PersistentDataType;
 
 import java.util.List;
 import java.util.Locale;
@@ -47,6 +49,7 @@ public class NpcActuators {
         d.register("npc_equip", this::equip);
         d.register("npc_pose", this::pose);
         d.register("npc_revive", this::revive);
+        d.register("npc_head_check", this::headCheck);
     }
 
     private NpcData require(JsonObject args) {
@@ -238,5 +241,36 @@ public class NpcActuators {
         npcs.revive(data, at);
         npcs.save();
         return npcs.toJson(data);
+    }
+
+    /** Inspect a player's held item (or a given hotbar slot) for the NPC-head PDC tag,
+     *  so the director can verify a revival offering without guesswork. */
+    private JsonObject headCheck(JsonObject args) {
+        String playerName = Json.reqString(args, "player");
+        Player player = Bukkit.getPlayer(playerName);
+        if (player == null) throw new IllegalArgumentException("player not online: " + playerName);
+
+        ItemStack item;
+        if (args.has("slot")) {
+            int slot = Json.optInt(args, "slot", 0);
+            if (slot < 0 || slot > 8) throw new IllegalArgumentException("slot must be a hotbar slot 0-8");
+            item = player.getInventory().getItem(slot);
+        } else {
+            item = player.getInventory().getItemInMainHand();
+        }
+
+        String npcId = (item != null && item.hasItemMeta())
+                ? item.getItemMeta().getPersistentDataContainer().get(npcs.key(), PersistentDataType.STRING)
+                : null;
+
+        JsonObject out = new JsonObject();
+        out.addProperty("isNpcHead", npcId != null);
+        if (npcId != null) {
+            out.addProperty("npcId", npcId);
+            NpcData data = npcs.get(npcId);
+            out.addProperty("npcName", data != null ? data.name : null);
+            out.addProperty("dead", data != null && data.dead);
+        }
+        return out;
     }
 }

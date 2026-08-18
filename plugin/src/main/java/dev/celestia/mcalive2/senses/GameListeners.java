@@ -19,6 +19,7 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityDeathEvent;
+import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
@@ -26,15 +27,25 @@ import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.world.EntitiesLoadEvent;
 import org.bukkit.inventory.EquipmentSlot;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.persistence.PersistentDataType;
+
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /** Forwards the interesting things happening in the world to the brain as pushed events. */
 public class GameListeners implements Listener {
+
+    private static final long HEAD_TAKEN_COOLDOWN_MS = 60_000;
 
     private final MCAlive2Plugin plugin;
     private final NpcManager npcs;
     private final BridgeServer bridge;
     private final LedgerActuators ledger;
     private final ExploredTracker explored;
+    /** "<playerUuid>:<npcId>" -> last fire time, so a player re-dropping/re-picking a
+     *  head doesn't spam the director with the same npc_head_taken event. */
+    private final Map<String, Long> headTakenCooldown = new ConcurrentHashMap<>();
 
     public GameListeners(MCAlive2Plugin plugin, NpcManager npcs, BridgeServer bridge,
                           LedgerActuators ledger, ExploredTracker explored) {
@@ -133,6 +144,30 @@ public class GameListeners implements Listener {
         data.addProperty("npcId", npc.id);
         data.addProperty("npcName", npc.name);
         bridge.broadcastEvent("npc_interact", data);
+    }
+
+    /** A player picking up a dead NPC's memorial head - the revival token. */
+    @EventHandler(ignoreCancelled = true)
+    public void onPickupItem(EntityPickupItemEvent event) {
+        if (!(event.getEntity() instanceof Player player)) return;
+        ItemStack stack = event.getItem().getItemStack();
+        if (!stack.hasItemMeta()) return;
+        String npcId = stack.getItemMeta().getPersistentDataContainer().get(npcs.key(), PersistentDataType.STRING);
+        if (npcId == null) return;
+
+        String cooldownKey = player.getUniqueId() + ":" + npcId;
+        long now = System.currentTimeMillis();
+        Long last = headTakenCooldown.get(cooldownKey);
+        if (last != null && now - last < HEAD_TAKEN_COOLDOWN_MS) return;
+        headTakenCooldown.put(cooldownKey, now);
+
+        JsonObject data = new JsonObject();
+        data.addProperty("player", player.getName());
+        data.addProperty("npcId", npcId);
+        NpcData npc = npcs.get(npcId);
+        data.addProperty("npcName", npc != null ? npc.name : null);
+        data.add("location", Json.locationJson(player.getLocation()));
+        bridge.broadcastEvent("npc_head_taken", data);
     }
 
     /**

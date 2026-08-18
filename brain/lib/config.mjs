@@ -37,7 +37,7 @@ export const ALL_TOOLS = [
   "spawn_particles", "play_sound", "set_weather",
   // NPCs
   "npc_spawn", "npc_update", "npc_remove", "npc_say", "npc_walk_to", "npc_look_at",
-  "npc_equip", "npc_pose", "npc_revive",
+  "npc_equip", "npc_pose", "npc_revive", "npc_head_check",
   // Players
   "give_item", "apply_effect", "list_players",
   // Ledger
@@ -59,6 +59,7 @@ export const DIRECTOR_WAKE_EVENTS = new Set([
   "player_death",
   "npc_attacked",
   "npc_death",
+  "npc_head_taken",
   "player_explored",
   "player_idle_scene",
   "region_enter",
