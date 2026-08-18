@@ -1,4 +1,0 @@
--------------------------------------------------------------------------------
-Test set: dev.celestia.estari.ledger.NpcContextTest
--------------------------------------------------------------------------------
-Tests run: 7, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.015 s -- in dev.celestia.estari.ledger.NpcContextTest
