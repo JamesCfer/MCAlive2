@@ -1,0 +1,14 @@
+name: Estari
+version: '${project.version}'
+main: dev.celestia.estari.EstariPlugin
+api-version: '26.2'
+description: An AI decision brain that runs a fantasy RPG inside Minecraft - senses, actuators, ledger, and NPC runtime for the Estari director.
+author: Celestia
+commands:
+  estari:
+    description: Estari admin command
+    permission: estari.admin
+    usage: /estari <status|reload>
+permissions:
+  estari.admin:
+    default: op

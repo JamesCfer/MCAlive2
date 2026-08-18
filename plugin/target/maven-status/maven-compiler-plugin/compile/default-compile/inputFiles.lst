@@ -1,0 +1,16 @@
+J:\Desktop\Celestia\Development\Mods\estari\plugin\src\main\java\dev\celestia\estari\actuators\LedgerActuators.java
+J:\Desktop\Celestia\Development\Mods\estari\plugin\src\main\java\dev\celestia\estari\actuators\NpcActuators.java
+J:\Desktop\Celestia\Development\Mods\estari\plugin\src\main\java\dev\celestia\estari\actuators\PlayerActuators.java
+J:\Desktop\Celestia\Development\Mods\estari\plugin\src\main\java\dev\celestia\estari\actuators\WorldActuators.java
+J:\Desktop\Celestia\Development\Mods\estari\plugin\src\main\java\dev\celestia\estari\bridge\BridgeServer.java
+J:\Desktop\Celestia\Development\Mods\estari\plugin\src\main\java\dev\celestia\estari\bridge\CommandDispatcher.java
+J:\Desktop\Celestia\Development\Mods\estari\plugin\src\main\java\dev\celestia\estari\EstariPlugin.java
+J:\Desktop\Celestia\Development\Mods\estari\plugin\src\main\java\dev\celestia\estari\ledger\BlueprintParser.java
+J:\Desktop\Celestia\Development\Mods\estari\plugin\src\main\java\dev\celestia\estari\ledger\Ledger.java
+J:\Desktop\Celestia\Development\Mods\estari\plugin\src\main\java\dev\celestia\estari\ledger\NpcContext.java
+J:\Desktop\Celestia\Development\Mods\estari\plugin\src\main\java\dev\celestia\estari\npc\NpcData.java
+J:\Desktop\Celestia\Development\Mods\estari\plugin\src\main\java\dev\celestia\estari\npc\NpcManager.java
+J:\Desktop\Celestia\Development\Mods\estari\plugin\src\main\java\dev\celestia\estari\senses\ExploredTracker.java
+J:\Desktop\Celestia\Development\Mods\estari\plugin\src\main\java\dev\celestia\estari\senses\GameListeners.java
+J:\Desktop\Celestia\Development\Mods\estari\plugin\src\main\java\dev\celestia\estari\senses\TerrainSampler.java
+J:\Desktop\Celestia\Development\Mods\estari\plugin\src\main\java\dev\celestia\estari\util\Json.java

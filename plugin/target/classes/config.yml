@@ -1,0 +1,17 @@
+# Estari configuration
+bridge:
+  # WebSocket bind address. Keep 127.0.0.1 unless brain/ runs on another machine.
+  host: 127.0.0.1
+  port: 8765
+  # Auth token brain/ must present as the first message. CHANGE THIS.
+  token: change-me
+
+# Max blocks a single fill_region or build_blueprint call may change/place.
+max-fill-volume: 100000
+
+# Chunk-cell size (in chunks, so 8 = a 128x128 block cell) used to fire player_explored
+# at most once per cell.
+explored-cell-chunks: 8
+
+# Radius in blocks that NPC speech (npc_say) is heard by players.
+npc-chat-radius: 20.0
