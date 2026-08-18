@@ -92,6 +92,53 @@ export function listDirectives(config) {
   return parseBlocks(readRaw(directivesPathFor(config))).reverse(); // newest first
 }
 
+// ---------------- orders file (state/orders.json) ----------------
+//
+// Orders are one-shot commands the director must EXECUTE now ("strike spawn
+// with lightning 100 times then build a floating village"), as opposed to
+// directives, which are permanent taste folded into lore. An order never
+// touches lore/ - it becomes a single "operator_order" scene event (see
+// index.mjs's submitOrder), and is only ever persisted here as an operator-
+// facing log of what was sent, rolling at the last 50 entries.
+
+const MAX_ORDERS = 50;
+
+function ordersPathFor(config) {
+  return path.join(config.stateDir, "orders.json");
+}
+
+function readOrders(config) {
+  const raw = readRaw(ordersPathFor(config));
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeOrders(config, orders) {
+  const filePath = ordersPathFor(config);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(orders, null, 1));
+}
+
+/** Appends one order (status "queued"), rolling at MAX_ORDERS (oldest
+ * dropped first). Returns the ISO timestamp assigned to the new entry. */
+export function appendOrder(config, text) {
+  const existing = readOrders(config);
+  const timestamp = new Date().toISOString();
+  existing.push({ timestamp, text: text.trim(), status: "queued" });
+  const rolled = existing.slice(-MAX_ORDERS);
+  writeOrders(config, rolled);
+  return timestamp;
+}
+
+export function listOrders(config) {
+  return readOrders(config).slice().reverse(); // newest first
+}
+
 // ---------------- state/decisions.log tail ----------------
 
 function tailLines(filePath, n) {
@@ -141,7 +188,7 @@ function escapeHtml(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-function renderPage(directives) {
+function renderPage(directives, orders) {
   const items = directives
     .map(
       (b) => `
@@ -151,6 +198,19 @@ function renderPage(directives) {
           <button class="del" data-ts="${escapeHtml(b.timestamp)}">delete</button>
         </div>
         <pre class="directive-text">${escapeHtml(b.text)}</pre>
+      </li>`
+    )
+    .join("\n");
+
+  const orderItems = orders
+    .map(
+      (o) => `
+      <li class="order">
+        <div class="order-head">
+          <span class="ts">${escapeHtml(o.timestamp)}</span>
+          <span class="order-status">${escapeHtml(o.status)}</span>
+        </div>
+        <pre class="order-text">${escapeHtml(o.text)}</pre>
       </li>`
     )
     .join("\n");
@@ -185,14 +245,34 @@ function renderPage(directives) {
     background: #2a2d33; color: #c98; padding: .25rem .6rem; font-size: .75rem;
   }
   button.del:hover { background: #3a2d33; }
-  #status { margin-left: .75rem; color: #9aa0a8; font-size: .85rem; }
+  #status, #order-status-line { margin-left: .75rem; color: #9aa0a8; font-size: .85rem; }
   section h2 { font-size: .95rem; color: #9aa0a8; text-transform: uppercase; letter-spacing: .04em; margin: 0 0 .75rem; }
-  ul.directives { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .75rem; }
+  .caption { color: #6b7078; margin: -.4rem 0 .6rem; font-size: .8rem; }
+  ul.directives, ul.orders { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .75rem; }
   li.directive { background: #1c1f24; border: 1px solid #33373e; border-radius: 6px; padding: .6rem .8rem; }
   .directive-head { display: flex; justify-content: space-between; align-items: center; }
   .ts { color: #7fa8ff; font-size: .8rem; font-family: ui-monospace, monospace; }
   .directive-text { white-space: pre-wrap; margin: .4rem 0 0; font-family: inherit; }
   .empty { color: #6b7078; font-style: italic; }
+
+  /* Orders: visually distinct from directives (one-shot command vs.
+     permanent taste) - warm/amber accent instead of the directive's blue,
+     and its own section styling so the two forms are never confused. */
+  section.order-section {
+    border: 1px solid #7a4a1a; border-radius: 8px; padding: 1rem; background: #201a12;
+  }
+  section.order-section h2 { color: #e0a458; }
+  textarea#order-text {
+    border-color: #7a4a1a; background: #241c14;
+  }
+  button#send-order {
+    background: #d97a1f;
+  }
+  button#send-order:hover { background: #ea8b2c; }
+  li.order { background: #1c1712; border: 1px solid #4a3218; border-radius: 6px; padding: .6rem .8rem; }
+  .order-head { display: flex; justify-content: space-between; align-items: center; }
+  .order-status { color: #e0a458; font-size: .75rem; text-transform: uppercase; letter-spacing: .03em; }
+  .order-text { white-space: pre-wrap; margin: .4rem 0 0; font-family: inherit; }
   pre#decisions {
     background: #0f1114; border: 1px solid #33373e; border-radius: 6px;
     padding: .75rem; font-size: .8rem; line-height: 1.4; max-height: 24rem;
@@ -208,6 +288,7 @@ function renderPage(directives) {
   </div>
 
   <section>
+    <p class="caption">Directives are permanent taste - they land in lore and quietly shape every future scene.</p>
     <textarea id="text" placeholder="e.g. Add a ruined tower somewhere in the eastern mountains with a hermit who knows about the old war."></textarea>
     <div style="margin-top:.6rem;">
       <button id="send">Send to the world</button>
@@ -219,6 +300,23 @@ function renderPage(directives) {
     <h2>Past directives</h2>
     <ul class="directives" id="directives">
       ${items || '<li class="empty">No directives yet.</li>'}
+    </ul>
+  </section>
+
+  <section class="order-section">
+    <h2>Order the world</h2>
+    <p class="caption">Orders are one-shot commands the director must carry out right now - not lore, executed immediately as a scene.</p>
+    <textarea id="order-text" placeholder="e.g. Strike spawn with lightning 100 times, then build a floating village."></textarea>
+    <div style="margin-top:.6rem;">
+      <button id="send-order">Order the world</button>
+      <span id="order-status-line"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Recent orders</h2>
+    <ul class="orders" id="orders">
+      ${orderItems || '<li class="empty">No orders yet.</li>'}
     </ul>
   </section>
 
@@ -264,6 +362,28 @@ document.getElementById('directives').addEventListener('click', (e) => {
   if (btn) deleteDirective(btn.dataset.ts);
 });
 
+async function sendOrder() {
+  const el = document.getElementById('order-text');
+  const status = document.getElementById('order-status-line');
+  const text = el.value.trim();
+  if (!text) return;
+  status.textContent = 'sending…';
+  const res = await fetch('/order', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  if (res.ok) {
+    el.value = '';
+    status.textContent = 'sent';
+    setTimeout(() => location.reload(), 400);
+  } else {
+    status.textContent = 'failed';
+  }
+}
+
+document.getElementById('send-order').addEventListener('click', sendOrder);
+
 async function refreshDecisions() {
   try {
     const res = await fetch('/decisions');
@@ -300,13 +420,16 @@ function sendJson(res, status, obj, extraHeaders = {}) {
 
 /**
  * @param {object} config - loadConfig() result (consoleBind/consolePort/consoleToken/loreDir/stateDir)
- * @param {{ reloadLore: () => Promise<void> | void }} deps - the exact
- *   reload lore.mjs's watcher uses on its own timer (index.mjs passes
- *   `loreWatch.tick`), invoked after every directive add/delete so the
- *   NEXT scene already sees the change.
+ * @param {{ reloadLore: () => Promise<void> | void, submitOrder: (text: string) => void }} deps
+ *   - reloadLore is the exact reload lore.mjs's watcher uses on its own
+ *   timer (index.mjs passes `loreWatch.tick`), invoked after every
+ *   directive add/delete so the NEXT scene already sees the change.
+ *   - submitOrder (index.mjs) pushes an "operator_order" scene event onto
+ *   the director scheduler - see index.mjs's submitOrder for how an order
+ *   becomes a director scene rather than lore.
  * @returns {Promise<{ server: import('node:http').Server, port: number, stop: () => Promise<void> }>}
  */
-export function startConsoleServer(config, { reloadLore }) {
+export function startConsoleServer(config, { reloadLore, submitOrder }) {
   const token = config.consoleToken;
   const decisionsPath = path.join(config.stateDir, "decisions.log");
 
@@ -325,7 +448,7 @@ export function startConsoleServer(config, { reloadLore }) {
 
       if (req.method === "GET" && url.pathname === "/") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", ...extraHeaders });
-        res.end(renderPage(listDirectives(config)));
+        res.end(renderPage(listDirectives(config), listOrders(config)));
         return;
       }
 
@@ -368,6 +491,26 @@ export function startConsoleServer(config, { reloadLore }) {
         if (removed) await reloadLore();
         log.info("operator_directive_deleted", { timestamp, removed });
         sendJson(res, 200, { ok: removed }, extraHeaders);
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/order") {
+        let body;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}");
+        } catch {
+          sendJson(res, 400, { ok: false, error: "invalid JSON body" }, extraHeaders);
+          return;
+        }
+        const text = typeof body.text === "string" ? body.text.trim() : "";
+        if (!text) {
+          sendJson(res, 400, { ok: false, error: "order text must not be empty" }, extraHeaders);
+          return;
+        }
+        const timestamp = appendOrder(config, text);
+        submitOrder(text);
+        log.info("operator_order_added", { timestamp, text: text.length > 120 ? text.slice(0, 117) + "..." : text });
+        sendJson(res, 200, { ok: true, timestamp }, extraHeaders);
         return;
       }
 

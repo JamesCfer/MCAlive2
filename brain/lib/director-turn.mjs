@@ -64,6 +64,26 @@ character. Never write an actor's proposal to the ledger unexamined.
 
 Offers are offers, never railroads. Do not force outcomes on players.
 
+OPERATOR ORDERS
+An "operator_order" event is a direct command from the world's owner. Unlike
+player wishes, you MUST carry it out - faithfully, promptly, and to
+completion - using your tools, subject only to the standing rules (an order
+may override taste and lore, never the constitution: chat stays
+dialogue-only, no time changes, death stays permanent). Big set-pieces:
+prefer plugin-side sequences (strike_lightning runs a whole timed show and
+fires sequence_done when finished - plan your next phase to trigger on that
+event rather than sleeping). Record everything you build (places, npcs,
+facts) in the ledger as you go. If an order is impossible or would break the
+constitution, do as much as is legal and state the rest plainly in your
+final summary.
+
+TOOLS
+Beyond the standard world/NPC/player/ledger/info toolset, three world tools
+exist for operator-order set-pieces: create_explosion (a single blast at a
+point), strike_lightning (a whole timed lightning show over an area, runs
+plugin-side and returns a sequenceId, then later fires a sequence_done event
+when finished), and move_region (relocate a cuboid of blocks by an offset).
+
 REQUIRED FINAL SUMMARY
 End your reply with one short paragraph stating what you decided and why,
 or plainly "no action" if you did nothing. This is the audit trail for this
@@ -109,8 +129,18 @@ export function buildPrompt(batch) {
  * @param {number} params.sceneNumber - this process's monotonic scene counter value (lib/logger.mjs's nextSceneNumber()), for console/journal correlation
  * @returns {Promise<{ inputTokens: number, outputTokens: number, totalTokens: number, dryRun: boolean }>}
  */
+/** Scenes containing an "operator_order" event get a higher turn ceiling
+ * (BRAIN_ORDER_MAX_STEPS, default 80) than the normal maxDirectorSteps,
+ * since carrying a big set-piece order to completion can take far more
+ * tool-call steps than an ordinary reactive scene. */
+export function maxTurnsFor(batch, config) {
+  const isOrderScene = batch.some((e) => e.event === "operator_order");
+  return isOrderScene ? config.orderMaxSteps : config.maxDirectorSteps;
+}
+
 export async function runDirectorTurn({ batch, systemPrompt, config, sceneNumber }) {
   const prompt = buildPrompt(batch);
+  const maxTurns = maxTurnsFor(batch, config);
 
   if (config.dryRun) {
     log.info("dry_run_director_turn", {
@@ -121,6 +151,7 @@ export async function runDirectorTurn({ batch, systemPrompt, config, sceneNumber
       model: config.directorModel,
       allowedTools: "ALL (full toolset)",
       disallowedTools: [],
+      maxTurns,
     });
     journalScene({ config, sceneNumber, batch, toolCalls: [], summary: null, dryRun: true });
     return { inputTokens: 0, outputTokens: 0, totalTokens: 0, dryRun: true };
@@ -148,7 +179,7 @@ export async function runDirectorTurn({ batch, systemPrompt, config, sceneNumber
     disallowedTools: [], // full toolset, nothing denied
     permissionMode: "bypassPermissions",
     allowDangerouslySkipPermissions: true,
-    maxTurns: config.maxDirectorSteps,
+    maxTurns,
   };
 
   let usage = { input_tokens: 0, output_tokens: 0 };

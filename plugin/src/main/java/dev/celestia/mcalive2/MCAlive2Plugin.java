@@ -3,6 +3,7 @@ package dev.celestia.mcalive2;
 import dev.celestia.mcalive2.actuators.LedgerActuators;
 import dev.celestia.mcalive2.actuators.NpcActuators;
 import dev.celestia.mcalive2.actuators.PlayerActuators;
+import dev.celestia.mcalive2.actuators.SpectacleActuators;
 import dev.celestia.mcalive2.actuators.WorldActuators;
 import dev.celestia.mcalive2.bridge.BridgeServer;
 import dev.celestia.mcalive2.bridge.CommandDispatcher;
@@ -40,6 +41,7 @@ public final class MCAlive2Plugin extends JavaPlugin {
 
         CommandDispatcher dispatcher = new CommandDispatcher(this);
         new WorldActuators(this).register(dispatcher);
+        new SpectacleActuators(this).register(dispatcher);
         new PlayerActuators(this).register(dispatcher);
         new NpcActuators(this, npcManager).register(dispatcher);
         ledgerActuators.register(dispatcher);

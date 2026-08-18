@@ -78,9 +78,20 @@ export async function main(env = process.env) {
   // Reuses loreWatch's own `tick` - the exact function lore.mjs's timer
   // calls - so a directive lands in `lore.text` immediately instead of
   // waiting up to BRAIN_LORE_REFRESH_MS.
+  //
+  // submitOrder is the "order the world" half of the console: unlike a
+  // directive (permanent taste, folded into lore), an order is a one-shot
+  // command the director must execute NOW. It never touches lore/ - it
+  // pushes an "operator_order" scene event onto the SAME debounced director
+  // scheduler that pushed bridge sense events use (scheduler.push below),
+  // so the very next scene carries it as an event to act on, not as style.
+  function submitOrder(text) {
+    scheduler.push("operator_order", { text, at: new Date().toISOString() });
+  }
+
   let consoleServer = null;
   if (config.consoleEnabled) {
-    consoleServer = await startConsoleServer(config, { reloadLore: loreWatch.tick });
+    consoleServer = await startConsoleServer(config, { reloadLore: loreWatch.tick, submitOrder });
     log.info("console_listening", { bind: config.consoleBind, port: consoleServer.port });
   }
 

@@ -287,12 +287,52 @@ LAST among `lore/*.md`, so operator directives land at the very end of the
 director's system prompt, and the file's header line makes the priority
 explicit: they override taste, never the standing rules in `00-rules.md`.
 
+### Directives vs. orders
+
+The console has **two** forms, deliberately styled apart (blue for
+directives, amber for orders) so they're never confused:
+
+- **Directives** ("Send to the world") are permanent taste. They land in
+  `lore/90-operator-directives.md` and quietly shape every future scene —
+  nothing happens *right now*, the world just leans that way from here on.
+- **Orders** ("Order the world") are one-shot commands the director must
+  **execute now** — e.g. "strike spawn with lightning 100 times, then build
+  a floating village." An order never touches `lore/`; posting one appends
+  an entry to `state/orders.json` (rolling last 50, with a timestamp and
+  status `"queued"`) and immediately pushes an `operator_order` scene event
+  onto the same debounced director scheduler that pushed bridge sense
+  events use, so the **very next scene** carries it as something to *act
+  on*. The director's briefing (`lib/director-turn.mjs`) has a dedicated
+  OPERATOR ORDERS section instructing it to carry the order out faithfully,
+  promptly, and to completion, subject only to the standing constitution
+  (chat stays dialogue-only, no time changes, death stays permanent) — an
+  order may override taste and lore, never that. The page also lists recent
+  orders with their timestamps and status.
+
+Scenes triggered by an `operator_order` event get a much higher turn
+ceiling than a normal reactive scene — `BRAIN_ORDER_MAX_STEPS` (default
+`80`) instead of `BRAIN_MAX_DIRECTOR_STEPS` (default `12`) — since carrying
+out a big set-piece order to completion can take far more tool-call steps
+than deciding "nothing happens" about a stray chat message.
+
+For big set-pieces, the director is instructed to prefer plugin-side timed
+sequences over looping tool calls itself: `strike_lightning` runs a whole
+timed lightning show and returns immediately with a `sequenceId`, then
+later fires a `sequence_done` event (`{sequenceId, kind, center, count}`,
+also a director wake event) when the show finishes, so the director can
+plan its next phase off that event instead of sleeping. Three world tools
+exist specifically for this, director-only (absent from `ACTOR_TOOLS`):
+`create_explosion {x,y,z,power,fire,breakBlocks}`, `strike_lightning
+{x,z,count,radiusBlocks,intervalTicks,explosionPower} -> {sequenceId}`, and
+`move_region {x1,y1,z1,x2,y2,z2,dx,dy,dz,clearSource}`.
+
 | Var | Default | Meaning |
 |---|---|---|
 | `BRAIN_CONSOLE` | `1` | Set to `0` to disable the console entirely (it won't bind a port) |
 | `BRAIN_CONSOLE_BIND` | `127.0.0.1` | Interface to bind; `0.0.0.0` to reach it from the LAN |
 | `BRAIN_CONSOLE_PORT` | `7777` | Port to listen on |
 | `BRAIN_CONSOLE_TOKEN` | `MCALIVE2_TOKEN` | Shared token required on every request |
+| `BRAIN_ORDER_MAX_STEPS` | `80` | `maxTurns` passed to the Agent SDK for a director scene triggered by an `operator_order` event, instead of `BRAIN_MAX_DIRECTOR_STEPS` |
 
 ## Testing (no API key, no Minecraft server required)
 
@@ -331,6 +371,16 @@ scripted event timeline), runs `index.mjs` against it with
   hot-reload, not just the file write); the page lists it, deleting it
   removes it from both the file and the page; the console never binds a
   port when `BRAIN_CONSOLE=0`
+- Lore Console orders: posting to `/order` with a valid token persists it to
+  `state/orders.json` (status `queued`, with a timestamp) AND starts a
+  director scene whose dry-run prompt contains the order text; that scene's
+  prompt also carries the OPERATOR ORDERS briefing section; `operator_order`
+  and `sequence_done` are director wake events; the three new world tools
+  (`create_explosion`, `strike_lightning`, `move_region`) are in `ALL_TOOLS`
+  and NOT in `ACTOR_TOOLS`; the order scene's `maxTurns` is the higher
+  `BRAIN_ORDER_MAX_STEPS` ceiling while an ordinary scene's stays at the
+  regular `BRAIN_MAX_DIRECTOR_STEPS`; the page lists the order with its
+  timestamp
 
 It exits non-zero if any assertion fails.
 
@@ -353,6 +403,7 @@ It exits non-zero if any assertion fails.
 | `BRAIN_DISABLED_FILE` | `brain/DISABLED` | Presence of this file is the kill switch |
 | `BRAIN_MCP_SERVER_PATH` | `brain/mcp-bridge.mjs` | Path to the stdio MCP server the Agent SDK spawns for game/ledger tools |
 | `BRAIN_MAX_DIRECTOR_STEPS` | `12` | `maxTurns` passed to the Agent SDK per director scene (tool-call steps within one turn) |
+| `BRAIN_ORDER_MAX_STEPS` | `80` | `maxTurns` for a director scene triggered by an `operator_order` event, instead of `BRAIN_MAX_DIRECTOR_STEPS` (see Lore Console above) |
 | `BRAIN_MAX_ACTOR_STEPS` | `6` | `maxTurns` passed to the Agent SDK per actor turn |
 | `BRAIN_RECONNECT_BASE_MS` / `BRAIN_RECONNECT_MAX_MS` | `1000` / `30000` | Exponential backoff bounds for reconnecting to the plugin bridge |
 | `BRAIN_NPC_CHAT_RANGE` | `8` | Documented range (enforced plugin-side) within which chat routes to an actor |
@@ -405,9 +456,10 @@ It exits non-zero if any assertion fails.
 - `lib/rate-limiter.mjs` — sliding-window turns-per-minute limiter.
 - `lib/lore.mjs` — loads and watches `brain/lore/*.md`.
 - `lib/console-server.mjs` — the Lore Console: a `node:http` server (token
-  auth via query param + cookie) serving the operator page, and the
-  `lore/90-operator-directives.md` add/list/delete logic, triggering an
-  immediate lore reload after every change.
+  auth via query param + cookie) serving the operator page, the
+  `lore/90-operator-directives.md` add/list/delete logic (triggering an
+  immediate lore reload after every change), and the `state/orders.json`
+  add/list logic for one-shot operator orders (see Lore Console above).
 - `lib/self-update.mjs` — checks `origin/main` on a timer and pulls +
   restarts (exit 75) when new code has landed; see Auto-update above.
 - `run-forever.cmd` — Windows restart-loop wrapper around `npm start` that

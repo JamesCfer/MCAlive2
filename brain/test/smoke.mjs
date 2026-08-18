@@ -41,12 +41,13 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
-import { namespacedTool, MCP_SERVER_NAME, ACTOR_TOOLS, actorDisallowedTools, DIRECTOR_WAKE_EVENTS, loadConfig } from "../lib/config.mjs";
+import { namespacedTool, MCP_SERVER_NAME, ALL_TOOLS, ACTOR_TOOLS, actorDisallowedTools, DIRECTOR_WAKE_EVENTS, loadConfig } from "../lib/config.mjs";
 import { parseActorReport } from "../lib/actor-report.mjs";
 import { ActorMemory } from "../lib/actor-memory.mjs";
 import { formatHumanLine, compactArgs } from "../lib/logger.mjs";
 import { journalScene } from "../lib/decisions-journal.mjs";
 import { SelfUpdater } from "../lib/self-update.mjs";
+import { maxTurnsFor } from "../lib/director-turn.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BRAIN_DIR = path.resolve(__dirname, "..");
@@ -111,6 +112,26 @@ async function main() {
   assert(DIRECTOR_WAKE_EVENTS.has("player_idle_scene"), "player_idle_scene is a director wake event (M2 re-enabled)");
   assert(DIRECTOR_WAKE_EVENTS.has("region_enter"), "region_enter is a director wake event (M2 re-enabled)");
   assert(DIRECTOR_WAKE_EVENTS.has("region_exit"), "region_exit is a director wake event (M2 re-enabled)");
+  assert(DIRECTOR_WAKE_EVENTS.has("operator_order"), "operator_order is a director wake event (Lore Console orders)");
+  assert(DIRECTOR_WAKE_EVENTS.has("sequence_done"), "sequence_done is a director wake event (plugin-side timed sequence finished)");
+
+  console.log("\n1a². Operator-order world tools: present in ALL_TOOLS, absent from ACTOR_TOOLS");
+  for (const t of ["create_explosion", "strike_lightning", "move_region"]) {
+    assert(ALL_TOOLS.includes(t), `${t} is in ALL_TOOLS`);
+    assert(!ACTOR_TOOLS.includes(t), `${t} is NOT in ACTOR_TOOLS (director-only by omission)`);
+    assert(actorDisallowedTools(MCP_SERVER_NAME).includes(namespacedTool(t, MCP_SERVER_NAME)), `${t} is in the actor disallow-list`);
+  }
+
+  console.log("\n1a³. Order scenes get the higher BRAIN_ORDER_MAX_STEPS turn ceiling");
+  const cfgDefault = loadConfig({});
+  assert(cfgDefault.orderMaxSteps === 80, `BRAIN_ORDER_MAX_STEPS defaults to 80 (got ${cfgDefault.orderMaxSteps})`);
+  const normalBatch = [{ event: "player_join", data: {}, at: new Date().toISOString() }];
+  const orderBatch = [{ event: "operator_order", data: { text: "strike spawn with lightning" }, at: new Date().toISOString() }];
+  assert(maxTurnsFor(normalBatch, cfgDefault) === cfgDefault.maxDirectorSteps, "a normal scene's maxTurns is the regular maxDirectorSteps");
+  assert(maxTurnsFor(orderBatch, cfgDefault) === cfgDefault.orderMaxSteps, "an operator_order scene's maxTurns is the higher orderMaxSteps");
+  process.env.BRAIN_ORDER_MAX_STEPS = "33";
+  assert(loadConfig().orderMaxSteps === 33, "BRAIN_ORDER_MAX_STEPS is honored when set");
+  delete process.env.BRAIN_ORDER_MAX_STEPS;
 
   assert(loadConfig({}).updateCheckSec === 10, "BRAIN_UPDATE_CHECK_SEC defaults to 10 seconds");
   // num()/bool01() read directly off process.env (matching every other
@@ -578,6 +599,7 @@ async function main() {
   await wait(300);
 
   const consoleLoreDir = fs.mkdtempSync(path.join(os.tmpdir(), "brain-console-lore-"));
+  const consoleStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "brain-console-state-"));
   const brain4 = spawnNode([path.join(BRAIN_DIR, "index.mjs")], {
     MCALIVE2_URL: `ws://127.0.0.1:${port4}`,
     MCALIVE2_TOKEN: "test-token",
@@ -586,7 +608,7 @@ async function main() {
     BRAIN_ENABLED: "1",
     BRAIN_LORE_REFRESH_MS: "600000",
     BRAIN_LORE_DIR: consoleLoreDir,
-    BRAIN_STATE_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "brain-console-state-")),
+    BRAIN_STATE_DIR: consoleStateDir,
     BRAIN_LOG_JSON: "1",
     BRAIN_CONSOLE: "1",
     BRAIN_CONSOLE_BIND: "127.0.0.1",
@@ -659,6 +681,57 @@ async function main() {
   const pageAfterDelete = await fetch(`${base}/?token=${consoleToken}`);
   const pageAfterDeleteHtml = await pageAfterDelete.text();
   assert(!pageAfterDeleteHtml.includes(directiveText), "GET / page no longer lists the deleted directive");
+
+  console.log("\n5b. Lore Console orders: POST /order persists + starts a director scene with the OPERATOR ORDERS briefing and the higher turn ceiling");
+  const orderText = "Strike spawn with lightning 100 times, then build a floating village nearby.";
+  const orderPostRes = await fetch(`${base}/order?token=${consoleToken}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: orderText }),
+  });
+  const orderPostJson = await orderPostRes.json();
+  assert(orderPostRes.status === 200 && orderPostJson.ok === true, `POST /order with a valid token succeeds (got ${orderPostRes.status} ${JSON.stringify(orderPostJson)})`);
+  assert(typeof orderPostJson.timestamp === "string" && orderPostJson.timestamp.length > 0, "POST /order returns the new order's timestamp");
+
+  // orders.json lives under this brain instance's BRAIN_STATE_DIR.
+  const ordersJsonPath = path.join(consoleStateDir, "orders.json");
+  assert(fs.existsSync(ordersJsonPath), "state/orders.json was created");
+  const ordersJson = JSON.parse(fs.readFileSync(ordersJsonPath, "utf8"));
+  assert(Array.isArray(ordersJson) && ordersJson.some((o) => o.text === orderText), "orders.json contains the posted order text");
+  const savedOrder = ordersJson.find((o) => o.text === orderText);
+  assert(savedOrder && savedOrder.status === "queued", "the saved order has status 'queued'");
+  assert(savedOrder && typeof savedOrder.timestamp === "string", "the saved order carries a timestamp");
+
+  const gotOrderScene = await waitFor(
+    brain4.logs,
+    (l) => l.msg === "dry_run_director_turn" && typeof l.prompt === "string" && l.prompt.includes(orderText),
+    5000
+  );
+  assert(gotOrderScene, "a director scene's dry-run prompt contains the order text");
+  const orderSceneLog = brain4.logs.find((l) => l.msg === "dry_run_director_turn" && typeof l.prompt === "string" && l.prompt.includes(orderText));
+  if (orderSceneLog) {
+    assert(orderSceneLog.prompt.includes("OPERATOR ORDERS"), "the order scene's dry-run prompt contains the OPERATOR ORDERS briefing section");
+    assert(orderSceneLog.prompt.includes("- operator_order:"), "the order scene's dry-run prompt lists the operator_order event in its SCENE section");
+    assert(orderSceneLog.maxTurns === 80, `the order scene uses the higher BRAIN_ORDER_MAX_STEPS ceiling (default 80, got ${orderSceneLog.maxTurns})`);
+  }
+  // A non-order scene (e.g. the earlier directive-triggered ones) should use
+  // the regular, lower maxDirectorSteps ceiling, proving the higher ceiling
+  // is scene-specific, not global. Note the STANDING ORDERS briefing text
+  // itself always mentions "operator_order" (in its OPERATOR ORDERS
+  // section) regardless of scene content, so detect an order scene by the
+  // SCENE section's actual event line ("- operator_order:"), not by a bare
+  // substring match against the whole prompt.
+  const nonOrderSceneLog = brain4.logs.find((l) => l.msg === "dry_run_director_turn" && typeof l.prompt === "string" && !l.prompt.includes("- operator_order:"));
+  assert(nonOrderSceneLog, "at least one non-order director scene was logged (control case for the maxTurns comparison)");
+  if (nonOrderSceneLog) {
+    assert(nonOrderSceneLog.maxTurns === 12, `a non-order scene uses the regular maxDirectorSteps ceiling (default 12, got ${nonOrderSceneLog.maxTurns})`);
+  }
+
+  const pageWithOrder = await fetch(`${base}/?token=${consoleToken}`);
+  const pageWithOrderHtml = await pageWithOrder.text();
+  assert(pageWithOrderHtml.includes(orderText), "GET / page lists the recent order text");
+  assert(pageWithOrderHtml.includes("Order the world"), "GET / page has the order textarea/button");
+  assert(pageWithOrderHtml.includes(savedOrder.timestamp), "GET / page lists the order's timestamp");
 
   brain4.child.kill();
   bridge4.child.kill();

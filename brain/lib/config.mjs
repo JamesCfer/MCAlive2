@@ -53,6 +53,9 @@ export const ALL_TOOLS = [
   // World
   "set_block", "fill_region", "build_blueprint", "spawn_entity", "remove_entity",
   "spawn_particles", "play_sound", "set_weather",
+  // World (operator-order set-pieces - director-only by omission from
+  // ACTOR_TOOLS below, same as every other world tool)
+  "create_explosion", "strike_lightning", "move_region",
   // NPCs
   "npc_spawn", "npc_update", "npc_remove", "npc_say", "npc_walk_to", "npc_look_at",
   "npc_equip", "npc_pose", "npc_revive", "npc_head_check",
@@ -83,6 +86,8 @@ export const DIRECTOR_WAKE_EVENTS = new Set([
   "region_enter",
   "region_exit",
   "player_chat", // only when NOT routed to an actor (see index.mjs routing)
+  "operator_order", // Lore Console "order the world" - see console-server.mjs/index.mjs submitOrder
+  "sequence_done", // plugin-side timed spectacle sequence (e.g. strike_lightning) finished
 ]);
 
 export function loadConfig(env = process.env) {
@@ -109,6 +114,12 @@ export function loadConfig(env = process.env) {
 
     maxDirectorSteps: num("BRAIN_MAX_DIRECTOR_STEPS", 12),
     maxActorSteps: num("BRAIN_MAX_ACTOR_STEPS", 6),
+    // Scenes containing an "operator_order" event (a one-shot command from
+    // the Lore Console - see console-server.mjs/index.mjs) get this higher
+    // turn ceiling instead of maxDirectorSteps, since carrying out a big
+    // set-piece order to completion can take far more tool-call steps than
+    // an ordinary reactive scene. See lib/director-turn.mjs.
+    orderMaxSteps: num("BRAIN_ORDER_MAX_STEPS", 80),
 
     reconnectBaseMs: num("BRAIN_RECONNECT_BASE_MS", 1000),
     reconnectMaxMs: num("BRAIN_RECONNECT_MAX_MS", 30000),

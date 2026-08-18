@@ -142,6 +142,26 @@ pt("play_sound", "Play a sound at a position or to a player.", {
   volume: z.number().optional(), pitch: z.number().optional(),
 });
 pt("set_weather", "Set weather to clear, rain, or thunder.", { weather: z.enum(["clear", "rain", "thunder"]), world: z.string().optional() });
+pt("create_explosion", "Trigger a single explosion at a point - an operator-order set-piece tool.", {
+  ...pos,
+  power: z.number().describe("explosion power, vanilla TNT is roughly 4"),
+  fire: z.boolean().optional().describe("whether the explosion sets fire, default false"),
+  breakBlocks: z.boolean().optional().describe("whether the explosion breaks blocks, default true"),
+});
+pt("strike_lightning", "Run a whole timed lightning-strike show over an area - an operator-order set-piece tool. Runs plugin-side over time and returns {sequenceId} immediately; a 'sequence_done' event ({sequenceId, kind, center, count}) is pushed to the director when the show finishes - plan the next phase to trigger on that event rather than sleeping.", {
+  x: z.number(), z: z.number(), world: z.string().optional(),
+  count: z.number().describe("number of strikes"),
+  radiusBlocks: z.number().describe("radius around x,z each strike is randomized within"),
+  intervalTicks: z.number().describe("ticks between strikes (20 ticks = 1 second)"),
+  explosionPower: z.number().optional().describe("optional explosion power to accompany each strike"),
+});
+pt("move_region", "Relocate a cuboid of blocks by an offset - an operator-order set-piece tool (e.g. lifting a build, shifting terrain).", {
+  x1: z.number(), y1: z.number(), z1: z.number(),
+  x2: z.number(), y2: z.number(), z2: z.number(),
+  dx: z.number(), dy: z.number(), dz: z.number(),
+  clearSource: z.boolean().optional().describe("whether to clear (set to air) the source region after moving, default true"),
+  world: z.string().optional(),
+});
 
 // --- NPCs ---
 const scheduleEntry = z.object({
