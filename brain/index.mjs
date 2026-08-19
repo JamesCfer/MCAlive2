@@ -524,6 +524,29 @@ export async function main(env = process.env) {
   }
 
   /**
+   * Install the procedural building generator. Hand-placed structures come out as
+   * hollow boxes - this builds walls, a gabled roof, windows, a working door and a
+   * furnished interior appropriate to the building's purpose, in one call.
+   */
+  async function installBuildStructure() {
+    try {
+      const gadgetPath = path.join(BRAIN_ROOT, "gadgets", "build-structure.java");
+      const source = fs.readFileSync(gadgetPath, "utf8");
+      await bridge.call(
+        "gadget_define",
+        { id: "build-structure", source, description: "System: build a furnished building (walls, roof, door, windows, role-appropriate interior)" },
+        config.npcContextTimeoutMs
+      );
+      log.info("build_structure_installed", {});
+    } catch (e) {
+      const reason = String((e && e.message) || e);
+      log.warn("build_structure_unavailable", {
+        message: `build-structure gadget unavailable: ${reason}; the director will have to place buildings block by block`,
+      });
+    }
+  }
+
+  /**
    * Install the update-restart watcher: it applies staged plugin updates by
    * restarting the server, but ONLY when scripts/run-server.cmd's sentinel proves
    * a restart loop is supervising this launch - so an unsupervised server can
@@ -621,6 +644,7 @@ export async function main(env = process.env) {
       installPositionTracker(); // fire-and-forget: never throws, see its own comment
       installUpdateRestart(); // fire-and-forget: never throws, sentinel-gated
       installWorldScan(); // fire-and-forget: never throws, see its own comment
+      installBuildStructure(); // fire-and-forget: never throws, see its own comment
     },
   });
   bridge.start();
