@@ -194,9 +194,19 @@ export function maxTurnsFor(batch, config) {
   return isOrderScene ? config.orderMaxSteps : config.maxDirectorSteps;
 }
 
+/** ...and a matching wall-clock allowance. An order scene granted 80 steps was
+ * still being aborted by the ordinary 300s turn timeout partway through the
+ * work, so the step ceiling was meaningless: a big set-piece (survey, rebuild,
+ * re-place a cast, verify) simply takes longer than a reactive scene. */
+export function timeoutSecFor(batch, config) {
+  const isOrderScene = batch.some((e) => e.event === "operator_order");
+  return isOrderScene ? config.orderTimeoutSec : config.turnTimeoutSec;
+}
+
 export async function runDirectorTurn({ batch, systemPrompt, config, sceneNumber, queryFn }) {
   const prompt = buildPrompt(batch);
   const maxTurns = maxTurnsFor(batch, config);
+  const timeoutSec = timeoutSecFor(batch, config);
 
   if (config.dryRun) {
     log.info("dry_run_director_turn", {
@@ -257,7 +267,7 @@ export async function runDirectorTurn({ batch, systemPrompt, config, sceneNumber
   const { timedOut, elapsedMs } = await consumeWithTimeout({
     startQuery: () => runQuery({ prompt, options }),
     abortController,
-    timeoutSec: config.turnTimeoutSec,
+    timeoutSec,
     onMessage: (msg) => {
       if (msg.type === "assistant" && msg.message && Array.isArray(msg.message.content)) {
         for (const block of msg.message.content) {
@@ -278,7 +288,7 @@ export async function runDirectorTurn({ batch, systemPrompt, config, sceneNumber
 
   if (timedOut) {
     resultText = `timed out after ${Math.round(elapsedMs / 1000)}s - aborted`;
-    log.warn("director_turn_timed_out", { sceneNumber, elapsedMs, timeoutSec: config.turnTimeoutSec });
+    log.warn("director_turn_timed_out", { sceneNumber, elapsedMs, timeoutSec });
   }
 
   const inputTokens = (usage.input_tokens || 0) + (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0);

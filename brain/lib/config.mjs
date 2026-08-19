@@ -141,6 +141,10 @@ export function loadConfig(env = process.env) {
     // set-piece order to completion can take far more tool-call steps than
     // an ordinary reactive scene. See lib/director-turn.mjs.
     orderMaxSteps: num("BRAIN_ORDER_MAX_STEPS", 80),
+    // ...and the matching wall-clock allowance for those scenes (see
+    // director-turn.mjs timeoutSecFor): a big order was being aborted by the
+    // ordinary turnTimeoutSec partway through its work.
+    orderTimeoutSec: num("BRAIN_ORDER_TIMEOUT_SEC", 1800),
 
     reconnectBaseMs: num("BRAIN_RECONNECT_BASE_MS", 1000),
     reconnectMaxMs: num("BRAIN_RECONNECT_MAX_MS", 30000),
