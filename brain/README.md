@@ -338,6 +338,64 @@ directives (newest first, each deletable if you change your mind), and a
 live tail of the last ~40 lines of `state/decisions.log` (auto-refreshing
 every 5s).
 
+### World model & map data
+
+`lib/worldmodel.mjs` builds one snapshot of the live world purely from
+EXISTING bridge commands — `ledger_query` (`places`/`npcs`), a single coarse
+`scan_area` over the area of interest, and a handful of budgeted `get_block`
+probes — never new plugin work. It has two consumers:
+
+- **`world_overview` (director-only tool)** — the text-only director's "what
+  exists and what's wrong" view. Returns a compact digest: a header line
+  with counts, every place with its coords/size/`builtBy`/flags, an NPC
+  alive/dead summary with flagged NPCs called out, an optional top-down
+  ASCII map (`detail:"full"`; places as letters, `+` for spawn, ≤40 chars
+  wide), and a `PROBLEMS` section listing every diagnostic worst-first. The
+  director's briefing (`lib/director-turn.mjs`'s BUILDING DISCIPLINE
+  section) tells it to call this after building or whenever something looks
+  wrong, fix what it reports, then check again.
+- **`GET /worldmodel`** — the same snapshot as raw JSON, token-authed like
+  every other console route, for the `/map` viewer below. Cached ~5s
+  (`console-server.mjs`) so rapid page loads/auto-refresh polling don't
+  hammer the bridge with a fresh `ledger_query` + `scan_area` round trip
+  every time.
+
+Diagnostics computed (bounded probe budget: at most ~40 `get_block` calls
+total per snapshot, spent only on the NPC off-ground check):
+
+| Severity | Kind | Trigger |
+|---|---|---|
+| error | `floating` | an `ai`-built place whose origin/bounds-bottom sits >3 blocks above the scanned ground surface beneath it |
+| warn | `buried` | a place whose bounds-bottom sits >3 blocks below the scanned ground surface |
+| warn | `no-position` | an alive NPC with no live position AND no ledger `home` to fall back to |
+| error | `off-ground` | an alive NPC whose position is >2 blocks above or >1 block below the nearest solid ground found within its probe budget |
+| info | `dead` | a dead NPC |
+
+No `npc_list`/`npc_get` (live NPC position) bridge command exists — only
+`ledger_query`/`npc_context` expose NPC data, neither carries a *live*
+position. NPC `pos` falls back to the ledger record's `home` coordinate,
+flagged `position-from-ledger-home (no live-position bridge command
+exists)` so callers know it's a static approximation, not a live read.
+
+### 3D map
+
+`/map` (linked from the console header, and links back) is a dependency-free
+schematic viewer of the live world — a hand-rolled orthographic 3D
+projection on a `<canvas>`, no three.js, no CDN, fetching `GET /worldmodel`
+same-origin (same cookie auth as the rest of the console). It renders the
+terrain heightmap as a shaded surface, places as translucent colored boxes
+(color = `builtBy`, red outline = an error flag) or origin markers when they
+have no bounds, and NPCs as small vertical markers (green alive, gray dead,
+orange/red if flagged). Drag to orbit, right-drag/shift-drag to pan, wheel
+to zoom, hover or click a marker for its details in the side panel. A fixed
+problems panel lists every diagnostic worst-first (error → warn → info);
+clicking one recenters the camera on its coordinate and drops a brief pulse
+marker there — the "what's going wrong" view. The header shows live counts
+(places, NPCs alive/dead, problem count) with a manual refresh button and a
+10s auto-refresh toggle; it degrades gracefully with a banner if
+`/worldmodel` 401s, and says so rather than showing a blank canvas when
+terrain/places/NPCs are empty.
+
 Sending a directive appends a dated block to
 `brain/lore/90-operator-directives.md` (created on first use) and
 immediately triggers the same lore reload `lib/lore.mjs`'s watcher uses on
@@ -540,8 +598,14 @@ It exits non-zero if any assertion fails.
 - `lib/console-server.mjs` — the Lore Console: a `node:http` server (token
   auth via query param + cookie) serving the operator page, the
   `lore/90-operator-directives.md` add/list/delete logic (triggering an
-  immediate lore reload after every change), and the `state/orders.json`
-  add/list logic for one-shot operator orders (see Lore Console above).
+  immediate lore reload after every change), the `state/orders.json`
+  add/list logic for one-shot operator orders, `GET /worldmodel` (cached
+  ~5s), and the `/map` 3D schematic viewer page (see Lore Console above).
+- `lib/worldmodel.mjs` — `buildWorldModel()`/`formatWorldOverview()`:
+  aggregates ledger places/NPCs + a coarse `scan_area` + budgeted
+  `get_block` probes into the world model and its text digest, backing the
+  `world_overview` tool and `GET /worldmodel` (see World model & map data
+  above).
 - `lib/self-update.mjs` — checks `origin/main` on a timer and pulls +
   restarts (exit 75) when new code has landed; see Auto-update above.
 - `run-forever.cmd` — Windows restart-loop wrapper around `npm start` that

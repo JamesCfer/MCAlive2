@@ -17,6 +17,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { buildWorldModel, formatWorldOverview } from "./lib/worldmodel.mjs";
 
 const URL_ = process.env.MCALIVE2_URL || "ws://127.0.0.1:8765";
 const TOKEN = process.env.MCALIVE2_TOKEN || "change-me";
@@ -256,6 +257,31 @@ pt("ledger_delete", "Delete a ledger record by id.", {
 });
 pt("npc_context", "The knowledge-isolation tool: returns an NPC's own sheet plus ONLY the facts whose knownBy includes that NPC, their faction, or \"all\" - enforced plugin-side so an actor can never metagame.", {
   npcId: z.string(),
+});
+
+// --- world model ---
+// Aggregates ledger_query(places/npcs) + scan_area + a few budgeted
+// get_block probes (brain/lib/worldmodel.mjs) into a compact text digest -
+// the text-only director's "what exists and what's wrong right now" view.
+// Not a passthrough (unlike every other tool above): it composes several
+// existing bridge commands brain-side rather than forwarding one 1:1.
+// Registered directly (not via the tool()/pt() helpers above) because its
+// result is a plain compact TEXT digest for the director to read, not a
+// JSON blob - tool() always JSON.stringifies its handler's return value.
+server.registerTool("world_overview", {
+  description: "Build a snapshot of the live world (places, NPCs, terrain) from the ledger and a coarse terrain scan, and return a compact text digest: counts, every place with its coords/size/builtBy, an NPC alive/dead summary with flagged NPCs called out, an optional top-down ASCII map (detail:\"full\"), and a PROBLEMS section (worst first) flagging floating/buried structures and floating/buried NPCs. Call this after building or whenever something looks wrong, fix what it reports, then call it again to confirm.",
+  inputSchema: {
+    area: z.object({ x1: z.number(), z1: z.number(), x2: z.number(), z2: z.number() }).optional()
+      .describe("explicit terrain-scan footprint; defaults to the bounding box of all recorded places (or a default footprint around world origin if there are none yet)"),
+    detail: z.enum(["summary", "full"]).optional().describe("\"full\" adds a top-down ASCII map; default \"summary\" omits it for a shorter digest"),
+  },
+}, async (args) => {
+  try {
+    const model = await buildWorldModel(call, { now: new Date().toISOString(), area: (args ?? {}).area });
+    return { content: [{ type: "text", text: formatWorldOverview(model, { detail: (args ?? {}).detail }) }] };
+  } catch (e) {
+    return { content: [{ type: "text", text: "ERROR: " + e.message }], isError: true };
+  }
 });
 
 // --- formulas ---

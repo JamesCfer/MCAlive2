@@ -50,6 +50,7 @@ import { SelfUpdater } from "../lib/self-update.mjs";
 import { runDirectorTurn, maxTurnsFor } from "../lib/director-turn.mjs";
 import { runActorTurn } from "../lib/actor-turn.mjs";
 import { DirectorScheduler } from "../lib/director-scheduler.mjs";
+import { buildWorldModel, formatWorldOverview } from "../lib/worldmodel.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BRAIN_DIR = path.resolve(__dirname, "..");
@@ -214,6 +215,127 @@ async function main() {
   assert(loadConfig().updateCheckSec === 5, "BRAIN_UPDATE_CHECK_SEC wins over BRAIN_UPDATE_CHECK_MIN when both are set");
   delete process.env.BRAIN_UPDATE_CHECK_SEC;
   delete process.env.BRAIN_UPDATE_CHECK_MIN;
+
+  console.log("\n1a⁴. World model: schema present, director-only tool registration");
+  assert(ALL_TOOLS.includes("world_overview"), "world_overview is in ALL_TOOLS");
+  assert(!ACTOR_TOOLS.includes("world_overview"), "world_overview is NOT in ACTOR_TOOLS (director-only by omission)");
+  assert(actorDisallowedTools(MCP_SERVER_NAME).includes(namespacedTool("world_overview", MCP_SERVER_NAME)), "world_overview is in the actor disallow-list");
+  {
+    const bridgeSrcForWorldModel = fs.readFileSync(path.join(BRAIN_DIR, "mcp-bridge.mjs"), "utf8");
+    assert(/registerTool\("world_overview"/.test(bridgeSrcForWorldModel), "mcp-bridge.mjs registers a world_overview tool");
+    assert(/from "\.\/lib\/worldmodel\.mjs"/.test(bridgeSrcForWorldModel), "mcp-bridge.mjs imports lib/worldmodel.mjs");
+  }
+  {
+    const directorTurnSrc = fs.readFileSync(path.join(BRAIN_DIR, "lib", "director-turn.mjs"), "utf8");
+    assert(/world_overview/.test(directorTurnSrc) && /PROBLEMS/.test(directorTurnSrc), "director briefing (BUILDING DISCIPLINE) tells the director to call world_overview and check the PROBLEMS it reports");
+  }
+
+  console.log("\n1a⁵. World model: buildWorldModel() against a fake bridge call() produces the pinned shape, with a floating-place diagnostic");
+  {
+    // Canned data standing in for the plugin bridge: one place planted 10
+    // blocks above the scanned ground (an "ai"-built structure -> should
+    // trip the "floating" error diagnostic), one grounded place, one NPC
+    // with a ledger `home` (no live-position command exists) and one dead
+    // NPC with no home at all (-> "no-position" warning).
+    const fakeCall = async (cmd, args) => {
+      if (cmd === "ledger_query" && args.collection === "places") {
+        return {
+          records: [
+            { id: "sky-tower", name: "Sky Tower", kind: "tower", origin: { x: 10, y: 80, z: 10 }, bounds: { x1: 8, y1: 80, z1: 8, x2: 12, y2: 90, z2: 12 }, builtBy: "ai" },
+            { id: "old-well", name: "Old Well", kind: "well", origin: { x: -5, y: 64, z: -5 }, builtBy: "world" },
+          ],
+        };
+      }
+      if (cmd === "ledger_query" && args.collection === "npcs") {
+        return {
+          records: [
+            { id: "mara-baker", name: "Mara the Baker", home: { x: -5, y: 65, z: -5 }, alive: true },
+            { id: "ghost-npc", name: "Ghostly NPC", alive: true }, // no home -> no-position
+            { id: "sella", name: "Sella", home: { x: 0, y: 64, z: 0 }, alive: false }, // dead
+          ],
+        };
+      }
+      if (cmd === "scan_area") {
+        // Mirrors the real TerrainSampler.scanArea: <=256 requested columns
+        // get every column back inline, larger areas get a fixed 8x8=64
+        // downsampled grid instead - exercising the SAME branch
+        // buildWorldModel's terrainFromScan() has to handle for a real,
+        // multi-place bounding box (which comfortably exceeds 256 columns).
+        // Flat ground at y=64 everywhere: the tower's bounds-bottom (y=80)
+        // sits 16 blocks above it - well past the 3-block floating cap.
+        const requestedCols = (args.x2 - args.x1 + 1) * (args.z2 - args.z1 + 1);
+        const points = [];
+        if (requestedCols <= 256) {
+          for (let x = args.x1; x <= args.x2; x++) {
+            for (let z = args.z1; z <= args.z2; z++) points.push({ x, z, y: 64, material: "grass_block" });
+          }
+          return { minY: 64, maxY: 64, medianY: 64, flat: true, columns: points };
+        }
+        for (let gx = 0; gx < 8; gx++) {
+          const x = args.x1 + Math.round((args.x2 - args.x1) * gx / 7);
+          for (let gz = 0; gz < 8; gz++) {
+            const z = args.z1 + Math.round((args.z2 - args.z1) * gz / 7);
+            points.push({ x, z, y: 64, material: "grass_block" });
+          }
+        }
+        return { minY: 64, maxY: 64, medianY: 64, flat: true, grid: points };
+      }
+      if (cmd === "get_block") {
+        // Mara stands right on top of solid ground at her home y=65 (her
+        // feet at y=65 are air, the block below at y=64 is grass) - never
+        // flagged off-ground.
+        if (args.y <= 64 && args.y >= 62) return { material: "grass_block", blockData: "minecraft:grass_block" };
+        return { material: "air", blockData: "minecraft:air" };
+      }
+      throw new Error(`fakeCall: unexpected command ${cmd}`);
+    };
+
+    const model = await buildWorldModel(fakeCall, { now: "2026-01-01T00:00:00.000Z" });
+
+    // --- pinned top-level shape ---
+    assert(model.generatedAt === "2026-01-01T00:00:00.000Z", "generatedAt is exactly the injected `now` (buildWorldModel never calls Date itself)");
+    assert(model.bounds && ["minX", "minZ", "maxX", "maxZ", "minY", "maxY"].every((k) => typeof model.bounds[k] === "number"), "bounds has all 6 numeric fields");
+    assert(Array.isArray(model.places) && Array.isArray(model.npcs) && Array.isArray(model.diagnostics), "places/npcs/diagnostics are arrays");
+    assert(model.terrain && Array.isArray(model.terrain.heights) && typeof model.terrain.cols === "number" && typeof model.terrain.rows === "number", "terrain has heights/cols/rows");
+    assert(model.terrain.cols * model.terrain.rows <= 1024, `terrain grid stays within the ~1024-cell coarse cap (got ${model.terrain.cols}x${model.terrain.rows})`);
+
+    const place = model.places.find((p) => p.id === "sky-tower");
+    assert(place && place.name === "Sky Tower" && place.builtBy === "ai", "sky-tower place record maps id/name/builtBy through");
+    assert(place && place.bounds && place.bounds.x1 === 8, "sky-tower place record carries its bounds through");
+
+    // --- floating-place diagnostic ---
+    const floatingDiag = model.diagnostics.find((d) => d.kind === "floating");
+    assert(floatingDiag, "a 'floating' diagnostic was produced for the ai-built place planted 16 blocks above the scanned ground");
+    assert(floatingDiag && floatingDiag.severity === "error", "the floating diagnostic is severity 'error'");
+    assert(floatingDiag && floatingDiag.subject === "sky-tower", "the floating diagnostic names sky-tower as its subject");
+    assert(floatingDiag && place.flags.includes("floating"), "the floating place record itself carries a 'floating' flag");
+    assert(!model.diagnostics.some((d) => d.kind === "floating" && d.subject === "old-well"), "the grounded (non-ai) old-well place does NOT get a floating diagnostic");
+
+    // --- NPC fallback position + no-position diagnostic ---
+    const mara = model.npcs.find((n) => n.id === "mara-baker");
+    assert(mara && mara.pos && mara.pos.x === -5 && mara.pos.y === 65, "mara's position falls back to her ledger `home` coordinate");
+    assert(mara && mara.flags.some((f) => /no live-position/.test(f)), "mara's fallback position is flagged as not being a live read");
+    assert(!model.diagnostics.some((d) => d.kind === "off-ground" && d.subject === "mara-baker"), "mara (standing on solid ground per the fake get_block) is NOT flagged off-ground");
+
+    const ghost = model.npcs.find((n) => n.id === "ghost-npc");
+    assert(ghost && ghost.pos === null, "ghost-npc (alive, no ledger home) has a null position");
+    const noPosDiag = model.diagnostics.find((d) => d.kind === "no-position" && d.subject === "ghost-npc");
+    assert(noPosDiag && noPosDiag.severity === "warn", "ghost-npc produced a 'no-position' warning diagnostic");
+
+    const sella = model.npcs.find((n) => n.id === "sella");
+    assert(sella && sella.alive === false, "sella is recorded as dead");
+    const deadDiag = model.diagnostics.find((d) => d.kind === "dead" && d.subject === "sella");
+    assert(deadDiag && deadDiag.severity === "info", "sella (dead) produced an 'info'-severity 'dead' diagnostic");
+
+    // --- text digest (formatWorldOverview) ---
+    const digest = formatWorldOverview(model, { detail: "full" });
+    assert(digest.includes("PROBLEMS"), "the text digest has a PROBLEMS section");
+    assert(digest.includes("floating") && digest.includes("sky-tower") || digest.includes("Sky Tower"), "the text digest's PROBLEMS section mentions the floating sky-tower entry");
+    assert(digest.includes("Sky Tower") && digest.includes("Old Well"), "the text digest lists both places by name");
+    assert(/\d+ place\(s\)/.test(digest) && /alive/.test(digest) && /dead/.test(digest), "the text digest's header line has counts including alive/dead NPCs");
+    const summaryDigest = formatWorldOverview(model, { detail: "summary" });
+    assert(!/^[A-Z+.]{5,}$/m.test(summaryDigest.split("PROBLEMS")[0]), "detail:\"summary\" omits the ASCII map's raw grid lines");
+  }
 
   console.log("\n1b. Actor report parsing (pure, no process needed)");
   const wellFormed = parseActorReport(
@@ -912,6 +1034,37 @@ async function main() {
   assert(pageWithOrderHtml.includes(orderText), "GET / page lists the recent order text");
   assert(pageWithOrderHtml.includes("Order the world"), "GET / page has the order textarea/button");
   assert(pageWithOrderHtml.includes(savedOrder.timestamp), "GET / page lists the order's timestamp");
+
+  console.log("\n5c. 3D world map page (GET /map): auth-gated like every other console route, self-contained canvas viewer");
+  const mapUnauthed = await fetch(`${base}/map`);
+  assert(mapUnauthed.status === 401, `GET /map with no token is rejected (got ${mapUnauthed.status})`);
+
+  const mapRes = await fetch(`${base}/map?token=${consoleToken}`);
+  assert(mapRes.status === 200, `GET /map with a valid token succeeds (got ${mapRes.status})`);
+  const mapHtml = await mapRes.text();
+  assert(mapHtml.includes("<canvas"), "GET /map page renders a <canvas> element");
+  assert(mapHtml.includes("fetch('/worldmodel')"), "GET /map page's inline script fetches /worldmodel");
+  assert(mapHtml.includes('id="problem-list"') && mapHtml.includes("Problems (worst first)"), "GET /map page has the problems panel markup");
+  assert(pageWithOrderHtml.includes('href="/map"'), "GET / page links to /map");
+  assert(mapHtml.includes('href="/"'), "GET /map page links back to the Lore Console (/)");
+
+  console.log("\n5d. GET /worldmodel: token-authed like every other console route, returns the raw world-model JSON");
+  const worldmodelUnauthed = await fetch(`${base}/worldmodel`);
+  assert(worldmodelUnauthed.status === 401, `GET /worldmodel with no token is rejected (got ${worldmodelUnauthed.status})`);
+
+  const worldmodelRes = await fetch(`${base}/worldmodel?token=${consoleToken}`);
+  assert(worldmodelRes.status === 200, `GET /worldmodel with a valid token succeeds (got ${worldmodelRes.status})`);
+  const worldmodelJson = await worldmodelRes.json();
+  assert(typeof worldmodelJson.generatedAt === "string", "GET /worldmodel JSON has a generatedAt string");
+  assert(Array.isArray(worldmodelJson.places) && Array.isArray(worldmodelJson.npcs) && Array.isArray(worldmodelJson.diagnostics), "GET /worldmodel JSON has places/npcs/diagnostics arrays (mock bridge has no ledger data, so all empty)");
+  assert(worldmodelJson.bounds && typeof worldmodelJson.bounds.minX === "number", "GET /worldmodel JSON has a numeric bounds object");
+
+  // --- 5s cache: a second immediate request reuses the same generatedAt
+  // rather than rebuilding (proves the cache is actually short-circuiting,
+  // not just "the world happens to not have changed") ---
+  const worldmodelRes2 = await fetch(`${base}/worldmodel?token=${consoleToken}`);
+  const worldmodelJson2 = await worldmodelRes2.json();
+  assert(worldmodelJson2.generatedAt === worldmodelJson.generatedAt, "a second immediate GET /worldmodel reuses the cached model (same generatedAt) instead of rebuilding");
 
   brain4.child.kill();
   bridge4.child.kill();

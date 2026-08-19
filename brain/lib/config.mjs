@@ -65,6 +65,9 @@ export const ALL_TOOLS = [
   "ledger_put", "ledger_get", "ledger_query", "ledger_delete", "npc_context",
   // Info
   "get_server_info", "get_block", "sample_terrain", "scan_area",
+  // World model - a compact "what exists and what's wrong" digest composed
+  // brain-side from ledger_query/scan_area/get_block (see lib/worldmodel.mjs)
+  "world_overview",
   // Formulas - reusable, parameterized recipes over the tools above
   "formula_define", "formula_run", "formula_list", "formula_get", "formula_delete",
   // NPC jobs - NPCs physically working real stations/chests with finite items

@@ -254,6 +254,8 @@ function renderPage(directives, orders) {
     font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   }
   h1 { font-size: 1.3rem; margin: 0 0 .25rem; }
+  h1 .maplink { font-size: .75rem; font-weight: normal; color: #7fa8ff; text-decoration: none; margin-left: .75rem; vertical-align: middle; }
+  h1 .maplink:hover { text-decoration: underline; }
   .sub { color: #9aa0a8; margin: 0 0 1.5rem; font-size: .9rem; }
   main { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 2rem; }
   textarea {
@@ -308,7 +310,7 @@ function renderPage(directives, orders) {
 <body>
 <main>
   <div>
-    <h1>Lore Console</h1>
+    <h1>Lore Console <a class="maplink" href="/map">3D map &rarr;</a></h1>
     <p class="sub">Type an instruction for the director to fold into the world. It takes effect on the next scene.</p>
   </div>
 
@@ -422,6 +424,678 @@ setInterval(refreshDecisions, 5000);
 </html>`;
 }
 
+// ---------------- 3D world map page (GET /map) ----------------
+//
+// A second, independent page hitting GET /worldmodel (same-origin, so the
+// cookie set by checkAuth() above already authenticates its fetch() calls
+// exactly like the / page's own fetch()es). Entirely self-contained: no
+// external/CDN resources, no npm deps - a hand-rolled orthographic 3D
+// projection drawn on a <canvas>, in the same dark theme as the / page.
+// See the inline <script> below for the camera/projection/picking code.
+
+function renderMapPage() {
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lore Console — 3D Map</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body {
+    background: #14161a; color: #e6e6e6; margin: 0; padding: 0; height: 100%;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 1rem; padding: .6rem 1rem;
+    border-bottom: 1px solid #33373e; background: #1c1f24;
+  }
+  header h1 { font-size: 1.05rem; margin: 0; }
+  header a { color: #7fa8ff; text-decoration: none; font-size: .85rem; }
+  header a:hover { text-decoration: underline; }
+  #counts { font-size: .8rem; color: #9aa0a8; display: flex; gap: 1rem; flex-wrap: wrap; }
+  #counts b { color: #e6e6e6; }
+  .spacer { flex: 1; }
+  button { background: #3a6ff7; color: white; border: none; border-radius: 6px; padding: .4rem .9rem; font-size: .8rem; cursor: pointer; }
+  button:hover { background: #5081f8; }
+  label.toggle { font-size: .8rem; color: #9aa0a8; display: flex; align-items: center; gap: .35rem; cursor: pointer; }
+  #layout { display: flex; height: calc(100% - 48px); }
+  #canvas-wrap { position: relative; flex: 1; min-width: 0; }
+  canvas { display: block; background: #0f1114; cursor: grab; }
+  canvas.dragging { cursor: grabbing; }
+  #banner {
+    position: absolute; top: 0; left: 0; right: 0; padding: .6rem 1rem; font-size: .85rem;
+    background: #3a1a1a; color: #ffb0b0; border-bottom: 1px solid #6a2a2a; display: none;
+  }
+  #banner a { color: #ffd0d0; }
+  #hover-coord {
+    position: absolute; left: .6rem; bottom: .5rem; font-size: .75rem; color: #7f858c;
+    font-family: ui-monospace, monospace; pointer-events: none;
+  }
+  #empty-notes {
+    position: absolute; top: .6rem; left: .6rem; font-size: .75rem; color: #6b7078;
+    display: flex; flex-direction: column; gap: .15rem; pointer-events: none;
+  }
+  aside {
+    width: 300px; flex-shrink: 0; border-left: 1px solid #33373e; background: #1c1f24;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  aside section { padding: .75rem .85rem; border-bottom: 1px solid #2a2d33; overflow: auto; }
+  aside h2 { font-size: .75rem; color: #9aa0a8; text-transform: uppercase; letter-spacing: .04em; margin: 0 0 .5rem; }
+  #info-panel { min-height: 4.5rem; font-size: .82rem; line-height: 1.4; }
+  #info-panel .empty { color: #6b7078; font-style: italic; }
+  #info-panel .flag { display: inline-block; background: #3a1a1a; color: #ffb0b0; border-radius: 4px; padding: 0 .35rem; margin: .1rem .2rem 0 0; font-size: .72rem; }
+  #problems { flex: 1; min-height: 0; }
+  ul#problem-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .4rem; }
+  li.problem {
+    border-left: 3px solid #7fa8ff; background: #16181c; border-radius: 4px; padding: .4rem .55rem;
+    cursor: pointer; font-size: .78rem; line-height: 1.35;
+  }
+  li.problem:hover { background: #20242b; }
+  li.problem.sev-error { border-left-color: #ff5555; }
+  li.problem.sev-warn { border-left-color: #e0a458; }
+  li.problem.sev-info { border-left-color: #7fa8ff; }
+  li.problem .sev { text-transform: uppercase; font-size: .65rem; letter-spacing: .04em; color: #9aa0a8; }
+  li.problem .kind { color: #c9cdd3; font-weight: 600; }
+  li.problem .msg { color: #b7bbc2; margin-top: .15rem; }
+  #legend { font-size: .72rem; color: #9aa0a8; display: flex; flex-direction: column; gap: .25rem; }
+  #legend .row { display: flex; align-items: center; gap: .4rem; }
+  #legend .swatch { width: .7rem; height: .7rem; border-radius: 2px; display: inline-block; }
+</style>
+</head>
+<body>
+<header>
+  <h1>3D Map</h1>
+  <a href="/">&larr; Lore Console</a>
+  <div id="counts">loading&hellip;</div>
+  <div class="spacer"></div>
+  <label class="toggle"><input type="checkbox" id="auto-refresh"> auto-refresh (10s)</label>
+  <button id="refresh">Refresh</button>
+</header>
+<div id="layout">
+  <div id="canvas-wrap">
+    <div id="banner"></div>
+    <canvas id="c"></canvas>
+    <div id="empty-notes"></div>
+    <div id="hover-coord"></div>
+  </div>
+  <aside>
+    <section>
+      <h2>Selected</h2>
+      <div id="info-panel"><span class="empty">Hover or click a place/NPC marker.</span></div>
+    </section>
+    <section>
+      <h2>Legend</h2>
+      <div id="legend">
+        <div class="row"><span class="swatch" style="background:#7fa8ff"></span> place built by AI</div>
+        <div class="row"><span class="swatch" style="background:#e0a458"></span> place built by player</div>
+        <div class="row"><span class="swatch" style="background:#9aa0a8"></span> place built by world/other</div>
+        <div class="row"><span class="swatch" style="background:#4caf6b"></span> NPC alive</div>
+        <div class="row"><span class="swatch" style="background:#6b7078"></span> NPC dead</div>
+        <div class="row"><span class="swatch" style="background:#ff6a3d"></span> NPC has a flag</div>
+      </div>
+    </section>
+    <section id="problems">
+      <h2>Problems (worst first)</h2>
+      <ul id="problem-list"></ul>
+    </section>
+  </aside>
+</div>
+
+<script>
+// =========================================================================
+// SECTION: state
+// =========================================================================
+var worldmodel = null;       // last GET /worldmodel response
+var camera = {                // orbit camera - yaw/pitch in radians, scale = px per world unit
+  yaw: 0.7, pitch: 0.55, scale: 4,
+  target: { x: 0, y: 64, z: 0 }, // world point the camera orbits/pans around
+};
+var hitTargets = [];         // rebuilt every draw(): [{sx,sy,r,kind,obj}]
+var lastMouse = null;        // {x,y} in canvas-local pixels, for the coord readout
+var focusPoint = null;       // {x,y,z,until} - a transient highlight ring, see focusOn()
+var autoRefreshTimer = null;
+var hoveredKey = null;       // "place:<id>" / "npc:<id>" of the currently hovered marker
+
+var canvas = document.getElementById('c');
+var ctx = canvas.getContext('2d');
+
+// =========================================================================
+// SECTION: camera / projection
+// -------------------------------------------------------------------------
+// Hand-rolled orthographic projection: rotate the world by -yaw around Y,
+// then by -pitch around the resulting X axis, then drop Z (used only for
+// painter's-algorithm depth sorting) and scale X/Y to screen pixels.
+// unproject() inverts this assuming the point lies on the y = target.y
+// plane, used only for the "coordinate under the cursor" readout.
+// =========================================================================
+function project(wx, wy, wz) {
+  var x = wx - camera.target.x, y = wy - camera.target.y, z = wz - camera.target.z;
+  var cosY = Math.cos(camera.yaw), sinY = Math.sin(camera.yaw);
+  var x1 = x * cosY - z * sinY;
+  var z1 = x * sinY + z * cosY;
+  var cosP = Math.cos(camera.pitch), sinP = Math.sin(camera.pitch);
+  var y2 = y * cosP - z1 * sinP;
+  var z2 = y * sinP + z1 * cosP; // depth: larger = farther from the viewer
+  return {
+    sx: canvas.width / 2 + x1 * camera.scale,
+    sy: canvas.height / 2 - y2 * camera.scale,
+    depth: z2,
+  };
+}
+
+// Inverse-projects a screen pixel onto the y = target.y plane. Returns null
+// where the view is too edge-on (sin(pitch) ~ 0) for a stable answer.
+function unproject(sx, sy) {
+  var sinP = Math.sin(camera.pitch), cosP = Math.cos(camera.pitch);
+  if (Math.abs(sinP) < 0.05) return null;
+  var x1 = (sx - canvas.width / 2) / camera.scale;
+  var y2 = (canvas.height / 2 - sy) / camera.scale;
+  var z1 = -y2 / sinP; // solved from y2 = 0*cosP - z1*sinP (world y == target.y)
+  var cosY = Math.cos(camera.yaw), sinY = Math.sin(camera.yaw);
+  var x = x1 * cosY + z1 * sinY;
+  var z = -x1 * sinY + z1 * cosY;
+  return { x: x + camera.target.x, z: z + camera.target.z };
+}
+
+// Approximate screen-space right/up vectors at the current yaw/pitch, used
+// only to turn a drag delta into a world-space pan.
+function cameraRightUp() {
+  var right = { x: Math.cos(camera.yaw), y: 0, z: -Math.sin(camera.yaw) };
+  var up = {
+    x: Math.sin(camera.yaw) * Math.sin(camera.pitch),
+    y: Math.cos(camera.pitch),
+    z: Math.cos(camera.yaw) * Math.sin(camera.pitch),
+  };
+  return { right: right, up: up };
+}
+
+// =========================================================================
+// SECTION: meshes - turns worldmodel into a flat list of paintable
+// primitives ({depth, draw}) plus hitTargets for picking. Rebuilt on every
+// draw() call, which only happens on interaction/refresh, never a rAF loop.
+// =========================================================================
+function colorForBuiltBy(builtBy) {
+  if (builtBy === 'ai') return '#7fa8ff';
+  if (builtBy === 'player') return '#e0a458';
+  return '#9aa0a8'; // world / other / unset
+}
+
+function hasErrorFlag(flags) {
+  return Array.isArray(flags) && flags.some(function (f) { return /error/i.test(String(f)); });
+}
+
+function buildTerrainPrimitives(list) {
+  var terrain = worldmodel.terrain;
+  if (!terrain || !terrain.heights || !terrain.heights.length) return;
+  var heights = terrain.heights, step = terrain.step || 1;
+  var ox = terrain.origin ? terrain.origin.x : 0, oz = terrain.origin ? terrain.origin.z : 0;
+  var bounds = worldmodel.bounds || { minY: 0, maxY: 256 };
+  var lightDir = normalize3({ x: 0.35, y: 1, z: 0.25 });
+  var lowCol = [72, 92, 62], highCol = [150, 158, 128];
+  var rows = heights.length;
+  for (var j = 0; j < rows - 1; j++) {
+    var row0 = heights[j], row1 = heights[j + 1];
+    if (!row0 || !row1) continue;
+    var cols = row0.length;
+    for (var i = 0; i < cols - 1; i++) {
+      var h00 = row0[i], h10 = row0[i + 1], h11 = row1[i + 1], h01 = row1[i];
+      if (h00 == null || h10 == null || h11 == null || h01 == null) continue;
+      var p00 = { x: ox + i * step, y: h00, z: oz + j * step };
+      var p10 = { x: ox + (i + 1) * step, y: h10, z: oz + j * step };
+      var p11 = { x: ox + (i + 1) * step, y: h11, z: oz + (j + 1) * step };
+      var p01 = { x: ox + i * step, y: h01, z: oz + (j + 1) * step };
+      var normal = faceNormal(p00, p10, p11);
+      var shade = clamp(0.35 + 0.75 * dot3(normal, lightDir), 0.3, 1.15);
+      var avgH = (h00 + h10 + h11 + h01) / 4;
+      var t = clamp((avgH - bounds.minY) / Math.max(1, bounds.maxY - bounds.minY), 0, 1);
+      var col = [0, 1, 2].map(function (k) { return Math.round((lowCol[k] + (highCol[k] - lowCol[k]) * t) * shade); });
+      var pr = [p00, p10, p11, p01].map(function (p) { return project(p.x, p.y, p.z); });
+      var depth = (pr[0].depth + pr[1].depth + pr[2].depth + pr[3].depth) / 4;
+      list.push({
+        depth: depth,
+        draw: function (pr, col) {
+          return function (ctx) {
+            ctx.beginPath();
+            ctx.moveTo(pr[0].sx, pr[0].sy);
+            ctx.lineTo(pr[1].sx, pr[1].sy);
+            ctx.lineTo(pr[2].sx, pr[2].sy);
+            ctx.lineTo(pr[3].sx, pr[3].sy);
+            ctx.closePath();
+            ctx.fillStyle = 'rgb(' + col[0] + ',' + col[1] + ',' + col[2] + ')';
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(0,0,0,.18)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+          };
+        }(pr, col),
+      });
+    }
+  }
+}
+
+function buildPlacePrimitives(list) {
+  (worldmodel.places || []).forEach(function (place) {
+    var color = colorForBuiltBy(place.builtBy);
+    var errored = hasErrorFlag(place.flags);
+    if (place.bounds) {
+      var b = place.bounds;
+      var x1 = Math.min(b.x1, b.x2), x2 = Math.max(b.x1, b.x2);
+      var y1 = Math.min(b.y1, b.y2), y2 = Math.max(b.y1, b.y2);
+      var z1 = Math.min(b.z1, b.z2), z2 = Math.max(b.z1, b.z2);
+      var corners = [
+        { x: x1, y: y1, z: z1 }, { x: x2, y: y1, z: z1 }, { x: x2, y: y1, z: z2 }, { x: x1, y: y1, z: z2 },
+        { x: x1, y: y2, z: z1 }, { x: x2, y: y2, z: z1 }, { x: x2, y: y2, z: z2 }, { x: x1, y: y2, z: z2 },
+      ];
+      var pc = corners.map(function (c) { return project(c.x, c.y, c.z); });
+      var faces = [
+        [0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4], [2, 3, 7, 6], [1, 2, 6, 5], [0, 3, 7, 4],
+      ];
+      faces.forEach(function (f) {
+        var pts = f.map(function (idx) { return pc[idx]; });
+        var depth = (pts[0].depth + pts[1].depth + pts[2].depth + pts[3].depth) / 4;
+        list.push({
+          depth: depth,
+          draw: function (pts) {
+            return function (ctx) {
+              ctx.beginPath();
+              ctx.moveTo(pts[0].sx, pts[0].sy);
+              ctx.lineTo(pts[1].sx, pts[1].sy);
+              ctx.lineTo(pts[2].sx, pts[2].sy);
+              ctx.lineTo(pts[3].sx, pts[3].sy);
+              ctx.closePath();
+              ctx.fillStyle = hexToRgba(color, 0.22);
+              ctx.fill();
+              ctx.strokeStyle = errored ? '#ff5555' : hexToRgba(color, 0.9);
+              ctx.lineWidth = errored ? 2 : 1;
+              ctx.stroke();
+            };
+          }(pts),
+        });
+      });
+      var topCenter = project((x1 + x2) / 2, y2, (z1 + z2) / 2);
+      list.push({
+        depth: topCenter.depth - 0.01,
+        draw: function (ctx) { drawLabel(ctx, topCenter, place.name, color); },
+      });
+      registerHit(topCenter, 12, 'place', place);
+    } else {
+      var o = place.origin || { x: 0, y: 0, z: 0 };
+      var base = project(o.x, o.y, o.z);
+      var top = project(o.x, o.y + 2.2, o.z);
+      list.push({
+        depth: base.depth,
+        draw: function (ctx) {
+          ctx.beginPath();
+          ctx.moveTo(base.sx, base.sy);
+          ctx.lineTo(top.sx, top.sy);
+          ctx.strokeStyle = errored ? '#ff5555' : color;
+          ctx.lineWidth = errored ? 3 : 2;
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(top.sx, top.sy - 6);
+          ctx.lineTo(top.sx + 5, top.sy + 3);
+          ctx.lineTo(top.sx - 5, top.sy + 3);
+          ctx.closePath();
+          ctx.fillStyle = errored ? '#ff5555' : color;
+          ctx.fill();
+          drawLabel(ctx, { sx: top.sx, sy: top.sy - 12 }, place.name, color);
+        },
+      });
+      registerHit(top, 10, 'place', place);
+    }
+  });
+}
+
+function buildNpcPrimitives(list) {
+  (worldmodel.npcs || []).forEach(function (npc) {
+    if (!npc.pos) return; // skip gracefully - no marker without a position
+    var color = '#4caf6b';
+    if (hasErrorFlag(npc.flags) || (Array.isArray(npc.flags) && npc.flags.length)) color = '#ff6a3d';
+    else if (!npc.alive) color = '#6b7078';
+    var base = project(npc.pos.x, npc.pos.y, npc.pos.z);
+    var top = project(npc.pos.x, npc.pos.y + 1.8, npc.pos.z);
+    list.push({
+      depth: base.depth,
+      draw: function (ctx) {
+        ctx.beginPath();
+        ctx.moveTo(base.sx, base.sy);
+        ctx.lineTo(top.sx, top.sy);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(top.sx, top.sy, 4, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        if (hoveredKey === 'npc:' + npc.id) {
+          ctx.beginPath();
+          ctx.arc(top.sx, top.sy, 8, 0, Math.PI * 2);
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+      },
+    });
+    registerHit(top, 9, 'npc', npc);
+  });
+}
+
+function registerHit(pt, r, kind, obj) {
+  hitTargets.push({ sx: pt.sx, sy: pt.sy, r: r, kind: kind, obj: obj });
+}
+
+function drawLabel(ctx, pt, text, color) {
+  ctx.font = '11px system-ui, sans-serif';
+  ctx.fillStyle = 'rgba(15,17,20,.75)';
+  var w = ctx.measureText(text).width;
+  ctx.fillRect(pt.sx - w / 2 - 3, pt.sy - 13, w + 6, 15);
+  ctx.fillStyle = color;
+  ctx.textAlign = 'center';
+  ctx.fillText(text, pt.sx, pt.sy - 2);
+  ctx.textAlign = 'left';
+}
+
+// =========================================================================
+// SECTION: small math helpers
+// =========================================================================
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+function dot3(a, b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+function normalize3(v) {
+  var len = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z) || 1;
+  return { x: v.x / len, y: v.y / len, z: v.z / len };
+}
+function faceNormal(a, b, c) {
+  var u = { x: b.x - a.x, y: b.y - a.y, z: b.z - a.z };
+  var v = { x: c.x - a.x, y: c.y - a.y, z: c.z - a.z };
+  return normalize3({ x: u.y * v.z - u.z * v.y, y: u.z * v.x - u.x * v.z, z: u.x * v.y - u.y * v.x });
+}
+function hexToRgba(hex, alpha) {
+  var r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+  return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
+}
+
+// =========================================================================
+// SECTION: draw - the painter's-algorithm redraw. Called on interaction and
+// on data refresh only; there is no continuous requestAnimationFrame loop.
+// =========================================================================
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#0f1114';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (!worldmodel) return;
+
+  hitTargets = [];
+  var primitives = [];
+  buildTerrainPrimitives(primitives);
+  buildPlacePrimitives(primitives);
+  buildNpcPrimitives(primitives);
+  primitives.sort(function (a, b) { return b.depth - a.depth; }); // farthest first
+  primitives.forEach(function (p) { p.draw(ctx); });
+
+  if (focusPoint && Date.now() < focusPoint.until) {
+    var fp = project(focusPoint.x, focusPoint.y, focusPoint.z);
+    var pulse = 10 + 6 * Math.sin(Date.now() / 120);
+    ctx.beginPath();
+    ctx.arc(fp.sx, fp.sy, pulse, 0, Math.PI * 2);
+    ctx.strokeStyle = '#ffcf5c';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  drawCompass();
+  updateEmptyNotes();
+}
+
+// N/E/S/W + up indicator, fixed in the canvas's top-right corner - always
+// visible regardless of camera state, so orientation never gets lost.
+function drawCompass() {
+  var cx = canvas.width - 60, cy = 60, r = 34;
+  ctx.save();
+  ctx.font = '11px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  // Compass directions in Minecraft: +X = east, -X = west, +Z = south, -Z = north.
+  var dirs = [
+    { label: 'N', x: 0, z: -1 }, { label: 'S', x: 0, z: 1 },
+    { label: 'E', x: 1, z: 0 }, { label: 'W', x: -1, z: 0 },
+  ];
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(28,31,36,.85)';
+  ctx.fill();
+  ctx.strokeStyle = '#33373e';
+  ctx.stroke();
+  dirs.forEach(function (d) {
+    var cosY = Math.cos(camera.yaw), sinY = Math.sin(camera.yaw);
+    var x1 = d.x * cosY - d.z * sinY;
+    ctx.fillStyle = d.label === 'N' ? '#7fa8ff' : '#c9cdd3';
+    ctx.fillText(d.label, cx + x1 * (r - 10), cy - (d.x * sinY + d.z * cosY) * (r - 10) * 0.4);
+  });
+  ctx.fillStyle = '#6b7078';
+  ctx.fillText('up ↑', cx, cy + r + 12);
+  ctx.restore();
+}
+
+function updateEmptyNotes() {
+  var notes = [];
+  if (!worldmodel.terrain) notes.push('No terrain data available.');
+  if (!worldmodel.places || !worldmodel.places.length) notes.push('No places recorded yet.');
+  if (!worldmodel.npcs || !worldmodel.npcs.length) notes.push('No NPCs recorded yet.');
+  document.getElementById('empty-notes').textContent = notes.join('  ·  ');
+}
+
+// =========================================================================
+// SECTION: picking - hover shows the info panel, click pins it
+// =========================================================================
+function hitTest(px, py) {
+  var best = null, bestDist = Infinity;
+  hitTargets.forEach(function (t) {
+    var dx = t.sx - px, dy = t.sy - py, d = Math.sqrt(dx * dx + dy * dy);
+    if (d <= t.r + 4 && d < bestDist) { best = t; bestDist = d; }
+  });
+  return best;
+}
+
+function renderInfo(target) {
+  var panel = document.getElementById('info-panel');
+  if (!target) { panel.innerHTML = '<span class="empty">Hover or click a place/NPC marker.</span>'; return; }
+  var obj = target.obj, html = '';
+  if (target.kind === 'place') {
+    html += '<b>' + escapeHtml(obj.name || obj.id) + '</b><br>';
+    html += 'kind: ' + escapeHtml(obj.kind || '(unknown)') + '<br>';
+    html += 'built by: ' + escapeHtml(obj.builtBy || '(unknown)') + '<br>';
+  } else {
+    html += '<b>' + escapeHtml(obj.name || obj.id) + '</b><br>';
+    html += 'role: ' + escapeHtml(obj.role || '(unknown)') + '<br>';
+    html += 'status: ' + (obj.alive ? 'alive' : 'dead') + '<br>';
+  }
+  var flags = obj.flags || [];
+  html += flags.length
+    ? flags.map(function (f) { return '<span class="flag">' + escapeHtml(f) + '</span>'; }).join('')
+    : '<span class="empty">no flags</span>';
+  panel.innerHTML = html;
+}
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+// =========================================================================
+// SECTION: mouse/wheel interaction - orbit (drag), pan (right-drag or
+// shift-drag), zoom (wheel)
+// =========================================================================
+var dragState = null; // {mode: 'orbit'|'pan', lastX, lastY}
+
+canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+
+canvas.addEventListener('mousedown', function (e) {
+  var mode = (e.button === 2 || e.shiftKey) ? 'pan' : 'orbit';
+  dragState = { mode: mode, lastX: e.clientX, lastY: e.clientY };
+  canvas.classList.add('dragging');
+});
+
+window.addEventListener('mouseup', function () {
+  dragState = null;
+  canvas.classList.remove('dragging');
+});
+
+window.addEventListener('mousemove', function (e) {
+  if (dragState) {
+    var dx = e.clientX - dragState.lastX, dy = e.clientY - dragState.lastY;
+    dragState.lastX = e.clientX;
+    dragState.lastY = e.clientY;
+    if (dragState.mode === 'orbit') {
+      camera.yaw += dx * 0.006;
+      camera.pitch = clamp(camera.pitch + dy * 0.006, -1.45, 1.45);
+    } else {
+      var ru = cameraRightUp();
+      var f = 1 / camera.scale;
+      camera.target.x -= (ru.right.x * dx - ru.up.x * dy) * f;
+      camera.target.y -= (ru.right.y * dx - ru.up.y * dy) * f;
+      camera.target.z -= (ru.right.z * dx - ru.up.z * dy) * f;
+    }
+    draw();
+  }
+});
+
+canvas.addEventListener('mousemove', function (e) {
+  var rect = canvas.getBoundingClientRect();
+  var px = e.clientX - rect.left, py = e.clientY - rect.top;
+  lastMouse = { x: px, y: py };
+  var hit = hitTest(px, py);
+  var key = hit ? (hit.kind + ':' + hit.obj.id) : null;
+  if (key !== hoveredKey) {
+    hoveredKey = key;
+    renderInfo(hit);
+    draw();
+  }
+  var ground = unproject(px, py);
+  document.getElementById('hover-coord').textContent = ground
+    ? ('~ ground x:' + Math.round(ground.x) + ' z:' + Math.round(ground.z) + ' (y:' + Math.round(camera.target.y) + ')')
+    : '';
+});
+
+canvas.addEventListener('click', function (e) {
+  var rect = canvas.getBoundingClientRect();
+  var hit = hitTest(e.clientX - rect.left, e.clientY - rect.top);
+  if (hit) renderInfo(hit); // pin the panel to the clicked object
+});
+
+canvas.addEventListener('wheel', function (e) {
+  e.preventDefault();
+  var factor = e.deltaY > 0 ? 0.9 : 1.1;
+  camera.scale = clamp(camera.scale * factor, 0.3, 60);
+  draw();
+}, { passive: false });
+
+// =========================================================================
+// SECTION: problems panel - worst-first, click focuses the camera
+// =========================================================================
+var SEV_ORDER = { error: 0, warn: 1, info: 2 };
+
+function renderProblems() {
+  var list = document.getElementById('problem-list');
+  var diagnostics = (worldmodel && worldmodel.diagnostics) || [];
+  if (!diagnostics.length) {
+    list.innerHTML = '<li class="problem" style="cursor:default"><span class="msg">No problems reported.</span></li>';
+    return;
+  }
+  var sorted = diagnostics.slice().sort(function (a, b) {
+    return (SEV_ORDER[a.severity] != null ? SEV_ORDER[a.severity] : 3) - (SEV_ORDER[b.severity] != null ? SEV_ORDER[b.severity] : 3);
+  });
+  list.innerHTML = '';
+  sorted.forEach(function (d, idx) {
+    var li = document.createElement('li');
+    li.className = 'problem sev-' + (d.severity || 'info');
+    li.innerHTML = '<div class="sev">' + escapeHtml(d.severity || 'info') + '</div>' +
+      '<div class="kind">' + escapeHtml(d.kind || '') + (d.subject ? ' &mdash; ' + escapeHtml(d.subject) : '') + '</div>' +
+      '<div class="msg">' + escapeHtml(d.message || '') + '</div>';
+    li.addEventListener('click', function () { focusOn(d.at); });
+    list.appendChild(li);
+  });
+}
+
+// Centers the camera on a diagnostic's coordinate (a no-op, gracefully, if
+// the diagnostic carries no "at") and drops a brief pulsing ring there.
+function focusOn(at) {
+  if (!at) return;
+  camera.target = { x: at.x, y: at.y, z: at.z };
+  focusPoint = { x: at.x, y: at.y, z: at.z, until: Date.now() + 2000 };
+  draw();
+  setTimeout(draw, 2050); // one extra redraw to clear the pulse ring
+}
+
+// =========================================================================
+// SECTION: header counts + data loading
+// =========================================================================
+function updateCounts() {
+  var el = document.getElementById('counts');
+  if (!worldmodel) { el.textContent = 'loading…'; return; }
+  var places = (worldmodel.places || []).length;
+  var npcs = worldmodel.npcs || [];
+  var alive = npcs.filter(function (n) { return n.alive; }).length;
+  var dead = npcs.length - alive;
+  var problems = (worldmodel.diagnostics || []).length;
+  el.innerHTML = 'Places: <b>' + places + '</b> &middot; ' +
+    'NPCs: <b>' + alive + '</b> alive / <b>' + dead + '</b> dead &middot; ' +
+    'Problems: <b>' + problems + '</b> &middot; ' +
+    'generated ' + escapeHtml(worldmodel.generatedAt || '?');
+}
+
+function showBanner(html) {
+  var b = document.getElementById('banner');
+  if (!html) { b.style.display = 'none'; b.innerHTML = ''; return; }
+  b.innerHTML = html;
+  b.style.display = 'block';
+}
+
+function resizeCanvas() {
+  var wrap = document.getElementById('canvas-wrap');
+  canvas.width = wrap.clientWidth;
+  canvas.height = wrap.clientHeight;
+  draw();
+}
+
+async function fetchAndRender() {
+  try {
+    var res = await fetch('/worldmodel');
+    if (res.status === 401) {
+      showBanner('Not authorized. Add <code>?token=YOUR-TOKEN</code> to the console URL first, then reload.');
+      return;
+    }
+    if (!res.ok) {
+      showBanner('Failed to load /worldmodel (HTTP ' + res.status + '). Retrying on next refresh.');
+      return;
+    }
+    showBanner(null);
+    worldmodel = await res.json();
+    updateCounts();
+    renderProblems();
+    draw();
+  } catch (err) {
+    showBanner('Failed to reach /worldmodel: ' + escapeHtml(String(err)));
+  }
+}
+
+document.getElementById('refresh').addEventListener('click', fetchAndRender);
+document.getElementById('auto-refresh').addEventListener('change', function (e) {
+  if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
+  if (e.target.checked) autoRefreshTimer = setInterval(fetchAndRender, 10000);
+});
+
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+fetchAndRender();
+</script>
+</body>
+</html>`;
+}
+
 // ---------------- request body ----------------
 
 function readBody(req) {
@@ -445,7 +1119,7 @@ function sendJson(res, status, obj, extraHeaders = {}) {
 
 /**
  * @param {object} config - loadConfig() result (consoleBind/consolePort/consoleToken/loreDir/stateDir)
- * @param {{ reloadLore: () => Promise<void> | void, submitOrder: (text: string, orderTimestamp: string) => void }} deps
+ * @param {{ reloadLore: () => Promise<void> | void, submitOrder: (text: string, orderTimestamp: string) => void, getWorldModel: () => Promise<object> }} deps
  *   - reloadLore is the exact reload lore.mjs's watcher uses on its own
  *   timer (index.mjs passes `loreWatch.tick`), invoked after every
  *   directive add/delete so the NEXT scene already sees the change.
@@ -456,11 +1130,33 @@ function sendJson(res, status, obj, extraHeaders = {}) {
  *   scene event so index.mjs's runScene can later mark this same orders.json
  *   entry "done" (or revert it to "queued" on a timeout) once its scene
  *   completes.
+ *   - getWorldModel (index.mjs) builds the raw world-model JSON (lib/
+ *   worldmodel.mjs's buildWorldModel, called against the brain's own bridge
+ *   connection) for GET /worldmodel below - the 3D map page's (/map) data
+ *   source. Its result is cached for WORLDMODEL_CACHE_MS so rapid page
+ *   refreshes/auto-refresh polling don't hammer the bridge with a fresh
+ *   ledger_query + scan_area round trip every time.
  * @returns {Promise<{ server: import('node:http').Server, port: number, stop: () => Promise<void> }>}
  */
-export function startConsoleServer(config, { reloadLore, submitOrder }) {
+export function startConsoleServer(config, { reloadLore, submitOrder, getWorldModel }) {
   const token = config.consoleToken;
   const decisionsPath = path.join(config.stateDir, "decisions.log");
+
+  // ---- GET /worldmodel: short-lived cache (see deps.getWorldModel above) ----
+  const WORLDMODEL_CACHE_MS = 5000;
+  let worldModelCache = null; // { at: number (Date.now()), promise: Promise<object> }
+  function cachedWorldModel() {
+    const now = Date.now();
+    if (worldModelCache && now - worldModelCache.at < WORLDMODEL_CACHE_MS) {
+      return worldModelCache.promise;
+    }
+    const promise = Promise.resolve(getWorldModel()).catch((e) => {
+      worldModelCache = null; // don't cache a failure - the next request should retry
+      throw e;
+    });
+    worldModelCache = { at: now, promise };
+    return promise;
+  }
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -478,6 +1174,23 @@ export function startConsoleServer(config, { reloadLore, submitOrder }) {
       if (req.method === "GET" && url.pathname === "/") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", ...extraHeaders });
         res.end(renderPage(listDirectives(config), listOrders(config)));
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/map") {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", ...extraHeaders });
+        res.end(renderMapPage());
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/worldmodel") {
+        try {
+          const model = await cachedWorldModel();
+          sendJson(res, 200, model, extraHeaders);
+        } catch (e) {
+          log.error("worldmodel_request_failed", { error: String((e && e.stack) || e) });
+          sendJson(res, 502, { ok: false, error: "failed to build world model" }, extraHeaders);
+        }
         return;
       }
 

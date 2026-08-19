@@ -37,6 +37,7 @@ import { log, nextSceneNumber } from "./lib/logger.mjs";
 import { journalSkip } from "./lib/decisions-journal.mjs";
 import { loadLore, watchLore } from "./lib/lore.mjs";
 import { startConsoleServer, queuedOrders, setOrderStatus } from "./lib/console-server.mjs";
+import { buildWorldModel } from "./lib/worldmodel.mjs";
 import { UsageTracker } from "./lib/usage-tracker.mjs";
 import { RateLimiter } from "./lib/rate-limiter.mjs";
 import { BridgeClient } from "./lib/bridge-client.mjs";
@@ -89,9 +90,18 @@ export async function main(env = process.env) {
     scheduler.push("operator_order", { text, orderTimestamp, at: new Date().toISOString() });
   }
 
+  // getWorldModel is a closure over `bridge` (assigned further below, once
+  // the brain's own bridge connection is created) rather than a direct
+  // reference - fine, since it's only ever CALLED from a console HTTP
+  // request handled long after this synchronous setup finishes. Backs GET
+  // /worldmodel (console-server.mjs), which the /map 3D viewer polls.
+  function getWorldModel() {
+    return buildWorldModel((cmd, args) => bridge.call(cmd, args), { now: new Date().toISOString() });
+  }
+
   let consoleServer = null;
   if (config.consoleEnabled) {
-    consoleServer = await startConsoleServer(config, { reloadLore: loreWatch.tick, submitOrder });
+    consoleServer = await startConsoleServer(config, { reloadLore: loreWatch.tick, submitOrder, getWorldModel });
     log.info("console_listening", { bind: config.consoleBind, port: consoleServer.port });
   }
 

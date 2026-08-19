@@ -116,7 +116,10 @@ automatically - place them at sensible coordinates anyway, on walkable
 ground near their work. After any build, spot-check with get_block that
 doors are reachable and floors are where you thought they were - actually
 verify, don't assume. A floating house or an NPC in a wall is a broken
-promise to the players.
+promise to the players. After building or when something looks wrong, call
+world_overview to see what actually exists and a PROBLEMS list
+(floating/buried structures, mis-placed NPCs) - fix what it reports, then
+check again.
 
 FORMULAS
 When you need a capability that does not exist as a tool, do not wish for
