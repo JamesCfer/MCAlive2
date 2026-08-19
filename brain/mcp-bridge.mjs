@@ -277,12 +277,39 @@ server.registerTool("world_overview", {
   },
 }, async (args) => {
   try {
-    const model = await buildWorldModel(call, { now: new Date().toISOString(), area: (args ?? {}).area });
+    // This tool runs in the per-query MCP process, which does NOT receive the
+    // brain's pushed entity_positions telemetry. Pull a live snapshot on demand
+    // from the position-tracker gadget so the director sees NPCs where their
+    // bodies actually are, not just their ledger-home coords. Degrade silently
+    // to ledger-home if the gadget isn't available (server not gadget-capable).
+    const npcPositions = await liveNpcPositions();
+    const model = await buildWorldModel(call, {
+      now: new Date().toISOString(),
+      area: (args ?? {}).area,
+      npcPositions,
+    });
     return { content: [{ type: "text", text: formatWorldOverview(model, { detail: (args ?? {}).detail }) }] };
   } catch (e) {
     return { content: [{ type: "text", text: "ERROR: " + e.message }], isError: true };
   }
 });
+
+// Fetch a live NPC-position map {id -> {world,x,y,z,at}} from the position-tracker
+// gadget's snapshot mode. Returns {} on any failure so the world model falls back
+// to ledger-home positions exactly as before.
+async function liveNpcPositions() {
+  try {
+    const snap = await call("gadget:position-tracker", { snapshot: true });
+    const out = {};
+    const now = Date.now();
+    for (const n of (snap && snap.npcs) || []) {
+      if (n && n.id) out[n.id] = { world: n.world, x: n.x, y: n.y, z: n.z, at: now };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
 
 // --- formulas ---
 // Formulas are runtime-authored, reusable tools: recipes stored plugin-side

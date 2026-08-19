@@ -8,8 +8,14 @@
 // held in a JVM system property, so a re-run cancels the previous timer rather than
 // stacking a second one (a full server restart clears both the property and the task).
 //
-// args: { intervalTicks?: number (default 20 = ~1s) }
-// returns: { ok, streaming, intervalTicks }
+// Two modes on gadget_run:
+//   { intervalTicks?: number }   -> (re)start the streaming timer (default 20 ticks ~1s)
+//   { snapshot: true }           -> return the CURRENT positions immediately WITHOUT
+//                                   touching the timer. Used by the director's
+//                                   world_overview (a separate process that can't see
+//                                   the brain's pushed-event cache) to read live coords.
+// returns (stream mode):   { ok, streaming, intervalTicks }
+// returns (snapshot mode): { ok, snapshot:true, npcs:[...], players:[...] }
 package dev.celestia.mcalive2.gadget.system;
 
 import com.google.gson.JsonArray;
@@ -28,6 +34,18 @@ public class PositionTracker implements GadgetContract {
 
     @Override
     public JsonObject run(JsonObject args, GadgetContext ctx) {
+        final NamespacedKey npcKey = ctx.key("npc_id");
+
+        // Snapshot mode: gather once and return, leaving any running timer alone.
+        if (args != null && args.has("snapshot")
+                && args.get("snapshot").isJsonPrimitive()
+                && args.get("snapshot").getAsBoolean()) {
+            JsonObject snap = gather(ctx, npcKey);
+            snap.addProperty("ok", true);
+            snap.addProperty("snapshot", true);
+            return snap;
+        }
+
         long interval = 20L;
         if (args != null && args.has("intervalTicks") && args.get("intervalTicks").isJsonPrimitive()) {
             try { interval = Math.max(5L, args.get("intervalTicks").getAsLong()); } catch (Exception ignored) {}
@@ -40,39 +58,9 @@ public class PositionTracker implements GadgetContract {
             try { ctx.cancelTask(Integer.parseInt(prev)); } catch (Exception ignored) {}
         }
 
-        final NamespacedKey npcKey = ctx.key("npc_id");
         int taskId = ctx.runTimer(interval, () -> {
-            JsonObject payload = new JsonObject();
+            JsonObject payload = gather(ctx, npcKey);
             payload.addProperty("at", System.currentTimeMillis());
-            JsonArray npcs = new JsonArray();
-            JsonArray players = new JsonArray();
-
-            for (World w : ctx.server().getWorlds()) {
-                for (Entity e : w.getEntities()) {
-                    if (!e.isValid()) continue;
-                    String id = e.getPersistentDataContainer().get(npcKey, PersistentDataType.STRING);
-                    if (id == null) continue;
-                    JsonObject o = new JsonObject();
-                    o.addProperty("id", id);
-                    o.addProperty("world", w.getName());
-                    o.addProperty("x", round(e.getLocation().getX()));
-                    o.addProperty("y", round(e.getLocation().getY()));
-                    o.addProperty("z", round(e.getLocation().getZ()));
-                    npcs.add(o);
-                }
-                for (Player p : w.getPlayers()) {
-                    JsonObject o = new JsonObject();
-                    o.addProperty("name", p.getName());
-                    o.addProperty("world", w.getName());
-                    o.addProperty("x", round(p.getLocation().getX()));
-                    o.addProperty("y", round(p.getLocation().getY()));
-                    o.addProperty("z", round(p.getLocation().getZ()));
-                    players.add(o);
-                }
-            }
-
-            payload.add("npcs", npcs);
-            payload.add("players", players);
             ctx.plugin().bridge().broadcastEvent("entity_positions", payload);
         });
         System.setProperty(TASK_PROP, Integer.toString(taskId));
@@ -82,6 +70,41 @@ public class PositionTracker implements GadgetContract {
         out.addProperty("streaming", true);
         out.addProperty("intervalTicks", interval);
         return out;
+    }
+
+    /** Collect current NPC (PDC-tagged) and player positions across all loaded worlds. */
+    private static JsonObject gather(GadgetContext ctx, NamespacedKey npcKey) {
+        JsonObject payload = new JsonObject();
+        JsonArray npcs = new JsonArray();
+        JsonArray players = new JsonArray();
+
+        for (World w : ctx.server().getWorlds()) {
+            for (Entity e : w.getEntities()) {
+                if (!e.isValid()) continue;
+                String id = e.getPersistentDataContainer().get(npcKey, PersistentDataType.STRING);
+                if (id == null) continue;
+                JsonObject o = new JsonObject();
+                o.addProperty("id", id);
+                o.addProperty("world", w.getName());
+                o.addProperty("x", round(e.getLocation().getX()));
+                o.addProperty("y", round(e.getLocation().getY()));
+                o.addProperty("z", round(e.getLocation().getZ()));
+                npcs.add(o);
+            }
+            for (Player p : w.getPlayers()) {
+                JsonObject o = new JsonObject();
+                o.addProperty("name", p.getName());
+                o.addProperty("world", w.getName());
+                o.addProperty("x", round(p.getLocation().getX()));
+                o.addProperty("y", round(p.getLocation().getY()));
+                o.addProperty("z", round(p.getLocation().getZ()));
+                players.add(o);
+            }
+        }
+
+        payload.add("npcs", npcs);
+        payload.add("players", players);
+        return payload;
     }
 
     private static double round(double v) {
