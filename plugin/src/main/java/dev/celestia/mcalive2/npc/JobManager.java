@@ -46,11 +46,15 @@ public class JobManager {
 
     private final MCAlive2Plugin plugin;
     private final NpcManager npcs;
+    /** True while an NPC is busy defending itself (see DefenseManager) - its job loops
+     *  pause (no progress, no timeout accrual) rather than cancel, and resume after. */
+    private final java.util.function.Predicate<String> engaged;
     private final Map<String, Job> jobs = new HashMap<>();
 
-    public JobManager(MCAlive2Plugin plugin, NpcManager npcs) {
+    public JobManager(MCAlive2Plugin plugin, NpcManager npcs, java.util.function.Predicate<String> engaged) {
         this.plugin = plugin;
         this.npcs = npcs;
+        this.engaged = engaged;
         npcs.onRemoval(this::cancelJob);
     }
 
@@ -177,6 +181,7 @@ public class JobManager {
         long[] elapsed = {0};
         job.activeTask = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
             if (job.cancelled) { cancelTask(job); return; }
+            if (engaged.test(job.npcId)) return; // defending itself: pause, don't cancel
             NpcData d = npcs.get(job.npcId);
             Entity entity = d == null ? null : npcs.resolveEntity(d);
             if (d == null || d.dead || entity == null) { cancelTask(job); blocked(job, "npc_dead", null); return; }
@@ -256,10 +261,16 @@ public class JobManager {
         npcs.walkTo(data, target, 1.0);
 
         long[] waited = {0};
+        boolean[] wasEngaged = {false};
         job.activeTask = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
             if (job.cancelled) { cancelTask(job); return; }
+            if (engaged.test(job.npcId)) { wasEngaged[0] = true; return; } // defending itself: pause, don't time out
             NpcData d = npcs.get(job.npcId);
             if (d == null || d.dead) { cancelTask(job); blocked(job, "npc_dead", null); return; }
+            if (wasEngaged[0]) { // fight over: the defense loop hijacked walking, re-aim at the target
+                wasEngaged[0] = false;
+                npcs.walkTo(d, target, 1.0);
+            }
             refreshOverride(d);
             Entity entity = npcs.resolveEntity(d);
             waited[0] += ARRIVAL_POLL_TICKS;

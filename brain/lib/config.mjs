@@ -72,8 +72,18 @@ export const ALL_TOOLS = [
   "formula_define", "formula_run", "formula_list", "formula_get", "formula_delete",
   // NPC jobs - NPCs physically working real stations/chests with finite items
   "npc_assign_job", "npc_job_cancel",
+  // Behavior programs - crew goals authored ONCE that the plugin then runs
+  // indefinitely with zero AI involvement (gather real blocks, build a
+  // registered blueprint log-by-log, deposit/withdraw real items), waking
+  // the director only via behavior_done / behavior_blocked
+  "behavior_create", "behavior_update", "behavior_pause", "behavior_resume",
+  "behavior_delete", "behavior_status", "blueprint_register", "blueprint_delete",
   // Gadgets - runtime-injected Java primitives compiled on the running server
   "gadget_define", "gadget_run", "gadget_list", "gadget_get", "gadget_delete",
+  // Chronicle - the director's prose campaign notebook, brain-local and
+  // file-backed (see lib/chronicle.mjs), never a bridge passthrough.
+  // Director-only by omission from ACTOR_TOOLS, like every tool above.
+  "chronicle_append", "chronicle_read", "chronicle_rewrite",
 ];
 
 // NPC actors may ONLY call these three tools (DESIGN.md "NPC actors").
@@ -100,6 +110,9 @@ export const DIRECTOR_WAKE_EVENTS = new Set([
   "formula_error", // a formula_run step failed plugin-side
   "npc_job_done", // an NPC's assigned job finished all its repeats
   "npc_job_blocked", // an NPC's assigned job stalled (e.g. missing inputs)
+  "behavior_done", // a behavior program's crew finished every step
+  "behavior_blocked", // a behavior program stalled (no_resources/missing_inputs/cant_reach/crew_dead) and paused itself
+  "world_turn", // sparse narrative heartbeat (world-turn-minutes, only with players online): groom arcs, chronicle upkeep
 ]);
 
 export function loadConfig(env = process.env) {

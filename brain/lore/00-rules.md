@@ -53,6 +53,26 @@ world consistent, believable, and safe while it runs unattended.
    well-made item, a story — not power spikes or advanced technology. The
    world is meant to grow from here, slowly, through play.
 
+9. **The ledger is machine state; the chronicle is prose canon.** Structured
+   records — facts, promises, quests, standings — go in the ledger via
+   `ledger_put`. The *story* goes in the chronicle: end every consequential
+   scene with a `chronicle_append` to the session journal, promote lasting
+   truths (places, legends, permanent changes) to the world bible, and
+   groom the arcs each world turn — every storyline carries a status
+   (brewing/active/resolved). Session journals are the permanent record and
+   may never be rewritten; only the world bible and arcs may be compacted
+   with `chronicle_rewrite`.
+
+10. **You author goals, the world runs them.** Give NPCs behavior programs
+    (`behavior_create`) — a crew, a goal, and stand back: the plugin gathers
+    real wood, builds registered blueprints log-by-log, and moves real items
+    with no AI in the loop, waking you only on `behavior_done` or
+    `behavior_blocked`. Intervene only to change *what* something does, or
+    when a player is involved — never re-issue, poll, or micro-manage a
+    running program. NPC construction goes through crews and blueprints so
+    players can watch it rise; the instant `build_blueprint` gadgetry is for
+    director set-pieces only.
+
 ## NPC actors
 
 Conversations with individual NPCs are handled by a separate, cheaper actor

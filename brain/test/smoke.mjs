@@ -47,7 +47,8 @@ import { ActorMemory } from "../lib/actor-memory.mjs";
 import { formatHumanLine, compactArgs, log } from "../lib/logger.mjs";
 import { journalScene } from "../lib/decisions-journal.mjs";
 import { SelfUpdater } from "../lib/self-update.mjs";
-import { runDirectorTurn, maxTurnsFor, maxTokensFor } from "../lib/director-turn.mjs";
+import { runDirectorTurn, maxTurnsFor, maxTokensFor, buildSystemPrompt } from "../lib/director-turn.mjs";
+import { appendEntry as chronicleAppend, readFile as chronicleReadFile, rewriteFile as chronicleRewrite, digest as chronicleDigest, listSessions, todaySessionDate } from "../lib/chronicle.mjs";
 import { runActorTurn } from "../lib/actor-turn.mjs";
 import { DirectorScheduler } from "../lib/director-scheduler.mjs";
 import { buildWorldModel, formatWorldOverview } from "../lib/worldmodel.mjs";
@@ -147,6 +148,30 @@ async function main() {
   assert(DIRECTOR_WAKE_EVENTS.has("formula_error"), "formula_error is a director wake event");
   assert(DIRECTOR_WAKE_EVENTS.has("npc_job_done"), "npc_job_done is a director wake event");
   assert(DIRECTOR_WAKE_EVENTS.has("npc_job_blocked"), "npc_job_blocked is a director wake event");
+
+  console.log("\n1a².52. Behavior-program tools: present in ALL_TOOLS, absent from ACTOR_TOOLS, registered in mcp-bridge.mjs");
+  const BEHAVIOR_TOOLS = ["behavior_create", "behavior_update", "behavior_pause", "behavior_resume",
+    "behavior_delete", "behavior_status", "blueprint_register", "blueprint_delete"];
+  for (const t of BEHAVIOR_TOOLS) {
+    assert(ALL_TOOLS.includes(t), `${t} is in ALL_TOOLS`);
+    assert(!ACTOR_TOOLS.includes(t), `${t} is NOT in ACTOR_TOOLS (director-only by omission)`);
+    assert(actorDisallowedTools(MCP_SERVER_NAME).includes(namespacedTool(t, MCP_SERVER_NAME)), `${t} is in the actor disallow-list`);
+  }
+  assert(DIRECTOR_WAKE_EVENTS.has("behavior_done"), "behavior_done is a director wake event");
+  assert(DIRECTOR_WAKE_EVENTS.has("behavior_blocked"), "behavior_blocked is a director wake event");
+  {
+    const bridgeSrcForBehavior = fs.readFileSync(path.join(BRAIN_DIR, "mcp-bridge.mjs"), "utf8");
+    for (const t of BEHAVIOR_TOOLS) {
+      assert(new RegExp(`pt\\("${t}"`).test(bridgeSrcForBehavior), `mcp-bridge.mjs registers a ${t} tool`);
+    }
+    const behaviorCreateSrc = bridgeSrcForBehavior.slice(bridgeSrcForBehavior.indexOf('pt("behavior_create"'));
+    assert(/npcIds: z\.array\(z\.string\(\)\)/.test(behaviorCreateSrc), "behavior_create schema accepts an npcIds crew");
+    assert(/steps: z\.array\(behaviorStep\)/.test(behaviorCreateSrc), "behavior_create schema accepts a steps list");
+    for (const stepType of ["gather", "build", "deposit", "withdraw", "work_station", "goto", "wait", "follow"]) {
+      assert(new RegExp(`z\\.literal\\("${stepType}"\\)`).test(bridgeSrcForBehavior), `behaviorStep union declares the ${stepType} step type`);
+    }
+    assert(/blocks: z\.array\(z\.object\(\{\s*\n\s*dx: z\.number\(\), dy: z\.number\(\), dz: z\.number\(\)/.test(bridgeSrcForBehavior), "blueprint_register schema takes {dx,dy,dz,material[,data]} blocks");
+  }
 
   console.log("\n1a².55. Gadget tools: present in ALL_TOOLS, absent from ACTOR_TOOLS, schema declared in mcp-bridge.mjs");
   for (const t of ["gadget_define", "gadget_run", "gadget_list", "gadget_get", "gadget_delete"]) {
@@ -1143,6 +1168,85 @@ async function main() {
     assert(dryRunLog && dryRunLog.prompt.includes("12,345"), "the BUDGET line names the remaining daily token budget passed in");
     assert(dryRunLog && dryRunLog.prompt.includes("77,777"), "the BUDGET line names this turn's hard token ceiling");
     assert(dryRunLog && /economical/.test(dryRunLog.prompt), "the BUDGET line instructs the director to be economical");
+  }
+
+  console.log("\n1q. Chronicle: append/read roundtrip, session dating, rewrite guard, digest budget, director-only tools");
+  {
+    const chronDir = fs.mkdtempSync(path.join(os.tmpdir(), "brain-chronicle-"));
+    process.env.CHRONICLE_DIR = chronDir; // chronicle.mjs resolves its root per call, so tests can redirect it
+    try {
+      assert(chronicleDigest() === "", "digest of an empty chronicle is '' (director prompt skips the section entirely)");
+      assert(listSessions().length === 0, "listSessions() on an empty chronicle is an empty array");
+
+      // --- append/read roundtrip on world-bible ---
+      chronicleAppend("world-bible", "The Broken Bell", "An old bronze bell hangs cracked in the square.\n\nSecond paragraph with deeper detail the digest must skip.");
+      const wb = chronicleReadFile("world-bible");
+      assert(wb.includes("## The Broken Bell") && wb.includes("old bronze bell"), "world-bible append/read roundtrips heading and text");
+      assert(/## The Broken Bell — \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(wb), "appended heading carries an ISO timestamp");
+      assert(chronicleReadFile("world-bible", { tail: 10 }) === wb.slice(-10), "readFile's tail option returns exactly the last N chars");
+
+      // --- session file dating (UTC, created with a header) ---
+      const today = todaySessionDate();
+      chronicleAppend("session", "Steve arrives", "Steve walked into the square at dawn and rang the bell.");
+      assert(fs.existsSync(path.join(chronDir, "sessions", `${today}.md`)), "a session append creates sessions/YYYY-MM-DD.md for today's UTC date");
+      const sess = chronicleReadFile("session");
+      assert(sess.startsWith(`# Session ${today}`), "a fresh session file starts with its '# Session YYYY-MM-DD' header");
+      assert(chronicleReadFile(`session:${today}`) === sess, "session:YYYY-MM-DD addressing reads the same file as \"session\"");
+      assert(listSessions().length === 1 && listSessions()[0] === today, "listSessions() lists today's journal");
+
+      // --- rewrite guard: sessions are the permanent record ---
+      let sessionRewriteThrew = false;
+      try {
+        chronicleRewrite("session", "history, revised");
+      } catch {
+        sessionRewriteThrew = true;
+      }
+      assert(sessionRewriteThrew, "rewriteFile(\"session\") throws - session journals can never be rewritten");
+      let datedRewriteThrew = false;
+      try {
+        chronicleRewrite(`session:${today}`, "history, revised");
+      } catch {
+        datedRewriteThrew = true;
+      }
+      assert(datedRewriteThrew, "rewriteFile(\"session:YYYY-MM-DD\") throws too");
+      assert(chronicleReadFile("session") === sess, "the refused rewrites left the session journal untouched");
+
+      // --- rewrite allowed for arcs (compaction) ---
+      chronicleRewrite("arcs", "## The Dry Well — active\n\nThe village well ran dry; Mara suspects the bell.");
+      assert(chronicleReadFile("arcs").startsWith("## The Dry Well"), "rewriteFile replaces arcs.md wholesale");
+
+      // --- digest: bible skim + arcs verbatim + session tail ---
+      const dig = chronicleDigest();
+      assert(dig.includes("WORLD BIBLE") && dig.includes("The Broken Bell") && dig.includes("old bronze bell"), "digest carries world-bible headings with their first paragraph");
+      assert(!dig.includes("deeper detail the digest must skip"), "digest skips paragraphs after the first under each world-bible heading");
+      assert(dig.includes("ARCS:") && dig.includes("The Dry Well"), "digest carries arcs.md verbatim");
+      assert(dig.includes(`SESSION ${today}`) && dig.includes("rang the bell"), "digest carries the tail of the most recent session journal");
+
+      // --- digest respects a hard character budget with a marker ---
+      const tiny = chronicleDigest(200);
+      assert(tiny.length <= 200, `digest(200) stays within its budget (got ${tiny.length})`);
+      assert(/truncated/.test(tiny), "an over-budget digest carries a truncation marker");
+
+      // --- system-prompt injection (lib/director-turn.mjs) ---
+      assert(buildSystemPrompt("THE LORE", () => "") === "THE LORE", "an empty digest leaves the director system prompt byte-identical to the lore");
+      const withChronicle = buildSystemPrompt("THE LORE", () => "canon here");
+      assert(withChronicle.includes("CHRONICLE (campaign canon)") && withChronicle.includes("canon here") && withChronicle.startsWith("THE LORE"), "a non-empty digest is appended as its own labeled CHRONICLE section after the lore");
+      assert(buildSystemPrompt("THE LORE", () => { throw new Error("disk gone"); }) === "THE LORE", "a digest failure never blocks the turn - the prompt falls back to the bare lore");
+    } finally {
+      delete process.env.CHRONICLE_DIR;
+    }
+
+    // --- director-only tool registration ---
+    for (const t of ["chronicle_append", "chronicle_read", "chronicle_rewrite"]) {
+      assert(ALL_TOOLS.includes(t), `${t} is in ALL_TOOLS`);
+      assert(!ACTOR_TOOLS.includes(t), `${t} is NOT in ACTOR_TOOLS (director-only by omission)`);
+      assert(actorDisallowedTools(MCP_SERVER_NAME).includes(namespacedTool(t, MCP_SERVER_NAME)), `${t} is in the actor disallow-list`);
+    }
+    const bridgeSrcForChronicle = fs.readFileSync(path.join(BRAIN_DIR, "mcp-bridge.mjs"), "utf8");
+    assert(/tool\("chronicle_append"/.test(bridgeSrcForChronicle), "mcp-bridge.mjs registers chronicle_append brain-locally (via tool(), not a pt() passthrough)");
+    assert(/tool\("chronicle_read"/.test(bridgeSrcForChronicle), "mcp-bridge.mjs registers chronicle_read brain-locally");
+    assert(/tool\("chronicle_rewrite"/.test(bridgeSrcForChronicle), "mcp-bridge.mjs registers chronicle_rewrite brain-locally");
+    assert(/from "\.\/lib\/chronicle\.mjs"/.test(bridgeSrcForChronicle), "mcp-bridge.mjs imports lib/chronicle.mjs");
   }
 
   console.log("\n2. Director debounce, actor routing, knowledge isolation");

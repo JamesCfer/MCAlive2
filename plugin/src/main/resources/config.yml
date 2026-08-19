@@ -24,10 +24,45 @@ npc-chat-range: 8
 # etc) before a light player_idle_scene heartbeat fires for them. 0 disables this sense.
 idle-scene-minutes: 12
 
-# Monsters exist only as story - the brain places them deliberately (spawn_entity, spawn
-# eggs, and commands still work). When true, natural hostile-mob spawn paths (NATURAL,
-# SPAWNER, PATROL, RAID, REINFORCEMENTS, NETHER_PORTAL) are cancelled outright.
+# The world's spawn regime: creatures exist only as story.
+#   hostile:   whitelist = only deliberate placement (CUSTOM, COMMAND, SPAWNER_EGG)
+#              gets through; vanilla = untouched.
+#   peaceful:  new-chunks = animals arrive with fresh terrain (CHUNK_GEN) and multiply
+#              by husbandry (BREEDING, EGG, DISPENSE_EGG) or deliberate placement, but
+#              ambient repopulation is off so herds are finite; vanilla = untouched.
+#   villagers: banned = NO villager-family entity (villager, wandering trader, zombie
+#              villager) may spawn by ANY means - CUSTOM and COMMAND included - and
+#              pre-existing ones are purged as their chunks load (the cast is MCAlive2
+#              NPCs only); vanilla = untouched.
+spawn-control:
+  hostile: whitelist      # whitelist | vanilla
+  peaceful: new-chunks    # new-chunks | vanilla
+  villagers: banned       # banned | vanilla
+
+# DEPRECATED: replaced by spawn-control.hostile above. Still honored as an alias for
+# old configs: if spawn-control.hostile is absent and this is false, hostiles fall
+# back to vanilla.
 suppress-hostile-spawns: true
+
+# NPC self-defense (see the per-NPC "defense" field: fight | flee | none).
+npc-defense:
+  enabled: true
+  # Melee damage an NPC deals when fighting back (half-hearts); a per-NPC attackDamage
+  # overrides this when set.
+  damage: 3.0
+  # Blocks within which a fighting NPC can land a hit.
+  melee-range: 2.5
+  # Ticks between swings.
+  cooldown-ticks: 20
+  # A fight ends when the attacker gets this many blocks away...
+  disengage-distance: 24
+  # ...or when no damage has been exchanged (either direction) for this many seconds.
+  disengage-seconds: 12
+
+# Minutes between world_turn heartbeat events - the slow "the world itself gets a turn"
+# cadence the brain uses to advance off-screen life. Fires only while at least one
+# player is online. 0 disables this sense.
+world-turn-minutes: 90
 
 # Self-update: periodically checks GitHub releases and stages a newer MCAlive2.jar in
 # plugins/update/ (Paper applies it automatically on the next server restart). A
@@ -55,6 +90,19 @@ auto-update:
 
   # Minutes of continuous zero-player time required before apply-when-empty triggers.
   empty-minutes: 10
+
+# Behavior programs: director-authored crew goals (gather/build/deposit/...) the plugin
+# runs indefinitely with zero AI involvement (see npc/behavior/BehaviorEngine).
+behavior:
+  # Master switch for the engine loop. Programs and blueprints stay stored either way;
+  # false just freezes execution.
+  enabled: true
+  # Hold plugin chunk tickets at each crew member's current work chunk so crews keep
+  # gathering/building with no player nearby. false = crews only progress while their
+  # chunks happen to be loaded.
+  keep-chunks-loaded: true
+  # Defensive cap on how many chunk tickets one program may hold at once.
+  max-chunk-tickets-per-program: 4
 
 gadgets:
   # Runtime code-injection host: lets the brain grow new server-side capabilities by

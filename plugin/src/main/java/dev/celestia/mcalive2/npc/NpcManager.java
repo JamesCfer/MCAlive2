@@ -60,6 +60,11 @@ public class NpcManager {
     private final Map<String, NpcData> npcs = new ConcurrentHashMap<>();
     private final Map<String, BukkitTask> walkers = new ConcurrentHashMap<>();
     private final Random random = new Random();
+    /** Depth counter held across our own (synchronous, main-thread) spawnEntity calls, so
+     *  SpawnGate can recognize plugin-spawned NPC bodies. The NPC id PDC tag is only
+     *  applied AFTER spawnEntity returns, but CreatureSpawnEvent fires inside it - a tag
+     *  check at event time would always miss, hence this latch. */
+    private int spawningNpcDepth = 0;
     /** Notified (with the NPC id) whenever an NPC is permanently killed or removed - e.g. JobManager uses this to cancel any running job. */
     private final List<java.util.function.Consumer<String>> removalListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
 
@@ -70,6 +75,12 @@ public class NpcManager {
 
     public NamespacedKey key() {
         return npcKey;
+    }
+
+    /** True while this manager is inside one of its own spawnEntity calls (main thread
+     *  only) - SpawnGate uses this to exempt plugin-spawned NPC bodies from the regime. */
+    public boolean isSpawningNpc() {
+        return spawningNpcDepth > 0;
     }
 
     public NpcData get(String id) {
@@ -117,7 +128,13 @@ public class NpcManager {
         Location target = snap ? safeStanding(loc) : loc;
         // never allow two entities for the same NPC: clear any loaded stragglers first
         removeTaggedEntities(data.id, null);
-        Entity entity = loc.getWorld().spawnEntity(target, type);
+        Entity entity;
+        spawningNpcDepth++;
+        try {
+            entity = loc.getWorld().spawnEntity(target, type);
+        } finally {
+            spawningNpcDepth--;
+        }
         applyIdentity(entity, data);
         data.entityUuid = entity.getUniqueId();
         data.lastLocation = target.clone();

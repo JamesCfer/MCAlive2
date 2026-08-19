@@ -10,13 +10,18 @@ import dev.celestia.mcalive2.bridge.CommandDispatcher;
 import dev.celestia.mcalive2.formula.FormulaActuators;
 import dev.celestia.mcalive2.gadget.GadgetActuators;
 import dev.celestia.mcalive2.gadget.GadgetManager;
+import dev.celestia.mcalive2.npc.DefenseManager;
 import dev.celestia.mcalive2.npc.JobManager;
 import dev.celestia.mcalive2.npc.NpcManager;
+import dev.celestia.mcalive2.npc.behavior.BehaviorActuators;
+import dev.celestia.mcalive2.npc.behavior.BehaviorEngine;
 import dev.celestia.mcalive2.senses.ExploredTracker;
 import dev.celestia.mcalive2.senses.GameListeners;
 import dev.celestia.mcalive2.senses.IdleSceneTracker;
 import dev.celestia.mcalive2.senses.RegionSense;
 import dev.celestia.mcalive2.senses.SpawnGate;
+import dev.celestia.mcalive2.senses.VillagerPurge;
+import dev.celestia.mcalive2.senses.WorldTurnTracker;
 import dev.celestia.mcalive2.update.Updater;
 import net.kyori.adventure.text.Component;
 import org.bukkit.command.Command;
@@ -29,10 +34,12 @@ public final class MCAlive2Plugin extends JavaPlugin {
 
     private BridgeServer bridge;
     private NpcManager npcManager;
+    private DefenseManager defenseManager;
     private LedgerActuators ledgerActuators;
     private ExploredTracker exploredTracker;
     private FormulaActuators formulaActuators;
     private GadgetManager gadgetManager;
+    private BehaviorEngine behaviorEngine;
 
     @Override
     public void onEnable() {
@@ -40,6 +47,8 @@ public final class MCAlive2Plugin extends JavaPlugin {
 
         npcManager = new NpcManager(this);
         npcManager.load();
+
+        defenseManager = new DefenseManager(this, npcManager);
 
         ledgerActuators = new LedgerActuators(this);
         ledgerActuators.load();
@@ -52,7 +61,7 @@ public final class MCAlive2Plugin extends JavaPlugin {
         new PlayerActuators(this).register(dispatcher);
         new NpcActuators(this, npcManager).register(dispatcher);
         ledgerActuators.register(dispatcher);
-        new JobManager(this, npcManager).register(dispatcher);
+        new JobManager(this, npcManager, defenseManager::isEngaged).register(dispatcher);
         formulaActuators = new FormulaActuators(this, dispatcher);
         formulaActuators.load();
         formulaActuators.register(dispatcher);
@@ -60,6 +69,13 @@ public final class MCAlive2Plugin extends JavaPlugin {
         gadgetManager = new GadgetManager(this, dispatcher);
         gadgetManager.loadAll();
         new GadgetActuators(this, gadgetManager).register(dispatcher);
+
+        behaviorEngine = new BehaviorEngine(this, npcManager, defenseManager::isEngaged);
+        behaviorEngine.load();
+        new BehaviorActuators(this, npcManager, behaviorEngine).register(dispatcher);
+        if (getConfig().getBoolean("behavior.enabled", true)) {
+            behaviorEngine.start();
+        }
 
         String host = getConfig().getString("bridge.host", "127.0.0.1");
         int port = getConfig().getInt("bridge.port", 8765);
@@ -69,8 +85,9 @@ public final class MCAlive2Plugin extends JavaPlugin {
         bridge.start();
 
         getServer().getPluginManager().registerEvents(
-                new GameListeners(this, npcManager, bridge, ledgerActuators, exploredTracker), this);
+                new GameListeners(this, npcManager, bridge, ledgerActuators, exploredTracker, defenseManager), this);
         getServer().getPluginManager().registerEvents(new SpawnGate(this), this);
+        getServer().getPluginManager().registerEvents(new VillagerPurge(this, npcManager), this);
 
         // clean up any duplicate/orphaned NPC entities once the world has settled
         getServer().getScheduler().runTaskLater(this, () -> {
@@ -86,6 +103,7 @@ public final class MCAlive2Plugin extends JavaPlugin {
             ledgerActuators.save();
             exploredTracker.saveIfDirty();
             formulaActuators.save();
+            behaviorEngine.save();
         }, 6000L, 6000L);
 
         // player_idle_scene heartbeat sense, period from config (0 = disabled)
@@ -95,6 +113,11 @@ public final class MCAlive2Plugin extends JavaPlugin {
             long idlePeriodTicks = idleMinutes * 60L * 20L;
             getServer().getScheduler().runTaskTimer(this, idleTracker::tick, idlePeriodTicks, idlePeriodTicks);
         }
+
+        // world_turn heartbeat sense: elapsed period checked once a minute so config
+        // reloads of world-turn-minutes (including 0 = disabled) take effect live
+        WorldTurnTracker worldTurnTracker = new WorldTurnTracker(this, bridge);
+        getServer().getScheduler().runTaskTimer(this, worldTurnTracker::tick, 1200L, 1200L);
 
         // region_enter / region_exit sense, every 20 ticks (1s)
         RegionSense regionSense = new RegionSense(bridge, ledgerActuators.ledger());
@@ -111,6 +134,11 @@ public final class MCAlive2Plugin extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        if (defenseManager != null) defenseManager.disengageAll();
+        if (behaviorEngine != null) {
+            behaviorEngine.stop(); // also releases every chunk ticket
+            behaviorEngine.save();
+        }
         if (npcManager != null) npcManager.save();
         if (ledgerActuators != null) ledgerActuators.save();
         if (exploredTracker != null) exploredTracker.save();
@@ -130,6 +158,10 @@ public final class MCAlive2Plugin extends JavaPlugin {
 
     public NpcManager npcManager() {
         return npcManager;
+    }
+
+    public DefenseManager defenseManager() {
+        return defenseManager;
     }
 
     @Override

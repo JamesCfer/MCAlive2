@@ -4,6 +4,7 @@ import com.google.gson.JsonObject;
 import dev.celestia.mcalive2.MCAlive2Plugin;
 import dev.celestia.mcalive2.actuators.LedgerActuators;
 import dev.celestia.mcalive2.bridge.BridgeServer;
+import dev.celestia.mcalive2.npc.DefenseManager;
 import dev.celestia.mcalive2.npc.NpcData;
 import dev.celestia.mcalive2.npc.NpcManager;
 import dev.celestia.mcalive2.util.Json;
@@ -12,7 +13,9 @@ import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.Projectile;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -43,17 +46,19 @@ public class GameListeners implements Listener {
     private final BridgeServer bridge;
     private final LedgerActuators ledger;
     private final ExploredTracker explored;
+    private final DefenseManager defense;
     /** "<playerUuid>:<npcId>" -> last fire time, so a player re-dropping/re-picking a
      *  head doesn't spam the director with the same npc_head_taken event. */
     private final Map<String, Long> headTakenCooldown = new ConcurrentHashMap<>();
 
     public GameListeners(MCAlive2Plugin plugin, NpcManager npcs, BridgeServer bridge,
-                          LedgerActuators ledger, ExploredTracker explored) {
+                          LedgerActuators ledger, ExploredTracker explored, DefenseManager defense) {
         this.plugin = plugin;
         this.npcs = npcs;
         this.bridge = bridge;
         this.ledger = ledger;
         this.explored = explored;
+        this.defense = defense;
     }
 
     @EventHandler
@@ -189,13 +194,29 @@ public class GameListeners implements Listener {
     public void onNpcDamaged(EntityDamageByEntityEvent event) {
         NpcData npc = npcs.byEntity(event.getEntity());
         if (npc == null) return;
-        if (!(event.getDamager() instanceof Player player)) return;
+        LivingEntity attacker = resolveAttacker(event.getDamager());
+        if (attacker == null) return; // TNT, falling blocks, ownerless projectiles, ...
         JsonObject data = new JsonObject();
-        data.addProperty("player", player.getName());
+        if (attacker instanceof Player player) data.addProperty("player", player.getName());
         data.addProperty("npcId", npc.id);
         data.addProperty("npcName", npc.name);
         data.addProperty("damage", event.getFinalDamage());
+        data.addProperty("attackerType", attacker instanceof Player ? "player" : "mob");
+        NpcData attackerNpc = npcs.byEntity(attacker);
+        data.addProperty("attackerId", attackerNpc != null ? attackerNpc.id : attacker.getUniqueId().toString());
         bridge.broadcastEvent("npc_attacked", data);
+        // fight back / run away per the NPC's defense mode (engage() itself checks
+        // npc-defense.enabled and skips mode "none")
+        defense.engage(npc, attacker);
+    }
+
+    /** The living entity behind a damager: projectiles resolve to their shooter. */
+    private LivingEntity resolveAttacker(Entity damager) {
+        if (damager instanceof Projectile projectile
+                && projectile.getShooter() instanceof LivingEntity shooter) {
+            return shooter;
+        }
+        return damager instanceof LivingEntity living ? living : null;
     }
 
     @EventHandler

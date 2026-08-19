@@ -74,6 +74,8 @@ public class NpcActuators {
         data.entityType = Json.optString(args, "entityType", "MANNEQUIN");
         data.profession = Json.optString(args, "profession", null);
         data.skin = Json.optString(args, "skin", null);
+        data.defense = parseDefense(Json.optString(args, "defense", "fight"));
+        data.attackDamage = Json.optDouble(args, "attackDamage", 0);
         applyPlaces(data, args);
         Location loc = Json.location(args);
         boolean snap = Json.optBool(args, "snap", true);
@@ -81,6 +83,15 @@ public class NpcActuators {
         applySchedule(data, args);
         npcs.save();
         return npcs.toJson(data);
+    }
+
+    /** Validate a defense mode string (see DefenseManager): fight | flee | none. */
+    private String parseDefense(String mode) {
+        String m = mode.toLowerCase(Locale.ROOT);
+        if (!m.equals("fight") && !m.equals("flee") && !m.equals("none")) {
+            throw new IllegalArgumentException("defense must be fight, flee, or none");
+        }
+        return m;
     }
 
     private void applyPlaces(NpcData data, JsonObject args) {
@@ -120,6 +131,12 @@ public class NpcActuators {
         if (args.has("skin")) {
             data.skin = Json.optString(args, "skin", null);
             respawn = true;
+        }
+        if (args.has("defense")) {
+            data.defense = parseDefense(Json.reqString(args, "defense"));
+        }
+        if (args.has("attackDamage")) {
+            data.attackDamage = Json.optDouble(args, "attackDamage", 0);
         }
         if (respawn) npcs.respawn(data); // swap the backing entity to match the new look
         applyPlaces(data, args);

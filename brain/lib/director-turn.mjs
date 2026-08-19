@@ -24,6 +24,7 @@
 
 import { log, compactArgs } from "./logger.mjs";
 import { MCP_SERVER_NAME, stripToolPrefix } from "./config.mjs";
+import { digest as chronicleDigest } from "./chronicle.mjs";
 import { journalScene } from "./decisions-journal.mjs";
 import { consumeWithTimeout } from "./timed-query.mjs";
 
@@ -89,7 +90,9 @@ DISCIPLINE below), formula_define/formula_run/formula_list/formula_get/
 formula_delete (your reusable spellbook, see FORMULAS below),
 npc_assign_job/npc_job_cancel (real NPC labor, see JOBS below), and
 gadget_define/gadget_run/gadget_list/gadget_get/gadget_delete (runtime-
-injected Java primitives, see CAPABILITY LADDER below).
+injected Java primitives, see CAPABILITY LADDER below), and
+chronicle_append/chronicle_read/chronicle_rewrite (your campaign notebook,
+see CHRONICLE below).
 
 CAPABILITY LADDER
 When you need a capability, climb this ladder in order:
@@ -151,6 +154,19 @@ fountain, a mob ambush are all formulas). Check formula_list before
 defining a new one; prefer running or refining an existing formula over
 duplicating it. Give formulas clear ids and descriptions - they are your
 growing spellbook.
+
+CHRONICLE
+The ledger is machine state; the CHRONICLE (chronicle_append /
+chronicle_read / chronicle_rewrite) is prose canon - your own D&D-style
+campaign notes, and the only story memory that survives this turn. Duties:
+  - End every consequential scene with a chronicle_append to "session"
+    saying what happened, in prose your future self can act on.
+  - Promote LASTING truths - places, legends, permanent changes - to
+    "world-bible".
+  - Groom "arcs" each world turn: every storyline carries a status
+    (brewing/active/resolved); retire resolved ones, advance live ones.
+  - NEVER rewrite sessions - they are the permanent record.
+    chronicle_rewrite exists only to periodically compact world-bible/arcs.
 
 JOBS
 NPCs can physically work: npc_assign_job sends them to real chests and
@@ -286,7 +302,25 @@ function estimateContextChars(msg) {
   return 0;
 }
 
+/** The director's full system prompt: the lore (brain/lore/*.md) carried
+ * unchanged, plus a labeled CHRONICLE section holding lib/chronicle.mjs's
+ * compact digest of the campaign notes (world-bible skim, arcs, recent
+ * session tails). Skipped entirely while the chronicle is empty - a fresh
+ * world's prompt is byte-identical to the pre-chronicle one. */
+export function buildSystemPrompt(systemPrompt, digestFn = chronicleDigest) {
+  let digestText = "";
+  try {
+    digestText = digestFn();
+  } catch {
+    // A chronicle read failure must never block a scene - the director just
+    // runs this turn without its campaign notes.
+  }
+  if (!digestText) return systemPrompt;
+  return `${systemPrompt}\n\n---\n\nCHRONICLE (campaign canon)\n${digestText}`;
+}
+
 export async function runDirectorTurn({ batch, systemPrompt, config, sceneNumber, queryFn, remainingBudget }) {
+  systemPrompt = buildSystemPrompt(systemPrompt);
   const maxTurns = maxTurnsFor(batch, config);
   const timeoutSec = timeoutSecFor(batch, config);
   const maxTokens = maxTokensFor(batch, config);

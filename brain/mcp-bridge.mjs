@@ -18,6 +18,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { buildWorldModel, formatWorldOverview } from "./lib/worldmodel.mjs";
+import { appendEntry as chronicleAppend, readFile as chronicleReadFile, rewriteFile as chronicleRewrite } from "./lib/chronicle.mjs";
 import { capToolResultText, resolveMaxToolResultChars } from "./lib/tool-result-cap.mjs";
 
 const URL_ = process.env.MCALIVE2_URL || "ws://127.0.0.1:8765";
@@ -272,6 +273,47 @@ pt("npc_context", "The knowledge-isolation tool: returns an NPC's own sheet plus
   npcId: z.string(),
 });
 
+// --- chronicle ---
+// Brain-local, file-backed tools (NOT bridge passthroughs - the plugin
+// never sees these): the director's D&D-style campaign notebook under
+// brain/chronicle/ (see lib/chronicle.mjs). The division of labor: the
+// LEDGER is machine state (structured records tools query), the CHRONICLE
+// is prose canon - world-bible.md holds lasting truths/places/legends,
+// arcs.md holds active storylines with a status (brewing/active/resolved),
+// and sessions/YYYY-MM-DD.md is the permanent dated journal of what
+// actually happened.
+tool("chronicle_append",
+  "Append one timestamped, headed prose entry to the campaign chronicle (your D&D-style notes - the ledger holds machine state, the chronicle holds the STORY as written words). " +
+  "file \"session\" appends to today's dated journal (what happened this scene - end every consequential scene with one of these); " +
+  "\"world-bible\" records a LASTING truth - a place, a legend, a permanent change to the world; " +
+  "\"arcs\" adds to the active storylines (give each arc a status: brewing/active/resolved).", {
+  file: z.enum(["world-bible", "arcs", "session"]),
+  heading: z.string().describe("short entry title, e.g. 'The Dry Well' or 'Steve strikes a bargain'"),
+  text: z.string().describe("the prose entry - written for your future self, who will read it with no other memory of this scene"),
+}, (args) => {
+  chronicleAppend(args.file, args.heading, args.text);
+  return { ok: true, file: args.file };
+});
+tool("chronicle_read",
+  "Read a chronicle file's full text: \"world-bible\", \"arcs\", \"session\" (today's journal), or \"session:YYYY-MM-DD\" (a past day's journal). " +
+  "Pass tail to read only the last N characters of a long file. Your system prompt already carries a compact digest - use this when you need the full prose.", {
+  file: z.string().describe("world-bible | arcs | session | session:YYYY-MM-DD"),
+  tail: z.number().optional().describe("return only the last N characters"),
+}, (args) => {
+  const text = chronicleReadFile(args.file, { tail: args.tail });
+  return { file: args.file, chars: text.length, text: text || "(empty)" };
+});
+tool("chronicle_rewrite",
+  "REPLACE the ENTIRE contents of world-bible or arcs - for periodic compaction ONLY (merging duplicate entries, dropping resolved arcs, tightening prose). " +
+  "This destroys the file's previous text, so read it first and carry every still-true fact into the rewrite. " +
+  "Session journals can NEVER be rewritten - they are the permanent record; this tool refuses them.", {
+  file: z.enum(["world-bible", "arcs"]),
+  fullText: z.string().describe("the complete new contents of the file"),
+}, (args) => {
+  chronicleRewrite(args.file, args.fullText);
+  return { ok: true, file: args.file, chars: args.fullText.length };
+});
+
 // --- world model ---
 // Aggregates ledger_query(places/npcs) + scan_area + a few budgeted
 // get_block probes (brain/lib/worldmodel.mjs) into a compact text digest -
@@ -390,6 +432,109 @@ pt("npc_assign_job",
   }),
 });
 pt("npc_job_cancel", "Cancel an NPC's assigned job, stopping it wherever it currently is in the cycle.", { npcId: z.string() });
+
+// --- behavior programs ---
+// Behavior programs are the "author once and walk away" layer above jobs: give
+// a CREW of NPCs a goal (gather real wood, build a registered blueprint
+// log-by-log, deposit the haul, loop) and the PLUGIN runs it indefinitely with
+// zero AI involvement, surviving restarts. Never poll or re-issue a running
+// program - a 'behavior_done' event ({programId, name}) wakes you on
+// completion and a 'behavior_blocked' event ({programId, name, npcId, step,
+// reason}) wakes you when a crew hits a wall the world can't resolve
+// (no_resources, missing_inputs, cant_reach, crew_dead, no_blueprint); the
+// program pauses itself until you behavior_resume (or _update/_delete) it.
+const behaviorItem = z.object({ material: z.string(), count: z.number() });
+const behaviorStep = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("gather"),
+    material: z.string().describe("block to break, e.g. OAK_LOG - the block is REALLY removed from the world"),
+    count: z.number().describe("how many each crew member gathers into its carrying inventory"),
+    radius: z.number().describe("search radius in blocks around the anchor"),
+    anchor: z.object({ x: z.number(), y: z.number(), z: z.number() }).describe("center of the search area, e.g. the heart of a forest"),
+    breakTicks: z.number().optional().describe("ticks to visibly break each block (dig sounds + crack particles), default 60"),
+  }),
+  z.object({
+    type: z.literal("build"),
+    blueprintId: z.string().describe("a blueprint previously stored with blueprint_register"),
+    supplyChest: z.object({ x: z.number(), y: z.number(), z: z.number() }).optional()
+      .describe("chest the crew restocks building materials from (real, finite items); omit to build purely from what they carry"),
+    placeTicks: z.number().optional().describe("ticks between placed blocks, default 40 - slower reads as more alive"),
+    blocksPerTrip: z.number().optional().describe("materials withdrawn per supply-chest trip, default 8"),
+  }),
+  z.object({
+    type: z.literal("deposit"),
+    chest: z.object({ x: z.number(), y: z.number(), z: z.number() }),
+    items: z.union([z.literal("all"), z.array(behaviorItem)]).describe('"all" empties the carrying inventory into the chest; or list specific {material,count}s'),
+  }),
+  z.object({
+    type: z.literal("withdraw"),
+    chest: z.object({ x: z.number(), y: z.number(), z: z.number() }),
+    items: z.array(behaviorItem).describe("all-or-nothing withdrawal into the carrying inventory; short stock blocks the program"),
+  }),
+  z.object({
+    type: z.literal("work_station"),
+    station: z.object({ x: z.number(), y: z.number(), z: z.number() }),
+    workTicks: z.number().optional().describe("ticks spent working at the station, default 100"),
+    sound: z.string().optional().describe("sound played periodically while working, default block.anvil.use"),
+  }),
+  z.object({
+    type: z.literal("goto"),
+    x: z.number(), y: z.number(), z: z.number(),
+  }),
+  z.object({
+    type: z.literal("wait"),
+    ticks: z.number(),
+  }),
+  z.object({
+    type: z.literal("follow"),
+    npcId: z.string().describe("NPC to follow (re-targeted every 2 seconds)"),
+    ticks: z.number().describe("how long to follow"),
+    distance: z.number().optional().describe("stay within this many blocks, default 3"),
+  }),
+]);
+pt("behavior_create",
+  "Author a behavior program ONCE and walk away: a crew of NPCs plus an ordered list of steps the plugin runs entirely on its own - " +
+  "no AI in the loop, surviving restarts. gather removes REAL blocks from the world into each NPC's carrying inventory; build places them " +
+  "back log-by-log against a blueprint from blueprint_register (visible, slow, alive - use THIS for NPC construction, and reserve " +
+  "build_blueprint for instant director set-pieces); deposit/withdraw move real items through real chests. Set loop:true for a standing " +
+  "industry (gather -> deposit, forever). Then STAND BACK: wait for behavior_done or behavior_blocked - never poll or re-issue a running " +
+  "program; behavior_status is the cheap progress query if a player asks.", {
+  id: z.string().describe("unique short id, e.g. 'logging-crew'"),
+  name: z.string().describe("human-readable name, e.g. 'Millbrook logging crew'"),
+  npcIds: z.array(z.string()).describe("the crew - every NPC works the same steps in parallel, sharing claims so they never double-work"),
+  loop: z.boolean().optional().describe("true = wrap back to step 0 forever; false (default) = run once and fire behavior_done"),
+  steps: z.array(behaviorStep),
+});
+pt("behavior_update",
+  "Replace a program's steps and/or crew (cursors reset to step 0; what each NPC already carries survives). " +
+  "Use this to CHANGE what a crew does - never to nudge a program that is already running fine.", {
+  id: z.string(),
+  name: z.string().optional(),
+  npcIds: z.array(z.string()).optional(),
+  loop: z.boolean().optional(),
+  steps: z.array(behaviorStep).optional(),
+});
+pt("behavior_pause", "Pause a behavior program (crew stops mid-step; chunk tickets release). Resume picks up exactly where it left off.", { id: z.string() });
+pt("behavior_resume", "Resume a paused program - including one that paused itself via behavior_blocked, after you've fixed what blocked it (restocked the chest, replanted the forest...).", { id: z.string() });
+pt("behavior_delete", "Delete a behavior program permanently.", { id: z.string() });
+pt("behavior_status",
+  "Cheap progress query: per program - id, name, paused, crew size, and each crew member's current step index/type, carrying summary, " +
+  "and blueprint progress (\"37/220 placed\") when building. Use this when a player asks how the work is going; do NOT poll it on a timer - " +
+  "behavior_done/behavior_blocked events already wake you when something needs you.", {
+  id: z.string().optional().describe("one program's status; omit for all programs"),
+});
+pt("blueprint_register",
+  "Store a named blueprint (an origin plus the same {dx,dy,dz,material[,data]} block list build_blueprint takes) for NPC crews to " +
+  "build log-by-log via a behavior program's build step. Registering does NOT place anything - the crew does, block by visible block.", {
+  id: z.string().describe("unique short id, e.g. 'millbrook-granary'"),
+  origin: z.object({ x: z.number(), y: z.number(), z: z.number() }).describe("world position the block offsets are relative to"),
+  blocks: z.array(z.object({
+    dx: z.number(), dy: z.number(), dz: z.number(),
+    material: z.string(),
+    data: z.string().optional(),
+  })),
+});
+pt("blueprint_delete", "Delete a registered blueprint by id.", { id: z.string() });
 
 // --- gadgets ---
 // Gadgets are the third rung of the capability ladder (tool -> formula ->
