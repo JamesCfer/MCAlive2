@@ -10,8 +10,10 @@ import dev.celestia.mcalive2.bridge.CommandDispatcher;
 import dev.celestia.mcalive2.formula.FormulaActuators;
 import dev.celestia.mcalive2.gadget.GadgetActuators;
 import dev.celestia.mcalive2.gadget.GadgetManager;
+import dev.celestia.mcalive2.npc.ChunkTickets;
 import dev.celestia.mcalive2.npc.DefenseManager;
 import dev.celestia.mcalive2.npc.JobManager;
+import dev.celestia.mcalive2.npc.NpcChunkKeeper;
 import dev.celestia.mcalive2.npc.NpcManager;
 import dev.celestia.mcalive2.npc.behavior.BehaviorActuators;
 import dev.celestia.mcalive2.npc.behavior.BehaviorEngine;
@@ -40,6 +42,7 @@ public final class MCAlive2Plugin extends JavaPlugin {
     private FormulaActuators formulaActuators;
     private GadgetManager gadgetManager;
     private BehaviorEngine behaviorEngine;
+    private ChunkTickets chunkTickets;
 
     @Override
     public void onEnable() {
@@ -47,6 +50,9 @@ public final class MCAlive2Plugin extends JavaPlugin {
 
         npcManager = new NpcManager(this);
         npcManager.load();
+
+        // one shared ticket ledger: every keep-chunks-loaded subsystem funnels through it
+        chunkTickets = new ChunkTickets(this);
 
         defenseManager = new DefenseManager(this, npcManager);
 
@@ -70,7 +76,7 @@ public final class MCAlive2Plugin extends JavaPlugin {
         gadgetManager.loadAll();
         new GadgetActuators(this, gadgetManager).register(dispatcher);
 
-        behaviorEngine = new BehaviorEngine(this, npcManager, defenseManager::isEngaged);
+        behaviorEngine = new BehaviorEngine(this, npcManager, chunkTickets, defenseManager::isEngaged);
         behaviorEngine.load();
         new BehaviorActuators(this, npcManager, behaviorEngine).register(dispatcher);
         if (getConfig().getBoolean("behavior.enabled", true)) {
@@ -97,6 +103,9 @@ public final class MCAlive2Plugin extends JavaPlugin {
 
         // NPC routine tick, every 5 seconds
         getServer().getScheduler().runTaskTimer(this, () -> npcManager.tickRoutines(), 100L, 100L);
+        // Keep each living NPC's 3x3 chunk square loaded, same cadence (see NpcChunkKeeper)
+        NpcChunkKeeper chunkKeeper = new NpcChunkKeeper(this, npcManager, chunkTickets);
+        getServer().getScheduler().runTaskTimer(this, chunkKeeper::tick, 100L, 100L);
         // Autosave NPCs + ledger + explored cells every 5 minutes
         getServer().getScheduler().runTaskTimer(this, () -> {
             npcManager.save();
@@ -136,9 +145,10 @@ public final class MCAlive2Plugin extends JavaPlugin {
     public void onDisable() {
         if (defenseManager != null) defenseManager.disengageAll();
         if (behaviorEngine != null) {
-            behaviorEngine.stop(); // also releases every chunk ticket
+            behaviorEngine.stop();
             behaviorEngine.save();
         }
+        if (chunkTickets != null) chunkTickets.releaseAll(); // every subsystem's tickets, one sweep
         if (npcManager != null) npcManager.save();
         if (ledgerActuators != null) ledgerActuators.save();
         if (exploredTracker != null) exploredTracker.save();

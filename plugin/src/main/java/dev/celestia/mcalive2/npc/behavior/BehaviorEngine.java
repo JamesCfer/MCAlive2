@@ -17,6 +17,9 @@ import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.scheduler.BukkitTask;
 import dev.celestia.mcalive2.ledger.BlueprintParser;
+import dev.celestia.mcalive2.npc.ChunkTicketLedger;
+import dev.celestia.mcalive2.npc.ChunkTicketLedger.ChunkKey;
+import dev.celestia.mcalive2.npc.ChunkTickets;
 import dev.celestia.mcalive2.npc.NpcData;
 import dev.celestia.mcalive2.npc.NpcManager;
 
@@ -83,8 +86,10 @@ public class BehaviorEngine {
     /** Transient per-cursor walk state, keyed programId + "/" + npcId. Never persisted -
      *  on restart, walks simply re-issue. */
     private final Map<String, Runtime> runtime = new HashMap<>();
-    /** Chunk tickets currently held per program. */
-    private final Map<String, Set<TicketKey>> tickets = new HashMap<>();
+    /** Shared plugin-wide chunk ticket ledger (each program is its own owner token in it). */
+    private final ChunkTickets chunkTickets;
+    /** Programs currently holding chunk tickets in the shared ledger. */
+    private final Set<String> ticketPrograms = new HashSet<>();
     private BukkitTask task;
 
     private static final class Runtime {
@@ -94,11 +99,11 @@ public class BehaviorEngine {
         boolean wasEngaged = false;
     }
 
-    private record TicketKey(String world, int cx, int cz) {}
-
-    public BehaviorEngine(MCAlive2Plugin plugin, NpcManager npcs, java.util.function.Predicate<String> engaged) {
+    public BehaviorEngine(MCAlive2Plugin plugin, NpcManager npcs, ChunkTickets chunkTickets,
+                          java.util.function.Predicate<String> engaged) {
         this.plugin = plugin;
         this.npcs = npcs;
+        this.chunkTickets = chunkTickets;
         this.engaged = engaged;
         // no onRemoval hook needed: the tick loop itself drops dead/removed crew members
     }
@@ -125,7 +130,7 @@ public class BehaviorEngine {
             task.cancel();
             task = null;
         }
-        for (String programId : new ArrayList<>(tickets.keySet())) releaseTickets(programId);
+        for (String programId : new ArrayList<>(ticketPrograms)) releaseTickets(programId);
         runtime.clear();
     }
 
@@ -187,7 +192,7 @@ public class BehaviorEngine {
             }
         }
         // release tickets held for programs that vanished or paused mid-tick
-        for (String programId : new ArrayList<>(tickets.keySet())) {
+        for (String programId : new ArrayList<>(ticketPrograms)) {
             if (!active.contains(programId) || isPausedOrGone(programId)) releaseTickets(programId);
         }
     }
@@ -735,10 +740,12 @@ public class BehaviorEngine {
     // ---- chunk tickets ----
 
     /** Hold plugin chunk tickets at each cursor's current focus (its NPC's chunk and its
-     *  walk target's chunk), capped per program, releasing whatever went stale. */
+     *  walk target's chunk), capped per program, releasing whatever went stale. The
+     *  shared {@link ChunkTickets} ledger makes sure a chunk another owner (a sibling
+     *  program, or the NPC chunk keeper) still wants is never actually unloaded. */
     private void updateTickets(BehaviorProgram p) {
         int cap = Math.max(1, plugin.getConfig().getInt("behavior.max-chunk-tickets-per-program", 4));
-        Set<TicketKey> desired = new LinkedHashSet<>();
+        Set<ChunkKey> desired = new LinkedHashSet<>();
         for (Map.Entry<String, BehaviorProgram.Cursor> e : p.cursors.entrySet()) {
             if (desired.size() >= cap) break;
             NpcData data = npcs.get(e.getKey());
@@ -746,47 +753,27 @@ public class BehaviorEngine {
             Entity entity = data.entityUuid == null ? null : Bukkit.getEntity(data.entityUuid);
             if (entity != null && entity.isValid()) {
                 Location loc = entity.getLocation();
-                desired.add(new TicketKey(loc.getWorld().getName(), loc.getBlockX() >> 4, loc.getBlockZ() >> 4));
+                desired.add(ChunkTicketLedger.chunkOf(loc.getWorld().getName(), loc.getBlockX(), loc.getBlockZ()));
             }
             Runtime rt = runtime.get(runtimeKey(p.id, e.getKey()));
             if (rt != null && rt.walkTarget != null && desired.size() < cap) {
-                desired.add(new TicketKey(rt.walkTarget.getWorld().getName(),
-                        rt.walkTarget.getBlockX() >> 4, rt.walkTarget.getBlockZ() >> 4));
+                desired.add(ChunkTicketLedger.chunkOf(rt.walkTarget.getWorld().getName(),
+                        rt.walkTarget.getBlockX(), rt.walkTarget.getBlockZ()));
             }
         }
         while (desired.size() > cap) desired.remove(desired.iterator().next());
 
-        Set<TicketKey> held = tickets.computeIfAbsent(p.id, k -> new HashSet<>());
-        for (TicketKey stale : new ArrayList<>(held)) {
-            if (!desired.contains(stale)) {
-                removeTicket(stale);
-                held.remove(stale);
-            }
-        }
-        for (TicketKey key : desired) {
-            if (held.add(key)) {
-                World world = Bukkit.getWorld(key.world());
-                if (world != null) world.addPluginChunkTicket(key.cx(), key.cz(), plugin);
-                else held.remove(key);
-            }
-        }
+        chunkTickets.setDesired(ticketOwner(p.id), desired);
+        if (desired.isEmpty()) ticketPrograms.remove(p.id);
+        else ticketPrograms.add(p.id);
     }
 
     /** Release every chunk ticket a program holds - on pause/block/done/delete/disable. */
     public void releaseTickets(String programId) {
-        Set<TicketKey> held = tickets.remove(programId);
-        if (held == null) return;
-        for (TicketKey key : held) removeTicket(key);
+        if (ticketPrograms.remove(programId)) chunkTickets.release(ticketOwner(programId));
     }
 
-    private void removeTicket(TicketKey key) {
-        World world = Bukkit.getWorld(key.world());
-        if (world == null) return;
-        // another program may still want this chunk: only drop the plugin ticket if no
-        // other program's held set contains the same key
-        for (Map.Entry<String, Set<TicketKey>> e : tickets.entrySet()) {
-            if (e.getValue().contains(key)) return;
-        }
-        world.removePluginChunkTicket(key.cx(), key.cz(), plugin);
+    private String ticketOwner(String programId) {
+        return "behavior/" + programId;
     }
 }

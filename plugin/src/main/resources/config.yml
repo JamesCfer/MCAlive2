@@ -91,6 +91,15 @@ auto-update:
   # Minutes of continuous zero-player time required before apply-when-empty triggers.
   empty-minutes: 10
 
+# Keep every living NPC's surroundings loaded: each alive NPC holds plugin chunk
+# tickets on its own chunk plus `radius` chunks on every side (radius 1 = a 3x3 chunk
+# square), so NPCs keep living, walking routines, and defending themselves with no
+# player anywhere near. Uses the NPC's last-known position when its chunk is unloaded,
+# so those chunks come back too. Dead NPCs hold nothing.
+npc-chunk-loading:
+  enabled: true
+  radius: 1
+
 # Behavior programs: director-authored crew goals (gather/build/deposit/...) the plugin
 # runs indefinitely with zero AI involvement (see npc/behavior/BehaviorEngine).
 behavior:
