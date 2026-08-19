@@ -130,6 +130,18 @@ export function formatHumanLine(level, msg, fields = {}, now = new Date()) {
       body = `⏭ ${fields.kind} turn skipped: budget exceeded (${fields.tokensUsed}/${fields.dailyTokenBudget} tokens)`;
       break;
 
+    // Loud, once-per-UTC-day: the first budget skip of the day (see
+    // index.mjs's guardrailBlock). Every later skip that same day logs the
+    // quiet "turn_skipped_budget_exceeded" line above (at debug level)
+    // instead, so an exhausted budget doesn't flood the log for hours.
+    case "budget_exhausted":
+      body = `⚠ ${fields.message}`;
+      break;
+
+    case "budget_reset":
+      body = `⚠ operator reset today's token budget counter via the console (was ${fields.previousTokensUsed}/${fields.dailyTokenBudget} tokens)`;
+      break;
+
     case "turn_skipped_rate_limited":
       body = `⏭ ${fields.kind} turn skipped: rate limited (retry in ${fields.retryInMs}ms)`;
       break;

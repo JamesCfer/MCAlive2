@@ -273,6 +273,24 @@ function renderPage(directives, orders) {
   }
   button.del:hover { background: #3a2d33; }
   #status, #order-status-line { margin-left: .75rem; color: #9aa0a8; font-size: .85rem; }
+
+  /* Status strip: always-visible budget/kill-switch summary polled from
+     GET /status (see lib/console-server.mjs's getStatus dep) - the "is the
+     world actually doing anything" answer an operator previously had to
+     dig for in decisions.log. */
+  .status-strip {
+    display: flex; flex-wrap: wrap; align-items: center; gap: .75rem;
+    font-size: .8rem; color: #9aa0a8; margin: .6rem 0 0;
+  }
+  .status-strip b { color: #e6e6e6; }
+  #reset-budget-btn {
+    display: none; background: #a83232; padding: .3rem .7rem; font-size: .75rem;
+  }
+  #reset-budget-btn:hover { background: #c23e3e; }
+  .world-inert-banner {
+    display: none; background: #3a1a1a; color: #ffb0b0; border: 1px solid #6a2a2a;
+    border-radius: 6px; padding: .6rem .9rem; margin: .75rem 0 0; font-size: .85rem;
+  }
   section h2 { font-size: .95rem; color: #9aa0a8; text-transform: uppercase; letter-spacing: .04em; margin: 0 0 .75rem; }
   .caption { color: #6b7078; margin: -.4rem 0 .6rem; font-size: .8rem; }
   ul.directives, ul.orders { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .75rem; }
@@ -312,6 +330,12 @@ function renderPage(directives, orders) {
   <div>
     <h1>Lore Console <a class="maplink" href="/map">3D map &rarr;</a></h1>
     <p class="sub">Type an instruction for the director to fold into the world. It takes effect on the next scene.</p>
+    <div class="status-strip" id="status-strip">
+      <span id="status-budget">budget: loading&hellip;</span>
+      <span id="status-killswitch"></span>
+      <button id="reset-budget-btn">Reset budget</button>
+    </div>
+    <div class="world-inert-banner" id="status-banner"></div>
   </div>
 
   <section>
@@ -417,8 +441,47 @@ async function refreshDecisions() {
     if (res.ok) document.getElementById('decisions').textContent = (await res.text()) || '(empty)';
   } catch {}
 }
+
+// Status strip: budget used/limit as a percentage, plus a prominent banner
+// when the world is not currently able to act (budget exhausted or the kill
+// switch is on) and why - polled on the same cadence as refreshDecisions()
+// above so an operator watching this page always has a current answer.
+function renderStatus(s) {
+  var pct = s.budget.limit > 0 ? Math.round((s.budget.used / s.budget.limit) * 100) : 0;
+  document.getElementById('status-budget').innerHTML =
+    'budget: <b>' + s.budget.used + '</b> / ' + s.budget.limit + ' (' + pct + '%)';
+  document.getElementById('status-killswitch').textContent = s.killSwitch ? 'kill switch: ON' : '';
+  document.getElementById('reset-budget-btn').style.display = s.budget.exhausted ? 'inline-block' : 'none';
+
+  var banner = document.getElementById('status-banner');
+  if (s.budget.exhausted || s.killSwitch) {
+    var reason = s.budget.exhausted
+      ? 'the daily token budget is exhausted (' + s.budget.used + '/' + s.budget.limit + ' tokens). It resets at ' + s.budget.resetsAt + '.'
+      : 'the kill switch is active.';
+    banner.textContent = 'The world is NOT currently acting: ' + reason;
+    banner.style.display = 'block';
+  } else {
+    banner.style.display = 'none';
+  }
+}
+
+async function refreshStatus() {
+  try {
+    const res = await fetch('/status');
+    if (res.ok) renderStatus(await res.json());
+  } catch {}
+}
+
+document.getElementById('reset-budget-btn').addEventListener('click', async function () {
+  if (!confirm("Reset today's token budget counter and let the world start acting again?")) return;
+  await fetch('/budget/reset', { method: 'POST' });
+  refreshStatus();
+});
+
 refreshDecisions();
+refreshStatus();
 setInterval(refreshDecisions, 5000);
+setInterval(refreshStatus, 5000);
 </script>
 </body>
 </html>`;
@@ -469,6 +532,19 @@ function renderMapPage() {
     background: #3a1a1a; color: #ffb0b0; border-bottom: 1px solid #6a2a2a; display: none;
   }
   #banner a { color: #ffd0d0; }
+  /* Status strip + world-inert banner: same GET /status polling as the main
+     console page (/) - see its own comment for why this exists. */
+  .status-strip { display: flex; align-items: center; gap: .6rem; font-size: .78rem; color: #9aa0a8; }
+  .status-strip b { color: #e6e6e6; }
+  #reset-budget-btn-map {
+    display: none; background: #a83232; color: white; border: none; border-radius: 6px;
+    padding: .3rem .7rem; font-size: .75rem; cursor: pointer;
+  }
+  #reset-budget-btn-map:hover { background: #c23e3e; }
+  #world-inert-banner {
+    display: none; background: #3a1a1a; color: #ffb0b0; border-bottom: 1px solid #6a2a2a;
+    padding: .5rem 1rem; font-size: .82rem;
+  }
   #hover-coord {
     position: absolute; left: .6rem; bottom: .5rem; font-size: .75rem; color: #7f858c;
     font-family: ui-monospace, monospace; pointer-events: none;
@@ -509,10 +585,16 @@ function renderMapPage() {
   <h1>3D Map</h1>
   <a href="/">&larr; Lore Console</a>
   <div id="counts">loading&hellip;</div>
+  <div class="status-strip" id="status-strip">
+    <span id="status-budget">budget: loading&hellip;</span>
+    <span id="status-killswitch"></span>
+    <button id="reset-budget-btn-map">Reset budget</button>
+  </div>
   <div class="spacer"></div>
   <label class="toggle"><input type="checkbox" id="auto-refresh"> auto-refresh (10s)</label>
   <button id="refresh">Refresh</button>
 </header>
+<div id="world-inert-banner"></div>
 <div id="layout">
   <div id="canvas-wrap">
     <div id="banner"></div>
@@ -1297,6 +1379,45 @@ document.getElementById('auto-refresh').addEventListener('change', function (e) 
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
 fetchAndRender();
+
+// =========================================================================
+// SECTION: status strip - same GET /status polling as the / page, on the
+// same cadence as its own auto-refresh (10s) plus one call on load.
+// =========================================================================
+function renderStatus(s) {
+  var pct = s.budget.limit > 0 ? Math.round((s.budget.used / s.budget.limit) * 100) : 0;
+  document.getElementById('status-budget').innerHTML =
+    'budget: <b>' + s.budget.used + '</b> / ' + s.budget.limit + ' (' + pct + '%)';
+  document.getElementById('status-killswitch').textContent = s.killSwitch ? 'kill switch: ON' : '';
+  document.getElementById('reset-budget-btn-map').style.display = s.budget.exhausted ? 'inline-block' : 'none';
+
+  var worldBanner = document.getElementById('world-inert-banner');
+  if (s.budget.exhausted || s.killSwitch) {
+    var reason = s.budget.exhausted
+      ? 'the daily token budget is exhausted (' + s.budget.used + '/' + s.budget.limit + ' tokens). It resets at ' + s.budget.resetsAt + '.'
+      : 'the kill switch is active.';
+    worldBanner.textContent = 'The world is NOT currently acting: ' + reason;
+    worldBanner.style.display = 'block';
+  } else {
+    worldBanner.style.display = 'none';
+  }
+}
+
+async function fetchStatus() {
+  try {
+    var res = await fetch('/status');
+    if (res.ok) renderStatus(await res.json());
+  } catch (e) {}
+}
+
+document.getElementById('reset-budget-btn-map').addEventListener('click', async function () {
+  if (!confirm("Reset today's token budget counter and let the world start acting again?")) return;
+  await fetch('/budget/reset', { method: 'POST' });
+  fetchStatus();
+});
+
+fetchStatus();
+setInterval(fetchStatus, 10000);
 </script>
 </body>
 </html>`;
@@ -1325,7 +1446,7 @@ function sendJson(res, status, obj, extraHeaders = {}) {
 
 /**
  * @param {object} config - loadConfig() result (consoleBind/consolePort/consoleToken/loreDir/stateDir)
- * @param {{ reloadLore: () => Promise<void> | void, submitOrder: (text: string, orderTimestamp: string) => void, getWorldModel: () => Promise<object> }} deps
+ * @param {{ reloadLore: () => Promise<void> | void, submitOrder: (text: string, orderTimestamp: string) => void, getWorldModel: () => Promise<object>, getStatus: () => Promise<object>, resetBudget: () => Promise<void> }} deps
  *   - reloadLore is the exact reload lore.mjs's watcher uses on its own
  *   timer (index.mjs passes `loreWatch.tick`), invoked after every
  *   directive add/delete so the NEXT scene already sees the change.
@@ -1334,17 +1455,26 @@ function sendJson(res, status, obj, extraHeaders = {}) {
  *   becomes a director scene rather than lore. orderTimestamp is the exact
  *   timestamp appendOrder() below assigned this order, threaded onto the
  *   scene event so index.mjs's runScene can later mark this same orders.json
- *   entry "done" (or revert it to "queued" on a timeout) once its scene
- *   completes.
+ *   entry "done" (or revert it to "queued" on a timeout, or a guardrail
+ *   skip) once its scene completes.
  *   - getWorldModel (index.mjs) builds the raw world-model JSON (lib/
  *   worldmodel.mjs's buildWorldModel, called against the brain's own bridge
  *   connection) for GET /worldmodel below - the 3D map page's (/map) data
  *   source. Its result is cached for WORLDMODEL_CACHE_MS so rapid page
  *   refreshes/auto-refresh polling don't hammer the bridge with a fresh
  *   ledger_query + scan_area round trip every time.
+ *   - getStatus (index.mjs) builds the JSON snapshot for GET /status below -
+ *   token budget, kill switch, rate limit, scene/bridge state - polled by
+ *   both console pages' status strip so an operator can see AT A GLANCE
+ *   whether the world is currently able to act, instead of having to notice
+ *   its absence in decisions.log.
+ *   - resetBudget (index.mjs) zeroes today's token usage counter for POST
+ *   /budget/reset below - the console's "reset budget" button, for an
+ *   operator who wants to keep the world running past an exhausted budget
+ *   rather than wait for the UTC midnight roll.
  * @returns {Promise<{ server: import('node:http').Server, port: number, stop: () => Promise<void> }>}
  */
-export function startConsoleServer(config, { reloadLore, submitOrder, getWorldModel }) {
+export function startConsoleServer(config, { reloadLore, submitOrder, getWorldModel, getStatus, resetBudget }) {
   const token = config.consoleToken;
   const decisionsPath = path.join(config.stateDir, "decisions.log");
 
@@ -1403,6 +1533,28 @@ export function startConsoleServer(config, { reloadLore, submitOrder, getWorldMo
       if (req.method === "GET" && url.pathname === "/decisions") {
         res.writeHead(200, { "content-type": "text/plain; charset=utf-8", ...extraHeaders });
         res.end(tailLines(decisionsPath, 40));
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/status") {
+        try {
+          const status = await getStatus();
+          sendJson(res, 200, status, extraHeaders);
+        } catch (e) {
+          log.error("status_request_failed", { error: String((e && e.stack) || e) });
+          sendJson(res, 502, { ok: false, error: "failed to build status" }, extraHeaders);
+        }
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/budget/reset") {
+        try {
+          await resetBudget();
+          sendJson(res, 200, { ok: true }, extraHeaders);
+        } catch (e) {
+          log.error("budget_reset_request_failed", { error: String((e && e.stack) || e) });
+          sendJson(res, 500, { ok: false, error: "failed to reset budget" }, extraHeaders);
+        }
         return;
       }
 

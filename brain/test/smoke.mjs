@@ -1487,6 +1487,154 @@ async function main() {
   brain7.child.kill();
   bridge7.child.kill();
 
+  console.log("\n9. Budget exhaustion: loud-once WARN, GET /status, POST /budget/reset, order survives a budget skip, status-strip markup on / and /map");
+  const port8 = 8906;
+  const bridge8 = spawnNode([path.join(BRAIN_DIR, "test", "mock-bridge.mjs")], {
+    MOCK_BRIDGE_PORT: String(port8),
+    MOCK_BRIDGE_TOKEN: "test-token",
+  });
+  await wait(300);
+
+  // Pre-seed usage.json already AT the (tiny) daily budget, so isOverBudget()
+  // is true from the very first guardrail check - no need to wait on real
+  // token accounting or the real clock. Also pre-seed orders.json with one
+  // "queued" order whose event we'll submit via POST /order once the console
+  // is up, so its scene gets skipped for budget exactly like the incident.
+  const budgetStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "brain-budget-"));
+  const todayUtc = new Date().toISOString().slice(0, 10);
+  fs.writeFileSync(path.join(budgetStateDir, "usage.json"), JSON.stringify({ date: todayUtc, tokens: 1000 }, null, 1));
+
+  const budgetConsoleToken = "budget-test-token";
+  const brain8 = spawnNode([path.join(BRAIN_DIR, "index.mjs")], {
+    MCALIVE2_URL: `ws://127.0.0.1:${port8}`,
+    MCALIVE2_TOKEN: "test-token",
+    BRAIN_DEBOUNCE_MS: "300",
+    BRAIN_DRY_RUN: "1",
+    BRAIN_ENABLED: "1",
+    BRAIN_LORE_REFRESH_MS: "600000",
+    BRAIN_STATE_DIR: budgetStateDir,
+    BRAIN_LOG_JSON: "1",
+    BRAIN_DAILY_TOKEN_BUDGET: "1000", // already exhausted by the pre-seeded usage.json above
+    BRAIN_CONSOLE: "1",
+    BRAIN_CONSOLE_BIND: "127.0.0.1",
+    BRAIN_CONSOLE_PORT: "0",
+    BRAIN_CONSOLE_TOKEN: budgetConsoleToken,
+  });
+
+  const authed8 = await waitFor(brain8.logs, (l) => l.msg === "bridge_auth_ok", 5000);
+  assert(authed8, "budget-test brain authenticated against the bridge");
+  const listening8 = await waitFor(brain8.logs, (l) => l.msg === "console_listening", 5000);
+  assert(listening8, "console_listening was logged for the budget-test instance");
+  const consolePort8 = brain8.logs.find((l) => l.msg === "console_listening").port;
+  const base8 = `http://127.0.0.1:${consolePort8}`;
+
+  // Submit an order while the budget is already exhausted - its scene will
+  // be skipped for budget, exactly like the production incident's swallowed
+  // operator order.
+  const budgetOrderText = "Order submitted during a budget-exhausted window.";
+  const budgetOrderRes = await fetch(`${base8}/order?token=${budgetConsoleToken}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: budgetOrderText }),
+  });
+  const budgetOrderJson = await budgetOrderRes.json();
+  assert(budgetOrderRes.status === 200 && budgetOrderJson.ok === true, "POST /order succeeds even while the budget is exhausted (the order is accepted, just not actable yet)");
+
+  // Give the mock bridge's whole scripted timeline (director scenes +
+  // actor turns, several distinct guardrail checks) plus the order's own
+  // scene a chance to all get skipped.
+  const sawBudgetSkips = await waitFor(
+    brain8.logs,
+    (l) => brain8.logs.filter((x) => x.msg === "turn_skipped_budget_exceeded" || x.msg === "budget_exhausted").length >= 3,
+    5000
+  );
+  assert(sawBudgetSkips, "multiple budget guardrail skips were logged across the scripted event timeline");
+
+  assert(!brain8.logs.some((l) => l.msg === "director_scene_starting" || l.msg === "dry_run_director_turn"), "no director scene ever ran while the budget was exhausted");
+  assert(!brain8.logs.some((l) => l.msg === "dry_run_actor_turn"), "no actor turn ever ran while the budget was exhausted");
+
+  // --- 9a. loud-once WARN: exactly one "budget_exhausted" WARN, but
+  // multiple quiet "turn_skipped_budget_exceeded" debug lines for the rest ---
+  const loudBudgetWarns = brain8.logs.filter((l) => l.msg === "budget_exhausted" && l.level === "warn");
+  assert(loudBudgetWarns.length === 1, `exactly one loud "budget_exhausted" WARN was logged all day, not one per skip (got ${loudBudgetWarns.length})`);
+  if (loudBudgetWarns[0]) {
+    const w = loudBudgetWarns[0];
+    assert(typeof w.message === "string" && /exhausted/i.test(w.message), "the loud WARN's message says the budget is exhausted");
+    assert(typeof w.message === "string" && w.message.includes("1000/1000"), "the loud WARN's message states tokens used vs. the limit");
+    assert(typeof w.message === "string" && /UTC midnight/i.test(w.message), "the loud WARN's message says the world stays inert until UTC midnight");
+    assert(typeof w.message === "string" && w.message.includes("BRAIN_DAILY_TOKEN_BUDGET"), "the loud WARN's message says how to raise the budget (BRAIN_DAILY_TOKEN_BUDGET)");
+    assert(typeof w.resetsAt === "string" && w.resetsAt.length > 0, "the loud WARN carries a resetsAt timestamp");
+  }
+  const quietBudgetSkips = brain8.logs.filter((l) => l.msg === "turn_skipped_budget_exceeded");
+  assert(quietBudgetSkips.length >= 2, `subsequent budget skips the same day logged the quiet line instead of another WARN (got ${quietBudgetSkips.length})`);
+  // No kill-switch/rate-limit equivalent loud-once treatment was asked for -
+  // "turn_skipped_kill_switch" (used elsewhere, e.g. section 3) always stays
+  // a WARN every time; nothing in this section should turn that into a
+  // once-per-day thing.
+  assert(!brain8.logs.some((l) => l.msg === "kill_switch_exhausted"), "no kill-switch equivalent of the loud-once budget message was invented");
+
+  // --- 9b. the operator_order submitted during the exhausted window stays
+  // "queued" (never "done") in orders.json ---
+  const ordersJsonPath8 = path.join(budgetStateDir, "orders.json");
+  const ordersAfterBudgetSkip = JSON.parse(fs.readFileSync(ordersJsonPath8, "utf8"));
+  const budgetOrderAfter = ordersAfterBudgetSkip.find((o) => o.timestamp === budgetOrderJson.timestamp);
+  assert(budgetOrderAfter && budgetOrderAfter.status === "queued", `an operator_order scene skipped for budget leaves that order "queued" in orders.json (got ${budgetOrderAfter && budgetOrderAfter.status})`);
+  assert(!brain8.logs.some((l) => l.msg === "order_status_updated" && l.timestamp === budgetOrderJson.timestamp && l.status === "done"), "the budget-skipped order was never marked \"done\"");
+  assert(brain8.logs.some((l) => l.msg === "order_status_updated" && l.timestamp === budgetOrderJson.timestamp && l.status === "queued"), "the budget skip explicitly (re)confirms the order's status as \"queued\"");
+
+  // --- 9c. GET /status: documented shape, token-authed ---
+  const statusUnauthed = await fetch(`${base8}/status`);
+  assert(statusUnauthed.status === 401, `GET /status with no token is rejected (got ${statusUnauthed.status})`);
+
+  const statusRes = await fetch(`${base8}/status?token=${budgetConsoleToken}`);
+  assert(statusRes.status === 200, `GET /status with a valid token succeeds (got ${statusRes.status})`);
+  const statusJson = await statusRes.json();
+  assert(statusJson.budget && statusJson.budget.used === 1000, `GET /status budget.used reflects the pre-seeded usage (got ${statusJson.budget && statusJson.budget.used})`);
+  assert(statusJson.budget && statusJson.budget.limit === 1000, "GET /status budget.limit reflects BRAIN_DAILY_TOKEN_BUDGET");
+  assert(statusJson.budget && statusJson.budget.remaining === 0, "GET /status budget.remaining is 0 when exhausted");
+  assert(statusJson.budget && statusJson.budget.exhausted === true, "GET /status budget.exhausted is true");
+  assert(typeof (statusJson.budget && statusJson.budget.resetsAt) === "string", "GET /status budget.resetsAt is a string");
+  assert(statusJson.killSwitch === false, "GET /status killSwitch is false (no kill switch file here)");
+  assert(statusJson.rateLimit && statusJson.rateLimit.maxPerMin > 0, "GET /status rateLimit.maxPerMin is present");
+  assert(statusJson.scenes && typeof statusJson.scenes.running === "boolean", "GET /status scenes.running is a boolean");
+  assert(statusJson.bridge && statusJson.bridge.connected === true, "GET /status bridge.connected is true (bridge is authed)");
+  assert(typeof statusJson.uptimeSec === "number" && statusJson.uptimeSec >= 0, "GET /status uptimeSec is a non-negative number");
+
+  // --- 9d. status-strip markup on both / and /map ---
+  const pageWithStatus = await fetch(`${base8}/?token=${budgetConsoleToken}`);
+  const pageWithStatusHtml = await pageWithStatus.text();
+  assert(pageWithStatusHtml.includes('id="status-strip"') && pageWithStatusHtml.includes('id="status-budget"'), "GET / page has the status-strip markup");
+  assert(pageWithStatusHtml.includes("fetch('/status')") || pageWithStatusHtml.includes('fetch("/status")'), "GET / page's inline script polls /status");
+  assert(pageWithStatusHtml.includes('id="reset-budget-btn"'), "GET / page has a reset-budget button");
+  assert(pageWithStatusHtml.includes("/budget/reset"), "GET / page's inline script can POST /budget/reset");
+
+  const mapWithStatus = await fetch(`${base8}/map?token=${budgetConsoleToken}`);
+  const mapWithStatusHtml = await mapWithStatus.text();
+  assert(mapWithStatusHtml.includes('id="status-strip"') && mapWithStatusHtml.includes('id="status-budget"'), "GET /map page has the status-strip markup");
+  assert(mapWithStatusHtml.includes("fetch('/status')") || mapWithStatusHtml.includes('fetch("/status")'), "GET /map page's inline script polls /status");
+  assert(mapWithStatusHtml.includes('id="world-inert-banner"'), "GET /map page has the world-inert banner markup");
+
+  // --- 9e. POST /budget/reset: zeroes the counter, persists, logged at WARN ---
+  const resetRes = await fetch(`${base8}/budget/reset?token=${budgetConsoleToken}`, { method: "POST" });
+  const resetJson = await resetRes.json();
+  assert(resetRes.status === 200 && resetJson.ok === true, `POST /budget/reset succeeds (got ${resetRes.status} ${JSON.stringify(resetJson)})`);
+
+  const usageAfterReset = JSON.parse(fs.readFileSync(path.join(budgetStateDir, "usage.json"), "utf8"));
+  assert(usageAfterReset.tokens === 0, `usage.json's tokens counter is zeroed after POST /budget/reset (got ${usageAfterReset.tokens})`);
+
+  const gotResetWarn = await waitFor(brain8.logs, (l) => l.msg === "budget_reset" && l.level === "warn", 2000);
+  assert(gotResetWarn, "POST /budget/reset is logged at WARN");
+
+  const statusAfterReset = await (await fetch(`${base8}/status?token=${budgetConsoleToken}`)).json();
+  assert(statusAfterReset.budget.used === 0, "GET /status reflects the reset counter (used=0)");
+  assert(statusAfterReset.budget.exhausted === false, "GET /status reports exhausted=false right after a reset");
+
+  const resetUnauthed = await fetch(`${base8}/budget/reset`, { method: "POST" });
+  assert(resetUnauthed.status === 401, `POST /budget/reset with no token is rejected (got ${resetUnauthed.status})`);
+
+  brain8.child.kill();
+  bridge8.child.kill();
+
   await wait(200);
 
   console.log(`\n${failures === 0 ? "ALL CHECKS PASSED" : failures + " CHECK(S) FAILED"}`);

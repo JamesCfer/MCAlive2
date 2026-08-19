@@ -69,4 +69,15 @@ export class UsageTracker {
     await this._persist();
     return this.tokens;
   }
+
+  /** Zeroes today's counter and persists immediately - backs POST
+   * /budget/reset (lib/console-server.mjs) for an operator who wants to
+   * keep the world running after an exhausted budget rather than waiting
+   * for the UTC midnight roll. Does not touch dailyBudget itself. */
+  async reset() {
+    this._rollIfNewDay();
+    this.tokens = 0;
+    await this._persist();
+    return this.tokens;
+  }
 }

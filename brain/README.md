@@ -232,6 +232,24 @@ bridge and logs incoming events, it just never starts a turn. The budget
 and rate limit are shared across director scenes and actor turns (one pool,
 since actors are cheap but frequent and directors are rare but expensive).
 
+**Budget exhaustion is loud once, then quiet.** The first time a turn is
+skipped for budget on a given UTC day, it logs a `⚠` **WARN** spelling out
+that the budget is exhausted, tokens used vs. the limit, that the world will
+stay inert until the UTC-midnight reset, and how to raise
+`BRAIN_DAILY_TOKEN_BUDGET` (or reset it now — see [Status & budget
+reset](#status--budget-reset) below). Every later skip that same UTC day logs
+the same information at debug level instead (visible with `BRAIN_DEBUG=1` or
+`BRAIN_LOG_JSON=1`), so an exhausted budget doesn't bury an operator's
+terminal in the same line for hours — this is exactly what happened in
+production once: the budget ran out mid-morning and every scene/turn after
+that silently skipped with only a `decisions.log` line as evidence, with
+nothing in the console loud enough to notice. Every skip is still journaled
+to `state/decisions.log` regardless (`Decision: skipped: budget_exceeded`).
+The kill switch and rate limit are NOT deduplicated this way — they still log
+a `WARN` on every single skip, since they're either operator-controlled
+(kill switch) or expected to self-clear within a minute (rate limit), unlike
+a budget exhaustion that can silently last hours.
+
 Every director scene and actor turn races `BRAIN_TURN_TIMEOUT_SEC` against
 the underlying Agent SDK call (`lib/timed-query.mjs`). Because director
 scenes never run concurrently (`lib/director-scheduler.mjs`), a single hung
@@ -529,6 +547,17 @@ directives, amber for orders) so they're never confused:
   (`BRAIN_TURN_TIMEOUT_SEC`), it reverts to `"queued"` so the next restart
   (or boot) retries it rather than losing it.
 
+  The same guarantee holds if a scene carrying an order is skipped by a
+  **guardrail** instead of actually running — kill switch, exhausted budget,
+  or rate limit: the order's `orders.json` entry is left (or explicitly
+  reconfirmed) as `"queued"`, logging `order_status_updated` with
+  `status:"queued"`, and is **never** marked `"done"`. This is the exact
+  production gap that motivated it: an order submitted during a
+  budget-exhausted window used to just sit there with no visible trace
+  beyond `decisions.log`, indistinguishable from having been lost, until
+  someone thought to restart the process (the only thing that used to
+  actually retry it).
+
 Scenes triggered by an `operator_order` event get a much higher turn
 ceiling than a normal reactive scene — `BRAIN_ORDER_MAX_STEPS` (default
 `80`) instead of `BRAIN_MAX_DIRECTOR_STEPS` (default `12`) — since carrying
@@ -562,6 +591,45 @@ within ±12 of the requested y by default (`snap:false` to opt out).
 | `BRAIN_CONSOLE_PORT` | `7777` | Port to listen on |
 | `BRAIN_CONSOLE_TOKEN` | `MCALIVE2_TOKEN` | Shared token required on every request |
 | `BRAIN_ORDER_MAX_STEPS` | `80` | `maxTurns` passed to the Agent SDK for a director scene triggered by an `operator_order` event, instead of `BRAIN_MAX_DIRECTOR_STEPS` |
+
+### Status & budget reset
+
+- **`GET /status`** — token-authed like every other console route, JSON
+  snapshot of whether the world is actually able to act right now:
+
+  ```jsonc
+  {
+    "budget": { "used": 500000, "limit": 500000, "remaining": 0, "exhausted": true, "resetsAt": "2026-08-20T00:00:00.000Z" },
+    "killSwitch": false,
+    "rateLimit": { "maxPerMin": 10 },
+    "scenes": { "running": false },
+    "bridge": { "connected": true },
+    "uptimeSec": 3600
+  }
+  ```
+
+  `budget.resetsAt` is always the next UTC midnight. `bridge.connected`
+  reflects the brain's own bridge connection (`lib/bridge-client.mjs`'s
+  `authed` flag), not the console's.
+
+- **`POST /budget/reset`** — token-authed, zeroes today's counter in
+  `state/usage.json` and persists it immediately, for an operator who
+  decides to keep the world running past an exhausted budget rather than
+  wait for the UTC-midnight reset. Returns `{"ok": true}`. Also clears the
+  loud-once-per-day WARN flag above, so a later same-day exhaustion warns
+  loud again instead of being mistaken for something already reported.
+  Always logged at `WARN` (`budget_reset`), since it's a deliberate operator
+  action that changes what the world will do next.
+
+Both console pages (`/` and `/map`) render a small **status strip** in their
+header — budget used/limit as a percentage, and, when the budget is
+exhausted or the kill switch is on, a prominent coloured banner explaining
+that the world is not currently acting and why. The strip polls `GET
+/status` on the same cadence each page already polls its own data on (the
+`/` page's 5s decisions-log tail; the `/map` page's status poll runs every
+10s, matching its own optional world-model auto-refresh). When the budget
+shows exhausted, a **"Reset budget"** button appears in the strip; clicking
+it asks for confirmation, then calls `POST /budget/reset`.
 
 ## Testing (no API key, no Minecraft server required)
 
@@ -680,7 +748,7 @@ It exits non-zero if any assertion fails.
   calls the Agent SDK with the 3-tool allowlist (or logs it under
   `BRAIN_DRY_RUN`).
 - `lib/usage-tracker.mjs` — daily token budget, persisted to
-  `brain/state/usage.json`.
+  `brain/state/usage.json`; `reset()` backs `POST /budget/reset`.
 - `lib/logger.mjs` — the console logger: human-readable narration by
   default (`formatHumanLine`, unit-tested directly), full JSON lines under
   `BRAIN_LOG_JSON=1`; also owns the per-process scene counter
@@ -696,7 +764,8 @@ It exits non-zero if any assertion fails.
   `lore/90-operator-directives.md` add/list/delete logic (triggering an
   immediate lore reload after every change), the `state/orders.json`
   add/list logic for one-shot operator orders, `GET /worldmodel` (cached
-  ~5s), and the `/map` 3D schematic viewer page (see Lore Console above).
+  ~5s), `GET /status` and `POST /budget/reset` (see Status & budget reset
+  above), and the `/map` 3D schematic viewer page (see Lore Console above).
 - `lib/worldmodel.mjs` — `buildWorldModel()`/`formatWorldOverview()`:
   aggregates ledger places/NPCs + a coarse `scan_area` + budgeted
   `get_block` probes into the world model and its text digest, backing the

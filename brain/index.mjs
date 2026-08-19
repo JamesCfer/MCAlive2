@@ -121,7 +121,13 @@ export async function main(env = process.env) {
 
   let consoleServer = null;
   if (config.consoleEnabled) {
-    consoleServer = await startConsoleServer(config, { reloadLore: loreWatch.tick, submitOrder, getWorldModel });
+    consoleServer = await startConsoleServer(config, {
+      reloadLore: loreWatch.tick,
+      submitOrder,
+      getWorldModel,
+      getStatus,
+      resetBudget,
+    });
     log.info("console_listening", { bind: config.consoleBind, port: consoleServer.port });
   }
 
@@ -159,6 +165,26 @@ export async function main(env = process.env) {
     }
   }
 
+  // Next UTC midnight, ISO - both the budget-exhausted WARN and GET /status
+  // report this as "when the world starts acting again".
+  function budgetResetsAt() {
+    const now = new Date();
+    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0, 0)).toISOString();
+  }
+
+  // UTC date string (YYYY-MM-DD) of the last time a budget-exhausted skip was
+  // logged LOUD (WARN). Production incident this closes: the budget ran out
+  // mid-morning and every skip after that logged at WARN forever, but an
+  // operator watching a scrolling terminal for hours only ever sees "budget
+  // exceeded" spam and easily loses the ONE moment that mattered (when it
+  // first ran out) in the noise - or, worse, tunes it out entirely. Now the
+  // first skip of the UTC day is a loud, explanatory WARN; every later skip
+  // that same day is a quiet debug line (still journaled to decisions.log
+  // every time - see journalSkip below - just not spammed to the console).
+  // Reset to null by resetBudget() (POST /budget/reset) so an operator who
+  // resets mid-day gets a fresh loud warning if the budget runs out again.
+  let budgetWarnedDate = null;
+
   /** @param {"director"|"actor"} kind
    * @param {{sceneNumber?: number, batch?: Array, npcId?: string, player?: string, trigger?: string}} context
    * Both console log fields and the decisions journal need to say WHICH
@@ -172,16 +198,69 @@ export async function main(env = process.env) {
       return "kill_switch";
     }
     if (usage.isOverBudget()) {
-      log.warn(`turn_skipped_budget_exceeded`, {
-        kind,
-        tokensUsed: usage.tokens,
-        dailyTokenBudget: config.dailyTokenBudget,
-        ...idFields(context),
-      });
+      // usage.isOverBudget() just rolled usage.date to the current UTC day
+      // if needed, so it's safe to compare against here.
+      const today = usage.date;
+      const resetsAt = budgetResetsAt();
+      if (budgetWarnedDate !== today) {
+        budgetWarnedDate = today;
+        log.warn("budget_exhausted", {
+          kind,
+          tokensUsed: usage.tokens,
+          dailyTokenBudget: config.dailyTokenBudget,
+          resetsAt,
+          message:
+            `daily token budget exhausted: ${usage.tokens}/${config.dailyTokenBudget} tokens used. ` +
+            `The world will stay inert (no director scenes, no NPC replies) until the budget resets at UTC midnight (${resetsAt}). ` +
+            `Raise BRAIN_DAILY_TOKEN_BUDGET to increase the daily limit, or use the console's "reset budget" button ` +
+            `(POST /budget/reset) to reset today's counter now and keep going.`,
+          ...idFields(context),
+        });
+      } else {
+        log.debug("turn_skipped_budget_exceeded", {
+          kind,
+          tokensUsed: usage.tokens,
+          dailyTokenBudget: config.dailyTokenBudget,
+          ...idFields(context),
+        });
+      }
       journalSkip({ config, kind, reason: "budget_exceeded", ...context });
       return "budget";
     }
     return null;
+  }
+
+  /** Console-facing snapshot for GET /status (lib/console-server.mjs) - the
+   * "is the world actually doing anything right now" answer an operator
+   * couldn't previously get without reading decisions.log line by line. */
+  async function getStatus() {
+    usage.isOverBudget(); // rolls usage.date/tokens to the current UTC day as a side effect
+    return {
+      budget: {
+        used: usage.tokens,
+        limit: config.dailyTokenBudget,
+        remaining: usage.remaining(),
+        exhausted: usage.isOverBudget(),
+        resetsAt: budgetResetsAt(),
+      },
+      killSwitch: isKillSwitchActive(),
+      rateLimit: { maxPerMin: config.maxTurnsPerMin },
+      scenes: { running: scheduler.sceneRunning },
+      bridge: { connected: !!(bridge && bridge.authed) },
+      uptimeSec: Math.round(process.uptime()),
+    };
+  }
+
+  /** POST /budget/reset (lib/console-server.mjs): zeroes today's usage
+   * counter so an operator who decides to keep going after an exhausted
+   * budget can, without waiting for the UTC midnight roll. Also clears
+   * budgetWarnedDate so a later same-day exhaustion warns loud again rather
+   * than being mistaken for "already told the operator about this". */
+  async function resetBudget() {
+    const previousTokensUsed = usage.tokens;
+    await usage.reset();
+    budgetWarnedDate = null;
+    log.warn("budget_reset", { previousTokensUsed, dailyTokenBudget: config.dailyTokenBudget });
   }
 
   function idFields(context) {
@@ -193,12 +272,35 @@ export async function main(env = process.env) {
     return out;
   }
 
+  /** An operator_order carries its orders.json timestamp on the scene event
+   * (see submitOrder above). Any batch a guardrail (kill switch/budget/rate
+   * limit) blocks before the director ever runs must leave that order's
+   * on-disk status as "queued" - never "done" - so it is picked back up
+   * later (boot-time replay, or the same in-memory re-queue the rate-limit
+   * path already does below) instead of silently vanishing, which is
+   * exactly what happened in production when a budget-exhausted window
+   * swallowed an operator order with zero trace beyond decisions.log.
+   * Explicit and idempotent (setOrderStatus is a no-op if already
+   * "queued"), mirroring the existing timed-out-scene revert in the
+   * post-turn block below. */
+  function revertOrdersToQueued(batch) {
+    for (const e of batch) {
+      if (e.event === "operator_order" && e.data && e.data.orderTimestamp) {
+        setOrderStatus(config, e.data.orderTimestamp, "queued");
+        log.info("order_status_updated", { timestamp: e.data.orderTimestamp, status: "queued" });
+      }
+    }
+  }
+
   // ---------------- Director scene runner ----------------
 
   async function runScene(batch) {
     const sceneNumber = nextSceneNumber();
     const block = guardrailBlock("director", { sceneNumber, batch });
-    if (block) return;
+    if (block) {
+      revertOrdersToQueued(batch);
+      return;
+    }
     if (!rateLimiter.tryAcquire()) {
       log.warn("turn_skipped_rate_limited", {
         kind: "director",
@@ -207,6 +309,7 @@ export async function main(env = process.env) {
         retryInMs: rateLimiter.msUntilSlot(),
       });
       journalSkip({ config, kind: "director", reason: "rate_limited", sceneNumber, batch });
+      revertOrdersToQueued(batch);
       scheduler.pending.unshift(...batch); // re-queue for the next debounce cycle
       return;
     }
