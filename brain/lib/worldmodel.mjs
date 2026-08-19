@@ -542,8 +542,29 @@ export async function buildWorldModel(call, opts = {}) {
 
 const SEVERITY_ORDER = { error: 0, warn: 1, info: 2 };
 const SEVERITY_LABEL = { error: "ERROR", warn: "WARN", info: "INFO" };
-const MAP_MAX_WIDTH = 40;
-const MAP_MAX_HEIGHT = 20;
+// Kept small deliberately (see module-top-of-file token-blowout note in
+// mcp-bridge.mjs / lib/tool-result-cap.mjs): a director calling
+// world_overview with detail:"full" several times in one scene pays for
+// this digest's FULL size again on every subsequent step of that turn, not
+// just once - so the whole thing (map + lists) must stay comfortably under
+// BRAIN_MAX_TOOL_RESULT_CHARS (default 3000), not merely "not enormous".
+const MAP_MAX_WIDTH = 24;
+const MAP_MAX_HEIGHT = 24;
+// Cap on how many entries the PLACES / flagged-NPCs / PROBLEMS lists show
+// before collapsing the rest into a "+N more" note. Deliberately small: the
+// digest has THREE such lists plus the map/legend, and every one of them
+// has to fit in the same ~3000-char budget together (BRAIN_MAX_TOOL_RESULT_
+// CHARS default) - 15 verbose entries per list would blow the combined
+// budget on its own even before free-text truncation is accounted for.
+const LIST_CAP = 5;
+// Cap on any free-text field (place name/kind/builtBy, npc name/role,
+// diagnostic message) so a single verbose record can't blow the whole
+// digest's budget by itself.
+const FREE_TEXT_MAX_CHARS = 40;
+// Legend entries ("A=Name") get an even tighter cap - they're purely a map
+// key, not the primary information (the PLACES list already carries the
+// full truncated name).
+const LEGEND_NAME_MAX_CHARS = 16;
 
 function fmtCoord(pos) {
   if (!pos) return "(unknown)";
@@ -552,6 +573,22 @@ function fmtCoord(pos) {
 
 function fmtFlags(flags) {
   return flags && flags.length ? ` [${flags.join(", ")}]` : "";
+}
+
+/** Truncates a free-text field to FREE_TEXT_MAX_CHARS (default), non-string
+ * values passed through unchanged (callers already guard most call sites,
+ * this is just cheap insurance). */
+function truncateText(s, max = FREE_TEXT_MAX_CHARS) {
+  if (typeof s !== "string") return s;
+  return s.length > max ? s.slice(0, max - 1) + "…" : s;
+}
+
+/** Splits `list` into the first `max` entries plus an omitted count, for
+ * every capped section of the digest (PLACES, flagged NPCs, PROBLEMS, the
+ * map legend). */
+function capList(list, max = LIST_CAP) {
+  if (!list || list.length <= max) return { shown: list || [], omitted: 0 };
+  return { shown: list.slice(0, max), omitted: list.length - max };
 }
 
 function placeSizeText(place) {
@@ -590,15 +627,20 @@ function drawAsciiMap(model) {
   }
 
   const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-  model.places.forEach((place, i) => {
+  // Legend text (not the grid cells themselves) is the part that can blow
+  // the digest's size budget with many places, so legend/letter-assignment
+  // only covers the first LIST_CAP places - see PLACES section below, which
+  // caps the same way for the same reason.
+  const { shown: legendPlaces, omitted: legendOmitted } = capList(model.places, LIST_CAP);
+  legendPlaces.forEach((place, i) => {
     const letter = ALPHABET[i % ALPHABET.length];
     const { cx, cz } = toCell(place.origin.x, place.origin.z);
     grid[cz][cx] = letter;
   });
 
-  const legend = model.places.map((p, i) => `${ALPHABET[i % ALPHABET.length]}=${p.name}`).join("  ");
+  const legend = legendPlaces.map((p, i) => `${ALPHABET[i % ALPHABET.length]}=${truncateText(p.name, LEGEND_NAME_MAX_CHARS)}`).join("  ");
   const mapLines = grid.map((row) => row.join(""));
-  return { mapLines, legend };
+  return { mapLines, legend, legendOmitted };
 }
 
 /**
@@ -648,23 +690,27 @@ export function formatWorldOverview(model, opts = {}) {
   if (!model.places.length) {
     lines.push("  (none recorded)");
   } else {
-    for (const p of model.places) {
+    const { shown: placesShown, omitted: placesOmitted } = capList(model.places, LIST_CAP);
+    for (const p of placesShown) {
       const size = placeSizeText(p);
       lines.push(
-        `  - ${p.name} (${p.kind}) @ ${fmtCoord(p.origin)}` +
+        `  - ${truncateText(p.name)} (${truncateText(p.kind)}) @ ${fmtCoord(p.origin)}` +
         (size ? ` size ${size}` : "") +
-        ` builtBy=${p.builtBy}${fmtFlags(p.flags)}`
+        ` builtBy=${truncateText(p.builtBy)}${fmtFlags(p.flags)}`
       );
     }
+    if (placesOmitted > 0) lines.push(`  ... +${placesOmitted} more place(s) omitted - narrow your query (filter/smaller area) to see them`);
   }
 
   lines.push("");
   lines.push(`NPCS: ${aliveCount} alive / ${deadCount} dead`);
   const flaggedNpcs = model.npcs.filter((n) => n.flags.length);
   if (flaggedNpcs.length) {
-    for (const n of flaggedNpcs) {
-      lines.push(`  - ${n.name} (${n.role}) @ ${fmtCoord(n.pos)} ${n.alive ? "alive" : "dead"}${fmtFlags(n.flags)}`);
+    const { shown: npcsShown, omitted: npcsOmitted } = capList(flaggedNpcs, LIST_CAP);
+    for (const n of npcsShown) {
+      lines.push(`  - ${truncateText(n.name)} (${truncateText(n.role)}) @ ${fmtCoord(n.pos)} ${n.alive ? "alive" : "dead"}${fmtFlags(n.flags)}`);
     }
+    if (npcsOmitted > 0) lines.push(`  ... +${npcsOmitted} more flagged NPC(s) omitted - narrow your query to see them`);
   } else {
     lines.push("  (no flagged NPCs)");
   }
@@ -673,9 +719,10 @@ export function formatWorldOverview(model, opts = {}) {
     lines.push("");
     lines.push("MAP (top-down, x -> right, z -> down; + = spawn)");
     if (model.terrain || model.places.length) {
-      const { mapLines, legend } = drawAsciiMap(model);
+      const { mapLines, legend, legendOmitted } = drawAsciiMap(model);
       lines.push(...mapLines);
       if (legend) lines.push(legend);
+      if (legendOmitted > 0) lines.push(`  ... +${legendOmitted} more place(s) not shown in legend`);
     } else {
       lines.push("  (nothing to map yet)");
     }
@@ -689,11 +736,13 @@ export function formatWorldOverview(model, opts = {}) {
     const sorted = model.diagnostics.slice().sort(
       (a, b) => (SEVERITY_ORDER[a.severity] ?? 3) - (SEVERITY_ORDER[b.severity] ?? 3)
     );
-    for (const d of sorted) {
+    const { shown: diagsShown, omitted: diagsOmitted } = capList(sorted, LIST_CAP);
+    for (const d of diagsShown) {
       const label = SEVERITY_LABEL[d.severity] || String(d.severity || "?").toUpperCase();
       const at = d.at ? ` at ${fmtCoord(d.at)}` : "";
-      lines.push(`  [${label}] ${d.kind}${d.subject ? ` (${d.subject})` : ""}: ${d.message}${at}`);
+      lines.push(`  [${label}] ${d.kind}${d.subject ? ` (${d.subject})` : ""}: ${truncateText(d.message)}${at}`);
     }
+    if (diagsOmitted > 0) lines.push(`  ... +${diagsOmitted} more problem(s) omitted (worst-first order - fix these first, then call world_overview again)`);
   }
 
   return lines.join("\n");

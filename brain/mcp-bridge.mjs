@@ -18,9 +18,18 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { buildWorldModel, formatWorldOverview } from "./lib/worldmodel.mjs";
+import { capToolResultText, resolveMaxToolResultChars } from "./lib/tool-result-cap.mjs";
 
 const URL_ = process.env.MCALIVE2_URL || "ws://127.0.0.1:8765";
 const TOKEN = process.env.MCALIVE2_TOKEN || "change-me";
+// See lib/tool-result-cap.mjs - this is the single biggest lever against
+// the token blowout this file's tool results feed straight into an agent
+// turn that re-sends its whole context on every subsequent step. Read here
+// (not via lib/config.mjs) because this process is spawned standalone by
+// the Agent SDK for each director/actor turn - lib/director-turn.mjs and
+// lib/actor-turn.mjs explicitly forward BRAIN_MAX_TOOL_RESULT_CHARS into
+// this process's env rather than relying on env inheritance through the SDK.
+const MAX_TOOL_RESULT_CHARS = resolveMaxToolResultChars(process.env);
 
 // ---------------- WebSocket bridge client ----------------
 
@@ -95,8 +104,12 @@ function tool(name, description, shape, handler) {
   server.registerTool(name, { description, inputSchema: shape }, async (args) => {
     try {
       const data = await handler(args ?? {});
-      return { content: [{ type: "text", text: JSON.stringify(data ?? { ok: true }, null, 1) }] };
+      const text = capToolResultText(data ?? { ok: true }, { maxChars: MAX_TOOL_RESULT_CHARS });
+      return { content: [{ type: "text", text }] };
     } catch (e) {
+      // Errors are exempt from the cap (see lib/tool-result-cap.mjs) - the
+      // director/actor needs the FULL error text (e.g. gadget_define's
+      // javac diagnostics) to iterate.
       return { content: [{ type: "text", text: "ERROR: " + e.message }], isError: true };
     }
   });
@@ -288,7 +301,12 @@ server.registerTool("world_overview", {
       area: (args ?? {}).area,
       npcPositions,
     });
-    return { content: [{ type: "text", text: formatWorldOverview(model, { detail: (args ?? {}).detail }) }] };
+    // formatWorldOverview() is designed to already stay comfortably under
+    // the cap on its own (see lib/worldmodel.mjs's LIST_CAP/FREE_TEXT_MAX/
+    // MAP_MAX_WIDTH/MAP_MAX_HEIGHT) - this is a defense-in-depth safety net,
+    // not the primary compaction mechanism.
+    const text = capToolResultText(formatWorldOverview(model, { detail: (args ?? {}).detail }), { maxChars: MAX_TOOL_RESULT_CHARS });
+    return { content: [{ type: "text", text }] };
   } catch (e) {
     return { content: [{ type: "text", text: "ERROR: " + e.message }], isError: true };
   }

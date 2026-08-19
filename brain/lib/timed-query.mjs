@@ -36,18 +36,32 @@
  * @param {AbortController} params.abortController
  * @param {number} params.timeoutSec
  * @param {(msg: any) => void} params.onMessage - called, in order, for every
- *   streamed SDKMessage until either the stream ends or the timeout fires.
- * @returns {Promise<{ timedOut: boolean, elapsedMs: number }>}
+ *   streamed SDKMessage until either the stream ends, the timeout fires, or
+ *   checkAbort (below) signals an early abort.
+ * @param {() => boolean} [params.checkAbort] - called after every onMessage;
+ *   returning true ends the turn immediately via the SAME abort+close path
+ *   as a timeout (see lib/director-turn.mjs's per-turn token ceiling,
+ *   BRAIN_MAX_TOKENS_PER_TURN/BRAIN_MAX_TOKENS_PER_ORDER), but is reported
+ *   back as `tokenCeilingHit` rather than `timedOut` so callers can journal
+ *   a distinct reason.
+ * @returns {Promise<{ timedOut: boolean, tokenCeilingHit: boolean, elapsedMs: number }>}
  */
-export async function consumeWithTimeout({ startQuery, abortController, timeoutSec, onMessage }) {
+export async function consumeWithTimeout({ startQuery, abortController, timeoutSec, onMessage, checkAbort }) {
   const q = startQuery();
   const timeoutSecNum = Number(timeoutSec);
   const timeoutMs = Math.max(1, (timeoutSecNum > 0 ? timeoutSecNum : 300) * 1000); // floor is 1ms, not 1s - fractional-second timeouts (tests) must work
   const startedAt = Date.now();
   let timedOut = false;
+  let tokenCeilingHit = false;
 
   const consume = (async () => {
-    for await (const msg of q) onMessage(msg);
+    for await (const msg of q) {
+      onMessage(msg);
+      if (checkAbort && checkAbort()) {
+        tokenCeilingHit = true;
+        return; // for-await's implicit iterator.return() releases q here
+      }
+    }
   })();
 
   // Deliberately NOT unref'd: this is a short, bounded wait the caller
@@ -83,11 +97,29 @@ export async function consumeWithTimeout({ startQuery, abortController, timeoutS
     // never settle at all - never await it, and never let its eventual
     // rejection surface as an unhandled rejection.
     consume.catch(() => {});
-    return { timedOut: true, elapsedMs: Date.now() - startedAt };
+    return { timedOut: true, tokenCeilingHit: false, elapsedMs: Date.now() - startedAt };
   }
 
   // consume won the race - if it threw a real (non-timeout) error, this
   // rethrows it to the caller exactly as an unguarded `for await` would.
   await consume;
-  return { timedOut: false, elapsedMs: Date.now() - startedAt };
+
+  if (tokenCeilingHit) {
+    // Same belt-and-suspenders abort+close as the timeout path above: the
+    // for-await loop already released ITS iterator reference by returning,
+    // but the underlying CLI subprocess (and any server-side work it
+    // triggered) needs an explicit abort()/close() to actually stop.
+    try {
+      abortController.abort();
+    } catch {
+      /* best effort */
+    }
+    try {
+      if (typeof q.close === "function") q.close();
+    } catch {
+      /* best effort */
+    }
+  }
+
+  return { timedOut: false, tokenCeilingHit, elapsedMs: Date.now() - startedAt };
 }

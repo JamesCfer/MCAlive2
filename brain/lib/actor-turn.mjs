@@ -115,6 +115,10 @@ export async function runActorTurn({ npc, facts, player, trigger, message, trans
         env: {
           MCALIVE2_URL: config.mcalive2Url,
           MCALIVE2_TOKEN: config.mcalive2Token,
+          // mcp-bridge.mjs is spawned fresh per turn - forward this
+          // explicitly rather than relying on env inheritance through the
+          // Agent SDK (see lib/config.mjs's maxToolResultChars comment).
+          BRAIN_MAX_TOOL_RESULT_CHARS: String(config.maxToolResultChars),
         },
       },
     },

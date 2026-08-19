@@ -191,8 +191,21 @@ export function formatScene(batch) {
   return lines.join("\n");
 }
 
-export function buildPrompt(batch) {
-  return `STANDING ORDERS\n${STANDING_ORDERS}\n\nSCENE\n${formatScene(batch)}`;
+/** One line telling the director its actual budget for THIS turn, so it can
+ * self-ration instead of reading tools() as free (item 4 of the token-
+ * blowout fix: the daily budget only ever gated the START of a turn - this
+ * is the closest a text-only, single-turn-scoped model can get to "know
+ * your limits" mid-turn). `remainingTokens`/`maxTokensPerTurn` are omitted
+ * (not asserted to 0) when not supplied, so tests/dry-runs that don't wire
+ * a live UsageTracker through still get a sensible line. */
+function formatBudgetLine({ remainingTokens, maxTokensPerTurn } = {}) {
+  const remaining = Number.isFinite(remainingTokens) ? remainingTokens.toLocaleString("en-US") : "unknown";
+  const ceiling = Number.isFinite(maxTokensPerTurn) ? maxTokensPerTurn.toLocaleString("en-US") : "unknown";
+  return `BUDGET: ~${remaining} tokens remain in today's budget; this turn is hard-capped at ${ceiling} tokens and will be aborted if it exceeds that - be economical: prefer world_overview's "summary" detail over "full", query the ledger with filters instead of dumping whole collections, and avoid re-reading data you already have in this conversation.`;
+}
+
+export function buildPrompt(batch, budget = {}) {
+  return `STANDING ORDERS\n${STANDING_ORDERS}\n\n${formatBudgetLine(budget)}\n\nSCENE\n${formatScene(batch)}`;
 }
 
 /**
@@ -225,10 +238,62 @@ export function timeoutSecFor(batch, config) {
   return isOrderScene ? config.orderTimeoutSec : config.turnTimeoutSec;
 }
 
-export async function runDirectorTurn({ batch, systemPrompt, config, sceneNumber, queryFn }) {
-  const prompt = buildPrompt(batch);
+/** ...and a matching hard TOKEN ceiling (as opposed to the wall-clock and
+ * step ceilings above): an operator-order scene legitimately needs to
+ * spend far more tokens than an ordinary reactive scene to carry a big
+ * set-piece to completion, so it gets the higher BRAIN_MAX_TOKENS_PER_ORDER
+ * ceiling instead of the ordinary BRAIN_MAX_TOKENS_PER_TURN. This is what
+ * actually stops a runaway scene mid-flight (see runDirectorTurn below) -
+ * the daily UsageTracker budget (index.mjs) only ever gated the START of a
+ * turn, so once a scene was running nothing previously stopped it from
+ * blowing through the whole day's budget in one go. */
+export function maxTokensFor(batch, config) {
+  const isOrderScene = batch.some((e) => e.event === "operator_order");
+  return isOrderScene ? config.maxTokensPerOrder : config.maxTokensPerTurn;
+}
+
+/** Rough per-message size (characters) contributed to the model's
+ * accumulated context by one streamed SDKMessage - assistant content
+ * blocks (text/thinking/tool_use) AND the "user" messages the CLI
+ * synthesizes to carry tool_result blocks back to the model. Used to
+ * ESTIMATE cumulative token usage while a turn streams (divided by 4 below
+ * - a standard, deliberately conservative chars-per-token approximation).
+ *
+ * Why an estimate at all: verified against the installed
+ * @anthropic-ai/claude-agent-sdk's sdk.d.ts - SDKAssistantMessage's own doc
+ * comment states "message.usage is not final - the turn's stop reason and
+ * total usage arrive on the result message" (sdk.d.ts ~line 3044), and
+ * SDKResultMessage (`type: 'result'`) is the ONLY message type documented
+ * as carrying final usage. Since a result message never arrives for an
+ * aborted turn (that's the whole point of aborting it), there is no exact
+ * token count available to check against the ceiling WHILE streaming -
+ * only after the fact, which is too late. This estimate is intentionally
+ * conservative (character count, not real tokenization) so it triggers
+ * safely early rather than late. */
+function estimateContextChars(msg) {
+  if (msg.type === "assistant" && msg.message && Array.isArray(msg.message.content)) {
+    let n = 0;
+    for (const block of msg.message.content) n += JSON.stringify(block).length;
+    return n;
+  }
+  if (msg.type === "user" && msg.message && Array.isArray(msg.message.content)) {
+    let n = 0;
+    for (const block of msg.message.content) {
+      if (block && block.type === "tool_result") n += JSON.stringify(block).length;
+    }
+    return n;
+  }
+  return 0;
+}
+
+export async function runDirectorTurn({ batch, systemPrompt, config, sceneNumber, queryFn, remainingBudget }) {
   const maxTurns = maxTurnsFor(batch, config);
   const timeoutSec = timeoutSecFor(batch, config);
+  const maxTokens = maxTokensFor(batch, config);
+  const prompt = buildPrompt(batch, {
+    remainingTokens: Number.isFinite(remainingBudget) ? remainingBudget : config.dailyTokenBudget,
+    maxTokensPerTurn: maxTokens,
+  });
 
   if (config.dryRun) {
     log.info("dry_run_director_turn", {
@@ -258,6 +323,10 @@ export async function runDirectorTurn({ batch, systemPrompt, config, sceneNumber
         env: {
           MCALIVE2_URL: config.mcalive2Url,
           MCALIVE2_TOKEN: config.mcalive2Token,
+          // mcp-bridge.mjs is spawned fresh per turn - forward this
+          // explicitly rather than relying on env inheritance through the
+          // Agent SDK (see lib/config.mjs's maxToolResultChars comment).
+          BRAIN_MAX_TOOL_RESULT_CHARS: String(config.maxToolResultChars),
         },
       },
     },
@@ -286,11 +355,19 @@ export async function runDirectorTurn({ batch, systemPrompt, config, sceneNumber
   // subsequent event - forever.
   const abortController = new AbortController();
   options.abortController = abortController;
-  const { timedOut, elapsedMs } = await consumeWithTimeout({
+  // Running estimate of this turn's accumulated context size (see
+  // estimateContextChars() above) - checked after every streamed message
+  // against maxTokens via checkAbort, so a runaway turn is stopped THE
+  // MOMENT it crosses the ceiling rather than only being noticed after the
+  // fact (msg.usage is never final until the terminal "result" message,
+  // which an aborted turn never receives).
+  let estimatedChars = 0;
+  const { timedOut, tokenCeilingHit, elapsedMs } = await consumeWithTimeout({
     startQuery: () => runQuery({ prompt, options }),
     abortController,
     timeoutSec,
     onMessage: (msg) => {
+      estimatedChars += estimateContextChars(msg);
       if (msg.type === "assistant" && msg.message && Array.isArray(msg.message.content)) {
         for (const block of msg.message.content) {
           if (block.type === "tool_use") {
@@ -306,11 +383,16 @@ export async function runDirectorTurn({ batch, systemPrompt, config, sceneNumber
         resultText = msg.subtype === "success" ? msg.result : `error: ${msg.subtype}`;
       }
     },
+    checkAbort: () => Math.ceil(estimatedChars / 4) > maxTokens,
   });
 
   if (timedOut) {
     resultText = `timed out after ${Math.round(elapsedMs / 1000)}s - aborted`;
     log.warn("director_turn_timed_out", { sceneNumber, elapsedMs, timeoutSec });
+  } else if (tokenCeilingHit) {
+    const estimatedTokens = Math.ceil(estimatedChars / 4);
+    resultText = `hit the per-turn token ceiling (${maxTokens}) - aborted`;
+    log.warn("director_turn_token_ceiling_hit", { sceneNumber, maxTokens, estimatedTokens, elapsedMs });
   }
 
   const inputTokens = (usage.input_tokens || 0) + (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0);
@@ -322,15 +404,31 @@ export async function runDirectorTurn({ batch, systemPrompt, config, sceneNumber
     totalTokens: inputTokens + outputTokens,
     result: resultText,
     timedOut,
+    tokenCeilingHit,
   });
   // The required final summary paragraph is the audit trail for this scene
   // (DESIGN.md / adjudication procedure): log it as its own info line so it
   // is easy to grep/tail independent of the raw turn-complete record above.
   log.info("director_scene_summary", { sceneNumber, summary: resultText });
   journalScene({ config, sceneNumber, batch, toolCalls, summary: resultText, dryRun: false });
-  // A timed-out turn still completes normally from the scheduler's point of
-  // view (see lib/director-scheduler.mjs and index.mjs's runScene) - it
-  // never throws, so the "a scene is running" flag always clears and the
-  // next debounced batch is free to run.
-  return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, dryRun: false, timedOut };
+  // A timed-out (or token-ceiling-hit) turn still completes normally from
+  // the scheduler's point of view (see lib/director-scheduler.mjs and
+  // index.mjs's runScene) - it never throws, so the "a scene is running"
+  // flag always clears and the next debounced batch is free to run.
+  //
+  // index.mjs's runScene decides an operator order's post-scene status
+  // ("done" vs. re-queued "queued") off `timedOut` alone - a token-ceiling
+  // abort must revert an order to "queued" exactly like a timeout does, so
+  // it is folded into the same field here rather than requiring index.mjs
+  // to also check tokenCeilingHit. tokenCeilingHit is still returned
+  // separately for callers (tests, richer logging) that want to
+  // distinguish WHY the turn was aborted.
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens: inputTokens + outputTokens,
+    dryRun: false,
+    timedOut: timedOut || tokenCeilingHit,
+    tokenCeilingHit,
+  };
 }

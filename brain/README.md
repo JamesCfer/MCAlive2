@@ -219,6 +219,8 @@ locked down:
 | Daily token budget (UTC reset, `brain/state/usage.json`) | 500,000 tokens/day | `BRAIN_DAILY_TOKEN_BUDGET` |
 | Turn rate limit (director scenes + actor turns combined) | 10/minute | `BRAIN_MAX_TURNS_PER_MIN` |
 | Turn timeout (director scene or actor turn) | 300 seconds | `BRAIN_TURN_TIMEOUT_SEC` |
+| Per-turn token ceiling (aborts mid-turn, not just at the start) | 120,000 tokens (director/actor turn), 600,000 tokens (operator-order scene) | `BRAIN_MAX_TOKENS_PER_TURN`, `BRAIN_MAX_TOKENS_PER_ORDER` |
+| Tool-result size cap (every tool result returned to the model) | 3,000 characters | `BRAIN_MAX_TOOL_RESULT_CHARS` |
 | Self-update idle-wait cap before restarting anyway | 600 seconds | `BRAIN_UPDATE_IDLE_WAIT_SEC` |
 | Kill switch | off (service runs) | `BRAIN_ENABLED=0`, or create the file `brain/DISABLED` |
 | Director model | `claude-sonnet-5` | `BRAIN_DIRECTOR_MODEL` |
@@ -265,6 +267,80 @@ behind a turn that (with the timeout above) is now presumed wedged.
 `set_time` and all narration tools (`broadcast`/titles/action bar) are
 **absent by design**, not by a deny-list: they simply do not exist as
 plugin bridge commands, so `mcp-bridge.mjs` has nothing to forward them to.
+
+### Token-cost guardrails (tool-result cap + per-turn token ceiling)
+
+A production incident once burned 15.3 MILLION tokens in a single
+operator-order scene against a 5,000,000/day budget - **3x the entire daily
+budget in one scene**. Three separate factors compounded:
+
+1. Tool results were returned to the model at full size - `world_overview`
+   with `detail:"full"` emitted the whole terrain grid plus every place/NPC/
+   diagnostic as text (the director called it 4 times in that one scene),
+   `scan_area` could return up to 256 per-column entries, and `ledger_query`
+   returned every record with full role/personality prose.
+2. An Agent SDK turn re-sends its WHOLE accumulated context on every step -
+   so one oversized early tool result got paid for again on all ~80
+   subsequent steps of that scene, not just once. This is the real
+   multiplier: a single 50,000-token tool result costs ~4,000,000 tokens
+   over an 80-step order scene, not 50,000.
+3. `dailyTokenBudget` (above) only ever gated the START of a turn. Once a
+   scene was running, nothing stopped it - it kept going for the scene's
+   full `maxTurns`/`timeoutSec` allowance regardless of how many tokens it
+   had already burned.
+
+Four fixes, matching the three factors above:
+
+- **`BRAIN_MAX_TOOL_RESULT_CHARS`** (default `3000`) - every tool result
+  `mcp-bridge.mjs` returns to the model is capped at this many characters
+  before it goes out over stdio (`lib/tool-result-cap.mjs`). Truncation is
+  intelligent, not a blind character chop: for an object/array result, the
+  largest array-valued field (`records`, `columns`, `npcs`, ...) is shrunk
+  to its first few entries with a clear `"... N more item(s) omitted -
+  narrow your query (filter/smaller area) to see them"` marker, falling
+  back to a hard string truncation (same kind of marker) only if shrinking
+  arrays alone doesn't get under budget. **`isError` results are NEVER
+  truncated** - the director/actor needs the FULL compiler/validation error
+  text to iterate (e.g. `gadget_define`'s javac diagnostics). Forwarded
+  explicitly into `mcp-bridge.mjs`'s spawned-process env by
+  `director-turn.mjs`/`actor-turn.mjs` (that process is spawned fresh per
+  turn by the Agent SDK, so it can't rely on env inheritance).
+- **`formatWorldOverview` is compact by construction** (`lib/worldmodel.mjs`):
+  the `detail:"full"` ASCII map is downsampled to at most 24 characters wide
+  and 24 tall; the PLACES list, the flagged-NPCs list, and the PROBLEMS list
+  are each capped at a handful of entries with a `"+N more"` note; every
+  free-text field (place name/kind/builtBy, NPC name/role, diagnostic
+  message) is truncated to ~40-60 characters. A synthetic model with 200
+  places/200 NPCs/200 diagnostics and a 64x64 terrain grid still renders
+  comfortably under `BRAIN_MAX_TOOL_RESULT_CHARS` (see `test/smoke.mjs`
+  section "world_overview compaction").
+- **`BRAIN_MAX_TOKENS_PER_TURN`** (default `120000`) / **`BRAIN_MAX_TOKENS_PER_ORDER`**
+  (default `600000`) - a hard ceiling that actually ABORTS a turn while it
+  is still streaming, mirroring the `maxDirectorSteps`/`orderMaxSteps` and
+  `turnTimeoutSec`/`orderTimeoutSec` pattern above (`maxTokensFor()` in
+  `lib/director-turn.mjs`). Because the Agent SDK's streamed
+  `SDKAssistantMessage` frames carry non-final usage (`message.usage` -
+  final usage only arrives on the terminal `result` message, which an
+  aborted turn never receives - verified against the installed
+  `@anthropic-ai/claude-agent-sdk`'s `sdk.d.ts`), actual token counts aren't
+  available while streaming. Usage is instead ESTIMATED by accumulating the
+  character length of streamed assistant content and tool-result blocks and
+  dividing by 4 (a standard, deliberately conservative chars-per-token
+  approximation), checked against the ceiling after every streamed message.
+  The moment it's exceeded, the query is aborted via the same
+  `AbortController` + `Query#close()` mechanism `lib/timed-query.mjs`
+  already uses for `turnTimeoutSec` timeouts (`consumeWithTimeout`'s new
+  `checkAbort` parameter). On abort: logged at WARN
+  (`director_turn_token_ceiling_hit`), journaled as `Decision: hit the
+  per-turn token ceiling (N) - aborted`, the scheduler is released exactly
+  like a timeout, and an operator order reverts to `"queued"` (picked back
+  up on the next restart or requeue) exactly like a timed-out scene.
+- **The director prompt states its own budget.** Every director prompt now
+  includes a `BUDGET:` line naming the remaining daily token budget and
+  this turn's hard token ceiling, with an explicit instruction to be
+  economical: prefer `world_overview`'s `"summary"` detail over `"full"`,
+  query the ledger with filters instead of dumping whole collections, and
+  avoid re-reading data already present in the conversation.
 
 ## Lore (`brain/lore/`)
 
@@ -700,6 +776,9 @@ It exits non-zero if any assertion fails.
 | `BRAIN_DISABLED_FILE` | `brain/DISABLED` | Presence of this file is the kill switch |
 | `BRAIN_MCP_SERVER_PATH` | `brain/mcp-bridge.mjs` | Path to the stdio MCP server the Agent SDK spawns for game/ledger tools |
 | `BRAIN_TURN_TIMEOUT_SEC` | `300` | Hard wall-clock cap on a single director scene or actor turn's Agent SDK call before it is aborted and treated as a completed (timed-out) turn |
+| `BRAIN_MAX_TOOL_RESULT_CHARS` | `3000` | Cap on a single tool result's serialized size returned to the model (`lib/tool-result-cap.mjs`); intelligently truncated (array fields shrunk with an omitted-count marker), never applied to `isError` results (see "Token-cost guardrails" above) |
+| `BRAIN_MAX_TOKENS_PER_TURN` | `120000` | Hard ceiling on ESTIMATED cumulative tokens for a single director/actor turn - the query is aborted mid-stream the moment this is exceeded (see "Token-cost guardrails" above) |
+| `BRAIN_MAX_TOKENS_PER_ORDER` | `600000` | Same as `BRAIN_MAX_TOKENS_PER_TURN`, but for a director scene triggered by an `operator_order` event (mirrors `BRAIN_ORDER_MAX_STEPS` below) |
 | `BRAIN_MAX_DIRECTOR_STEPS` | `12` | `maxTurns` passed to the Agent SDK per director scene (tool-call steps within one turn) |
 | `BRAIN_ORDER_MAX_STEPS` | `80` | `maxTurns` for a director scene triggered by an `operator_order` event, instead of `BRAIN_MAX_DIRECTOR_STEPS` (see Lore Console above) |
 | `BRAIN_MAX_ACTOR_STEPS` | `6` | `maxTurns` passed to the Agent SDK per actor turn |
@@ -749,6 +828,10 @@ It exits non-zero if any assertion fails.
   `BRAIN_DRY_RUN`).
 - `lib/usage-tracker.mjs` — daily token budget, persisted to
   `brain/state/usage.json`; `reset()` backs `POST /budget/reset`.
+- `lib/tool-result-cap.mjs` — caps a tool result's serialized size
+  (`BRAIN_MAX_TOOL_RESULT_CHARS`), shrinking array-valued fields with an
+  omitted-count marker before falling back to a hard string truncation;
+  never truncates `isError` results. Used by `mcp-bridge.mjs`.
 - `lib/logger.mjs` — the console logger: human-readable narration by
   default (`formatHumanLine`, unit-tested directly), full JSON lines under
   `BRAIN_LOG_JSON=1`; also owns the per-process scene counter

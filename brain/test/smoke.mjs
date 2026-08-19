@@ -44,14 +44,15 @@ import { fileURLToPath } from "node:url";
 import { namespacedTool, MCP_SERVER_NAME, ALL_TOOLS, ACTOR_TOOLS, actorDisallowedTools, DIRECTOR_WAKE_EVENTS, loadConfig } from "../lib/config.mjs";
 import { parseActorReport } from "../lib/actor-report.mjs";
 import { ActorMemory } from "../lib/actor-memory.mjs";
-import { formatHumanLine, compactArgs } from "../lib/logger.mjs";
+import { formatHumanLine, compactArgs, log } from "../lib/logger.mjs";
 import { journalScene } from "../lib/decisions-journal.mjs";
 import { SelfUpdater } from "../lib/self-update.mjs";
-import { runDirectorTurn, maxTurnsFor } from "../lib/director-turn.mjs";
+import { runDirectorTurn, maxTurnsFor, maxTokensFor } from "../lib/director-turn.mjs";
 import { runActorTurn } from "../lib/actor-turn.mjs";
 import { DirectorScheduler } from "../lib/director-scheduler.mjs";
 import { buildWorldModel, formatWorldOverview } from "../lib/worldmodel.mjs";
 import { PositionCache } from "../lib/position-cache.mjs";
+import { capToolResultText, resolveMaxToolResultChars } from "../lib/tool-result-cap.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BRAIN_DIR = path.resolve(__dirname, "..");
@@ -929,6 +930,219 @@ async function main() {
     assert(result.reportText === null, "a timed-out actor turn's reportText is null (never fed back as something the NPC said)");
     const actorJournal = fs.readFileSync(path.join(actorTimeoutStateDir, "decisions.log"), "utf8");
     assert(actorJournal.includes("Decision: timed out after"), "the timed-out actor turn is journaled the same way as a timed-out scene");
+  }
+
+  console.log("\n1l. Tool-result cap: large array results are truncated with an omitted-count marker and stay under the cap; isError results are NEVER truncated");
+  {
+    const bigRecords = Array.from({ length: 300 }, (_, i) => ({
+      id: `npc-${i}`,
+      name: `NPC ${i}`,
+      role: "a fairly verbose role description repeated to pad out the size of this record for the test",
+    }));
+    const bigResult = { records: bigRecords };
+    const capped = capToolResultText(bigResult, { maxChars: 3000 });
+    assert(capped.length <= 3000, `a 300-record result is truncated to fit under the 3000-char cap (got ${capped.length})`);
+    assert(/more item\(s\) omitted/.test(capped), "the truncated result carries a clear omitted-count marker");
+    const parsedCapped = JSON.parse(capped);
+    assert(Array.isArray(parsedCapped.records) && parsedCapped.records.length > 0 && parsedCapped.records.length < 300, "the truncated result keeps a real, non-empty PREFIX of the original records (not zero, not all)");
+    assert(parsedCapped.records[0].id === "npc-0", "the truncated result's kept records are the FIRST ones, not a random subset");
+
+    const smallResult = { records: [{ id: "a" }, { id: "b" }] };
+    const uncapped = capToolResultText(smallResult, { maxChars: 3000 });
+    assert(JSON.parse(uncapped).records.length === 2, "a result already under the cap passes through with nothing omitted");
+
+    // isError results must NEVER be truncated, however large - the
+    // director/actor needs the FULL compiler/validation error text to
+    // iterate (e.g. gadget_define's javac diagnostics).
+    const bigErrorText = "ERROR: " + "javac: cannot find symbol\n".repeat(500);
+    assert(bigErrorText.length > 3000, "sanity: the synthetic error text is itself bigger than the cap");
+    const errorResult = capToolResultText(bigErrorText, { maxChars: 3000, isError: true });
+    assert(errorResult === bigErrorText, "isError:true bypasses truncation entirely, however large the text");
+
+    // A top-level array (not wrapped in an object) is also truncated.
+    const bigArray = Array.from({ length: 500 }, (_, i) => ({ x: i, y: 64, z: i, material: "grass_block" }));
+    const cappedArray = capToolResultText(bigArray, { maxChars: 3000 });
+    assert(cappedArray.length <= 3000, `a bare 500-entry array result is truncated to fit under the cap (got ${cappedArray.length})`);
+    assert(/more item\(s\) omitted/.test(cappedArray), "the truncated bare-array result also carries the omitted-count marker");
+
+    // Default cap resolution reads BRAIN_MAX_TOOL_RESULT_CHARS, falling
+    // back to 3000.
+    assert(resolveMaxToolResultChars({}) === 3000, "resolveMaxToolResultChars defaults to 3000 with no env var set");
+    assert(resolveMaxToolResultChars({ BRAIN_MAX_TOOL_RESULT_CHARS: "500" }) === 500, "resolveMaxToolResultChars honors BRAIN_MAX_TOOL_RESULT_CHARS");
+  }
+
+  console.log("\n1m. world_overview compaction: a large synthetic model (200 places/200 npcs/200 diagnostics, 64x64 terrain) stays comfortably under the tool-result cap, and the ASCII map is at most 24 wide");
+  {
+    const mkPlaces = (n) => Array.from({ length: n }, (_, i) => ({
+      id: `place-${i}`,
+      name: `The Grand Hall of a Very Long Settlement Name Number ${i} That Keeps Going`,
+      kind: "settlement",
+      origin: { x: i, y: 64, z: i },
+      bounds: { x1: i, y1: 64, z1: i, x2: i + 5, y2: 70, z2: i + 5 },
+      builtBy: "ai",
+      flags: i % 3 === 0 ? ["floating"] : [],
+    }));
+    const mkNpcs = (n) => Array.from({ length: n }, (_, i) => ({
+      id: `npc-${i}`,
+      name: `NPC Number ${i}`,
+      role: "a fairly verbose role description describing this character's backstory and motivations at some length",
+      pos: { x: i, y: 64, z: i },
+      alive: i % 5 !== 0,
+      flags: i % 2 === 0 ? ["off-ground"] : [],
+    }));
+    const mkDiagnostics = (n) => Array.from({ length: n }, (_, i) => ({
+      severity: i % 3 === 0 ? "error" : "warn",
+      kind: "floating",
+      subject: `place-${i}`,
+      message: `place-${i} sits well above the scanned ground and this diagnostic message runs on for a while to simulate real text`,
+      at: { x: i, y: 90, z: i },
+    }));
+    const mkTerrain = (size) => {
+      const heights = [];
+      for (let x = 0; x < size; x++) {
+        const row = [];
+        for (let z = 0; z < size; z++) row.push(64 + ((x + z) % 10));
+        heights.push(row);
+      }
+      return { origin: { x: 0, z: 0 }, step: 1, cols: size, rows: size, heights, materials: null };
+    };
+
+    const bigModel = {
+      generatedAt: "2026-01-01T00:00:00.000Z",
+      bounds: { minX: 0, minZ: 0, maxX: 200, maxZ: 200, minY: 60, maxY: 100 },
+      places: mkPlaces(200),
+      npcs: mkNpcs(200),
+      terrain: mkTerrain(64),
+      diagnostics: mkDiagnostics(200),
+      spawn: { x: 0, y: 64, z: 0 },
+      players: [],
+      notes: [],
+      loadedChunks: 500,
+    };
+
+    const fullDigest = formatWorldOverview(bigModel, { detail: "full" });
+    const cfgForCap = loadConfig({});
+    assert(fullDigest.length < cfgForCap.maxToolResultChars, `formatWorldOverview's detail:"full" digest for 200 places/200 npcs/200 diagnostics stays comfortably under the ${cfgForCap.maxToolResultChars}-char cap (got ${fullDigest.length})`);
+    assert(fullDigest.length < cfgForCap.maxToolResultChars * 0.95, `the digest has real margin, not just barely under the cap (got ${fullDigest.length} vs. cap ${cfgForCap.maxToolResultChars})`);
+
+    const mapLines = fullDigest.split("\n").filter((l) => /^[.+A-Z]+$/.test(l));
+    assert(mapLines.length > 0, "the full-detail digest includes ASCII map rows");
+    assert(mapLines.every((l) => l.length <= 24), `every ASCII map row is at most 24 characters wide (widths: ${mapLines.map((l) => l.length).join(",")})`);
+    assert(mapLines.length <= 24, `the ASCII map is at most 24 rows tall (got ${mapLines.length})`);
+
+    assert(/more place\(s\) omitted/.test(fullDigest), "the PLACES section notes omitted places rather than listing all 200");
+    assert(/more flagged NPC\(s\) omitted/.test(fullDigest), "the flagged-NPCs section notes omitted NPCs rather than listing all of them");
+    assert(/more problem\(s\) omitted/.test(fullDigest), "the PROBLEMS section notes omitted diagnostics rather than listing all 200");
+
+    // Also passes through the mcp-bridge.mjs-side safety-net cap unchanged
+    // (it's already under budget, so capToolResultText is a no-op here).
+    const throughCap = capToolResultText(fullDigest, { maxChars: cfgForCap.maxToolResultChars });
+    assert(throughCap === fullDigest, "a digest that's already under the cap passes through capToolResultText unchanged");
+  }
+
+  console.log("\n1n. maxTokensFor(): the order ceiling for operator_order scenes, the normal per-turn ceiling otherwise");
+  {
+    const cfgTokens = loadConfig({});
+    assert(cfgTokens.maxTokensPerTurn === 120000, `BRAIN_MAX_TOKENS_PER_TURN defaults to 120000 (got ${cfgTokens.maxTokensPerTurn})`);
+    assert(cfgTokens.maxTokensPerOrder === 600000, `BRAIN_MAX_TOKENS_PER_ORDER defaults to 600000 (got ${cfgTokens.maxTokensPerOrder})`);
+    const normalBatchTok = [{ event: "player_join", data: {}, at: new Date().toISOString() }];
+    const orderBatchTok = [{ event: "operator_order", data: { text: "build a lighthouse" }, at: new Date().toISOString() }];
+    assert(maxTokensFor(normalBatchTok, cfgTokens) === cfgTokens.maxTokensPerTurn, "a normal scene's token ceiling is the regular maxTokensPerTurn");
+    assert(maxTokensFor(orderBatchTok, cfgTokens) === cfgTokens.maxTokensPerOrder, "an operator_order scene's token ceiling is the higher maxTokensPerOrder");
+    process.env.BRAIN_MAX_TOKENS_PER_TURN = "4242";
+    assert(loadConfig().maxTokensPerTurn === 4242, "BRAIN_MAX_TOKENS_PER_TURN is honored when set");
+    delete process.env.BRAIN_MAX_TOKENS_PER_TURN;
+  }
+
+  console.log("\n1o. Per-turn token ceiling: a fake streamed director turn whose accumulated tool-result text exceeds the ceiling is ABORTED mid-turn and journaled - the scheduler is not blocked, and an order scene reverts to \"queued\" exactly like a timeout");
+  {
+    // A fake queryFn shaped like the real SDK's query(): streams one big
+    // tool_result-carrying "user" message per step, forever, simulating
+    // exactly the production incident (world_overview detail:"full" called
+    // repeatedly, each huge result re-sent on every subsequent step). It
+    // never naturally completes - only the token ceiling should stop it
+    // (BRAIN_TURN_TIMEOUT_SEC is set generously high so a timeout can't be
+    // the thing that actually stops it, isolating the ceiling behavior).
+    function bigToolResultQueryFn() {
+      let step = 0;
+      const bigText = "x".repeat(2000); // ~500 estimated tokens per step (2000/4)
+      return (async function* () {
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          step += 1;
+          yield {
+            type: "assistant",
+            message: { content: [{ type: "tool_use", name: "mcp__mcalive2__world_overview", input: { detail: "full" } }] },
+          };
+          yield {
+            type: "user",
+            message: { content: [{ type: "tool_result", content: bigText }] },
+          };
+          if (step > 1000) return; // safety valve - should never be reached
+        }
+      })();
+    }
+
+    const tokenCeilingStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "brain-token-ceiling-"));
+    const tokenCeilingConfig = {
+      ...loadConfig({}),
+      dryRun: false,
+      turnTimeoutSec: 30, // generous - the ceiling, not the clock, must be what stops this
+      maxTokensPerTurn: 1000, // low ceiling so a handful of ~500-token steps trips it fast
+      maxTokensPerOrder: 1000,
+      stateDir: tokenCeilingStateDir,
+    };
+
+    let sceneRuns2 = 0;
+    const scheduler2 = new DirectorScheduler({
+      debounceMs: 10,
+      runScene: async (batch) => {
+        sceneRuns2 += 1;
+        const sceneNumber = sceneRuns2;
+        return runDirectorTurn({ batch, systemPrompt: "", config: tokenCeilingConfig, sceneNumber, queryFn: bigToolResultQueryFn });
+      },
+    });
+
+    const orderTimestamp = "2026-01-01T00:00:00.000Z";
+    scheduler2.push("operator_order", { text: "build a whole city", orderTimestamp, at: new Date().toISOString() });
+    const ceilingDone = await waitForCondition(() => scheduler2.scenesStarted === 1 && !scheduler2.sceneRunning, 3000);
+    assert(ceilingDone, "the runaway-tool-result scene eventually finished (hit the token ceiling) and the scheduler flag cleared");
+    assert(!scheduler2.sceneRunning, "sceneRunning is false after the token-ceiling abort - the scheduler is unblocked, not stuck forever");
+
+    const ceilingJournal = fs.readFileSync(path.join(tokenCeilingStateDir, "decisions.log"), "utf8");
+    assert(/Decision: hit the per-turn token ceiling \(\d+\) - aborted/.test(ceilingJournal), "the aborted scene is journaled as \"Decision: hit the per-turn token ceiling (N) - aborted\"");
+
+    // Push a second, independent batch - proves the scheduler moved on
+    // rather than staying blocked behind the aborted scene forever.
+    scheduler2.push("npc_death", {});
+    const secondCeilingDone = await waitForCondition(() => scheduler2.scenesStarted === 2, 2000);
+    assert(secondCeilingDone, "the scheduler processed the NEXT batch after the token-ceiling abort, proving it is not permanently blocked");
+  }
+
+  console.log("\n1p. Director prompt carries the remaining daily budget and this turn's token ceiling");
+  {
+    const budgetPromptConfig = { ...loadConfig({}), dryRun: true, maxTokensPerTurn: 77777 };
+    let dryRunLog = null;
+    const origInfo = log.info;
+    log.info = (msg, data) => {
+      if (msg === "dry_run_director_turn") dryRunLog = data;
+      origInfo(msg, data);
+    };
+    try {
+      await runDirectorTurn({
+        batch: [{ event: "player_join", data: { player: "Steve" }, at: new Date().toISOString() }],
+        systemPrompt: "",
+        config: budgetPromptConfig,
+        sceneNumber: 999,
+        remainingBudget: 12345,
+      });
+    } finally {
+      log.info = origInfo;
+    }
+    assert(dryRunLog && dryRunLog.prompt.includes("BUDGET:"), "the director prompt has a BUDGET line");
+    assert(dryRunLog && dryRunLog.prompt.includes("12,345"), "the BUDGET line names the remaining daily token budget passed in");
+    assert(dryRunLog && dryRunLog.prompt.includes("77,777"), "the BUDGET line names this turn's hard token ceiling");
+    assert(dryRunLog && /economical/.test(dryRunLog.prompt), "the BUDGET line instructs the director to be economical");
   }
 
   console.log("\n2. Director debounce, actor routing, knowledge isolation");

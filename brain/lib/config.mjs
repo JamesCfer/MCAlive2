@@ -133,6 +133,13 @@ export function loadConfig(env = process.env) {
     // moves on to the next batch.
     turnTimeoutSec: num("BRAIN_TURN_TIMEOUT_SEC", 300),
 
+    // Cap on a single tool result's serialized size (lib/tool-result-cap.mjs),
+    // forwarded explicitly into mcp-bridge.mjs's spawned-process env below
+    // (that process is spawned fresh per turn by the Agent SDK, so it can't
+    // be relied on to inherit this process's env - see director-turn.mjs/
+    // actor-turn.mjs's mcpServers.env).
+    maxToolResultChars: num("BRAIN_MAX_TOOL_RESULT_CHARS", 3000),
+
     maxDirectorSteps: num("BRAIN_MAX_DIRECTOR_STEPS", 12),
     maxActorSteps: num("BRAIN_MAX_ACTOR_STEPS", 6),
     // Scenes containing an "operator_order" event (a one-shot command from
@@ -145,6 +152,24 @@ export function loadConfig(env = process.env) {
     // director-turn.mjs timeoutSecFor): a big order was being aborted by the
     // ordinary turnTimeoutSec partway through its work.
     orderTimeoutSec: num("BRAIN_ORDER_TIMEOUT_SEC", 1800),
+
+    // Hard per-turn TOKEN ceiling (as opposed to turnTimeoutSec's wall-clock
+    // ceiling above, or maxDirectorSteps'/orderMaxSteps' tool-call-count
+    // ceiling): the step/time ceilings alone let a scene with many CHEAP
+    // steps but one or two HUGE tool results (a full ledger dump, a
+    // detail:"full" world_overview) blow through the daily budget in a
+    // single scene, because an agent turn re-sends its whole accumulated
+    // context on every subsequent step (see lib/director-turn.mjs's
+    // maxTokensFor()/runDirectorTurn()). Checked WHILE a turn streams (not
+    // just at the start, like dailyTokenBudget) and aborts the query the
+    // moment it's exceeded, via the same AbortController+close mechanism
+    // lib/timed-query.mjs already uses for timeouts.
+    maxTokensPerTurn: num("BRAIN_MAX_TOKENS_PER_TURN", 120000),
+    // ...and the matching higher ceiling for operator-order scenes (mirrors
+    // orderMaxSteps/orderTimeoutSec above) - a big set-piece order
+    // legitimately needs more tokens than an ordinary reactive scene, just
+    // not an unbounded amount.
+    maxTokensPerOrder: num("BRAIN_MAX_TOKENS_PER_ORDER", 600000),
 
     reconnectBaseMs: num("BRAIN_RECONNECT_BASE_MS", 1000),
     reconnectMaxMs: num("BRAIN_RECONNECT_MAX_MS", 30000),

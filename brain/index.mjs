@@ -320,7 +320,7 @@ export async function main(env = process.env) {
       events: batch.map((e) => e.event),
     });
 
-    const result = await runDirectorTurn({ batch, systemPrompt: lore.text, config, sceneNumber });
+    const result = await runDirectorTurn({ batch, systemPrompt: lore.text, config, sceneNumber, remainingBudget: usage.remaining() });
     if (result.totalTokens > 0) await usage.addTokens(result.totalTokens);
 
     // Orders (Lore Console "order the world" - console-server.mjs) carry
