@@ -340,10 +340,9 @@ every 5s).
 
 ### World model & map data
 
-`lib/worldmodel.mjs` builds one snapshot of the live world purely from
-EXISTING bridge commands — `ledger_query` (`places`/`npcs`), a single coarse
-`scan_area` over the area of interest, and a handful of budgeted `get_block`
-probes — never new plugin work. It has two consumers:
+`lib/worldmodel.mjs` builds one snapshot of the live world from
+`ledger_query` (`places`/`npcs`), a terrain survey, and a handful of budgeted
+`get_block` probes. It has two consumers:
 
 - **`world_overview` (director-only tool)** — the text-only director's "what
   exists and what's wrong" view. Returns a compact digest: a header line
@@ -357,8 +356,37 @@ probes — never new plugin work. It has two consumers:
 - **`GET /worldmodel`** — the same snapshot as raw JSON, token-authed like
   every other console route, for the `/map` viewer below. Cached ~5s
   (`console-server.mjs`) so rapid page loads/auto-refresh polling don't
-  hammer the bridge with a fresh `ledger_query` + `scan_area` round trip
-  every time.
+  hammer the bridge with a fresh terrain survey every time.
+
+**Terrain acquisition — the WHOLE loaded world, not just recorded places.**
+`buildWorldModel()` prefers calling `"gadget:world-scan"` (`gadgets/world-
+scan.java`, auto-installed on boot by `index.mjs`'s `installWorldScan` — see
+[Gadgets](#gadgets)) with `{maxCells: BRAIN_WORLD_SCAN_MAX_CELLS}` and no
+explicit region, so it surveys every currently-loaded chunk — spawn,
+wilderness, wherever players have explored — auto-choosing a sample step so
+the grid stays under the cell cap no matter how much of the world is loaded.
+An unloaded chunk's column comes back `null` ("unknown"), never a guess. The
+gadget's result maps onto the model's existing terrain shape
+(`{origin:{x,z}, step, cols, rows, heights}}` — unchanged, so nothing
+downstream needed to know which source produced it) and also gives the model
+three more top-level fields: `spawn: {x,y,z}|null` (the world's actual
+configured spawn point), `players: [{name,x,y,z}]` (everyone currently
+online), and `loadedChunks` (a raw count). The model's `bounds` come from the
+gadget's surveyed extent, still unioned with every recorded place's
+bounds/origin and every NPC's current position so nothing recorded ever
+falls outside the map even if it sits beyond the currently-loaded world.
+
+If the gadget call fails — older server, gadgets disabled, a bridge that's
+mid-reconnect — `buildWorldModel()` falls back to its original behavior
+exactly as before this feature existed: one coarse `scan_area` scan over the
+bounding box of recorded places (padded), `spawn`/`players` come back
+`null`/`[]`, and a human-readable line is appended to the model's new
+`notes: [string]` array (surfaced in both `formatWorldOverview()`'s header
+and the `/map` page) explaining why. Either way, the pre-existing
+floating/buried/off-ground diagnostics (below) keep working unchanged — they
+look up the terrain grid by world x/z regardless of which source produced
+it, and a `null` cell (chunk not loaded) just skips that diagnostic rather
+than reporting a false problem.
 
 Diagnostics computed (bounded probe budget: at most ~40 `get_block` calls
 total per snapshot, spent only on the NPC off-ground check):
@@ -427,18 +455,24 @@ fixed timer (`BRAIN_POSITION_INTERVAL_TICKS`, default 20 ticks ≈ 1s).
 schematic viewer of the live world — a hand-rolled orthographic 3D
 projection on a `<canvas>`, no three.js, no CDN, fetching `GET /worldmodel`
 same-origin (same cookie auth as the rest of the console). It renders the
-terrain heightmap as a shaded surface, places as translucent colored boxes
-(color = `builtBy`, red outline = an error flag) or origin markers when they
-have no bounds, and NPCs as small vertical markers (green alive, gray dead,
-orange/red if flagged). Drag to orbit, right-drag/shift-drag to pan, wheel
-to zoom, hover or click a marker for its details in the side panel. A fixed
-problems panel lists every diagnostic worst-first (error → warn → info);
-clicking one recenters the camera on its coordinate and drops a brief pulse
-marker there — the "what's going wrong" view. The header shows live counts
-(places, NPCs alive/dead, problem count) with a manual refresh button and a
-10s auto-refresh toggle; it degrades gracefully with a banner if
-`/worldmodel` 401s, and says so rather than showing a blank canvas when
-terrain/places/NPCs are empty.
+terrain heightmap as a shaded surface (skipping any `null` — unloaded-chunk —
+cell rather than drawing a hole or guessing), places as translucent colored
+boxes (color = `builtBy`, red outline = an error flag) or origin markers when
+they have no bounds, NPCs as small vertical markers (green alive, gray dead,
+orange/red if flagged), a gold diamond labelled `SPAWN` at `model.spawn`
+(from the `gadget:world-scan` terrain source — absent if it's unavailable,
+see above), and a cyan marker per online player from `model.players`,
+labelled with their name. Drag to orbit, right-drag/shift-drag to pan, wheel
+to zoom, hover or click a marker (place, NPC, spawn, or player) for its
+details in the side panel. A fixed problems panel lists every diagnostic
+worst-first (error → warn → info); clicking one recenters the camera on its
+coordinate and drops a brief pulse marker there — the "what's going wrong"
+view. The header shows live counts (places, NPCs alive/dead, players online,
+problem count), the surveyed world extent and loaded-chunk count when
+available, a manual refresh button, and a 10s auto-refresh toggle; it
+degrades gracefully with a banner if `/worldmodel` 401s, and shows any
+`notes` (e.g. "gadget:world-scan unavailable, falling back to scan_area")
+alongside its existing empty-state notes rather than failing silently.
 
 Sending a directive appends a dated block to
 `brain/lore/90-operator-directives.md` (created on first use) and
@@ -605,6 +639,8 @@ It exits non-zero if any assertion fails.
 | `BRAIN_POSITION_TRACKING` | `1` | Set to `0` to skip the boot auto-install of `gadgets/position-tracker.java` entirely (world model always falls back to ledger home positions, exactly as before this feature existed) |
 | `BRAIN_POSITION_INTERVAL_TICKS` | `20` | `intervalTicks` passed to the position-tracker gadget on `gadget_run` — how often (in server ticks, 20/s) it broadcasts `entity_positions` |
 | `BRAIN_POSITION_STALE_SEC` | `30` | Age (seconds) past which a cached live position is marked `stale` (still used, not discarded — see Live position tracking below) |
+| `BRAIN_WORLD_SCAN` | `1` | Set to `0` to skip the boot auto-install of `gadgets/world-scan.java` entirely (world model always falls back to `scan_area` over recorded places, exactly as before this feature existed) |
+| `BRAIN_WORLD_SCAN_MAX_CELLS` | `4096` | `maxCells` passed to the world-scan gadget — cap on `cols*rows` sampled when surveying the whole loaded world |
 
 ## Files
 
@@ -660,6 +696,10 @@ It exits non-zero if any assertion fails.
 - `gadgets/position-tracker.java` — the runtime-injected gadget source
   (Java) that streams `entity_positions`; auto-installed on boot by
   `index.mjs` (see Live position tracking above).
+- `gadgets/world-scan.java` — the runtime-injected gadget source (Java) that
+  surveys every currently-loaded chunk into a coarse heightmap on demand
+  (`"gadget:world-scan"`); auto-installed on boot by `index.mjs`'s
+  `installWorldScan` (see World model & map data above).
 - `lib/self-update.mjs` — checks `origin/main` on a timer and pulls +
   restarts (exit 75) when new code has landed; see Auto-update above.
 - `run-forever.cmd` — Windows restart-loop wrapper around `npm start` that

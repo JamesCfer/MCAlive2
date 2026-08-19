@@ -115,6 +115,7 @@ export async function main(env = process.env) {
       // tool, which runs in a separate short-lived process that never sees
       // pushed events - see position-cache.mjs's module comment.
       npcPositions: (id) => positionCache.npcPosition(id, Date.now()),
+      worldScanMaxCells: config.worldScanMaxCells,
     });
   }
 
@@ -381,6 +382,44 @@ export async function main(env = process.env) {
     }
   }
 
+  /** Injects brain/gadgets/world-scan.java on the running server via
+   * gadget_define (see README "Gadgets") so lib/worldmodel.mjs can call
+   * "gadget:world-scan" on demand to survey the WHOLE currently-loaded
+   * world (every loaded chunk) instead of just the bounding box of
+   * recorded places - see lib/worldmodel.mjs's terrain acquisition.
+   *
+   * Unlike installPositionTracker, this never gadget_runs anything - the
+   * gadget is a synchronous survey called on demand per world-model build,
+   * not a timer-driven pusher. Idempotent/safe on every boot: gadget_define
+   * overwrites the same id's source.
+   *
+   * Never throws: any failure (server not yet on a gadget-capable plugin
+   * version, gadgets disabled, compile error, connection down) is caught
+   * and logged as a WARN, and lib/worldmodel.mjs falls back to its
+   * pre-existing scan_area-based terrain acquisition exactly as before this
+   * feature existed. */
+  async function installWorldScan() {
+    if (!config.worldScanEnabled) {
+      log.info("world_scan_disabled", { reason: "BRAIN_WORLD_SCAN=0" });
+      return;
+    }
+    try {
+      const gadgetPath = path.join(BRAIN_ROOT, "gadgets", "world-scan.java");
+      const source = fs.readFileSync(gadgetPath, "utf8");
+      await bridge.call(
+        "gadget_define",
+        { id: "world-scan", source, description: "System: survey the whole loaded world into a coarse heightmap for the world model/map" },
+        config.npcContextTimeoutMs
+      );
+      log.info("world_scan_installed", {});
+    } catch (e) {
+      const reason = String((e && e.message) || e);
+      log.warn("world_scan_unavailable", {
+        message: `world-scan gadget unavailable: ${reason}; world model will fall back to scan_area over recorded places`,
+      });
+    }
+  }
+
   /**
    * Install the update-restart watcher: it applies staged plugin updates by
    * restarting the server, but ONLY when scripts/run-server.cmd's sentinel proves
@@ -471,6 +510,7 @@ export async function main(env = process.env) {
   bridge.start();
   installPositionTracker(); // fire-and-forget: never throws, see its own comment
   installUpdateRestart(); // fire-and-forget: never throws, sentinel-gated
+  installWorldScan(); // fire-and-forget: never throws, see its own comment
 
   const stop = () => {
     bridge.stop();

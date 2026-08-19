@@ -448,6 +448,99 @@ async function main() {
   console.log("\n1a⁸. entity_positions is pure telemetry: NOT a director wake event");
   assert(!DIRECTOR_WAKE_EVENTS.has("entity_positions"), "\"entity_positions\" is absent from DIRECTOR_WAKE_EVENTS - it must never debounce into a director scene");
 
+  console.log("\n1a⁹. World model: gadget:world-scan is preferred for terrain, and populates spawn/players/loadedChunks/notes");
+  {
+    // Fake bridge: a real place + NPC (so places/NPC diagnostics still run
+    // against the gadget-sourced terrain), plus a gadget:world-scan payload
+    // shaped exactly like brain/gadgets/world-scan.java's documented return
+    // - heights[ix][iz] indexed by x then z, with one null column standing
+    // in for an unloaded chunk. Flat ground at y=64 everywhere loaded.
+    const worldScanCall = async (cmd, args) => {
+      if (cmd === "ledger_query" && args.collection === "places") {
+        return { records: [{ id: "old-well", name: "Old Well", kind: "well", origin: { x: 4, y: 64, z: 4 }, builtBy: "world" }] };
+      }
+      if (cmd === "ledger_query" && args.collection === "npcs") {
+        return { records: [{ id: "mara-baker", name: "Mara the Baker", home: { x: 4, y: 65, z: 4 }, alive: true }] };
+      }
+      if (cmd === "gadget:world-scan") {
+        assert(args.maxCells === 4096, "buildWorldModel calls gadget:world-scan with the default maxCells (4096) when opts.worldScanMaxCells is not set");
+        // 3 columns (x: 0,4,8) x 3 rows (z: 0,4,8), step 4. Middle column's
+        // middle cell (x=4,z=4) is null - an unloaded chunk, right where
+        // Mara stands and Old Well sits.
+        return {
+          ok: true, world: "world", step: 4, origin: { x: 0, z: 0 }, cols: 3, rows: 3, sampledColumns: 8,
+          heights: [
+            [64, 64, 64],
+            [64, null, 64],
+            [64, 64, 64],
+          ],
+          surface: null, loadedChunks: 12,
+          bounds: { x1: 0, z1: 0, x2: 8, z2: 8 },
+          spawn: { x: 0, y: 65, z: 0 },
+          players: [{ name: "Steve", x: 2.5, y: 65, z: 2.5 }],
+        };
+      }
+      if (cmd === "get_block") return { material: "grass_block", blockData: "minecraft:grass_block" };
+      throw new Error(`worldScanCall: unexpected command ${cmd}`);
+    };
+
+    const model = await buildWorldModel(worldScanCall, { now: "2026-01-01T00:00:00.000Z" });
+
+    assert(model.terrain && model.terrain.heights.length === 3, "terrain came from the gadget (3x3 grid), not a scan_area fallback");
+    assert(model.terrain.rows === 3 && model.terrain.cols === 3, "gadget cols(x-count)/rows(z-count) map onto the model's rows(x)/cols(z) fields");
+    assert(model.spawn && model.spawn.x === 0 && model.spawn.y === 65 && model.spawn.z === 0, "model.spawn comes from the gadget's spawn field");
+    assert(Array.isArray(model.players) && model.players.length === 1 && model.players[0].name === "Steve", "model.players comes from the gadget's players field");
+    assert(model.loadedChunks === 12, "model.loadedChunks comes from the gadget's loadedChunks field");
+    assert(Array.isArray(model.notes) && model.notes.length === 0, "no fallback note is recorded when the gadget succeeds");
+    assert(model.bounds.minX === 0 && model.bounds.maxX === 8, "model.bounds x-range comes from the gadget's bounds");
+    // Old Well (x:4,z:4) sits exactly on the null cell - nearestGroundHeight
+    // must return null there (unknown), never a false floating/buried flag.
+    assert(!model.places.find((p) => p.id === "old-well").flags.length, "a place sitting over a null (unloaded-chunk) terrain cell gets no floating/buried flag");
+    assert(!model.diagnostics.some((d) => (d.kind === "floating" || d.kind === "buried") && d.subject === "old-well"), "no floating/buried diagnostic was produced for old-well (terrain unknown there)");
+
+    const digest = formatWorldOverview(model, { detail: "full" });
+    assert(digest.includes("Extent:") && digest.includes("12 loaded chunk"), "the text digest's header mentions the world extent and loaded chunk count");
+    assert(digest.includes("Spawn:"), "the text digest's header mentions the spawn coordinate");
+    assert(digest.includes("Steve"), "the text digest's header mentions the online player");
+  }
+
+  console.log("\n1a¹⁰. World model: a gadget:world-scan failure falls back to scan_area exactly as before, and records a note");
+  {
+    const fallbackCall = async (cmd, args) => {
+      if (cmd === "ledger_query" && args.collection === "places") return { records: [] };
+      if (cmd === "ledger_query" && args.collection === "npcs") return { records: [] };
+      if (cmd === "gadget:world-scan") throw new Error("no such gadget: world-scan (older server)");
+      if (cmd === "scan_area") {
+        const points = [];
+        for (let x = args.x1; x <= args.x2; x++) {
+          for (let z = args.z1; z <= args.z2; z++) points.push({ x, z, y: 64, material: "grass_block" });
+        }
+        return { minY: 64, maxY: 64, medianY: 64, flat: true, columns: points };
+      }
+      throw new Error(`fallbackCall: unexpected command ${cmd}`);
+    };
+
+    const model = await buildWorldModel(fallbackCall, { now: "2026-01-01T00:00:00.000Z" });
+    assert(model.terrain && model.terrain.heights.length, "terrain is still populated via the scan_area fallback when the gadget call throws");
+    assert(model.spawn === null, "model.spawn is null when the gadget is unavailable");
+    assert(Array.isArray(model.players) && model.players.length === 0, "model.players is an empty array when the gadget is unavailable");
+    assert(Array.isArray(model.notes) && model.notes.length === 1, "exactly one fallback note is recorded when the gadget call throws");
+    assert(/gadget:world-scan unavailable/.test(model.notes[0]), "the fallback note names gadget:world-scan as the reason for falling back");
+    assert(!model.diagnostics.some((d) => d.kind === "terrain-scan-failed"), "buildWorldModel never crashes/errors out when the gadget is unavailable - it degrades silently to scan_area");
+  }
+
+  console.log("\n1a¹¹. 3D map page: renders SPAWN + player markers");
+  {
+    const consoleServerSrc = fs.readFileSync(path.join(BRAIN_DIR, "lib", "console-server.mjs"), "utf8");
+    assert(/function buildSpawnPrimitives/.test(consoleServerSrc), "console-server.mjs defines buildSpawnPrimitives()");
+    assert(/function buildPlayerPrimitives/.test(consoleServerSrc), "console-server.mjs defines buildPlayerPrimitives()");
+    assert(/worldmodel\.spawn/.test(consoleServerSrc), "the map page reads worldmodel.spawn");
+    assert(/worldmodel\.players/.test(consoleServerSrc), "the map page reads worldmodel.players");
+    assert(/buildSpawnPrimitives\(primitives\)/.test(consoleServerSrc) && /buildPlayerPrimitives\(primitives\)/.test(consoleServerSrc), "draw() invokes both new primitive builders");
+    assert(/'SPAWN'/.test(consoleServerSrc), "the spawn marker is labelled SPAWN");
+    assert(/loadedChunks/.test(consoleServerSrc), "the map header surfaces loadedChunks");
+  }
+
   console.log("\n1b. Actor report parsing (pure, no process needed)");
   const wellFormed = parseActorReport(
     'Hello there!\n```report\n{"facts": [{"text": "The well ran dry.", "knownBy": ["mara-baker"]}], "promise": {"toWhom": "Steve", "text": "flour by dawn"}, "questOffered": null, "mood": "worried"}\n```'

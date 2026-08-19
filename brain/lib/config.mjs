@@ -182,6 +182,20 @@ export function loadConfig(env = process.env) {
     serverRestartGraceSec: num("BRAIN_SERVER_RESTART_GRACE_SEC", 30),
     positionStaleSec: num("BRAIN_POSITION_STALE_SEC", 30),
 
+    // Whole-loaded-world terrain: on boot (after the bridge authenticates),
+    // index.mjs auto-installs brain/gadgets/world-scan.java (a runtime-
+    // injected gadget - see README "Gadgets"), which lib/worldmodel.mjs then
+    // calls on demand ("gadget:world-scan") to survey EVERY currently-loaded
+    // chunk into a coarse heightmap - spawn, wilderness, whatever players
+    // have explored - instead of only the bounding box of recorded places.
+    // BRAIN_WORLD_SCAN=0 disables the boot auto-install entirely (world
+    // model always falls back to its pre-existing scan_area-over-places
+    // behavior, exactly as before this feature existed).
+    worldScanEnabled: bool01("BRAIN_WORLD_SCAN", true),
+    // Cap on cols*rows sampled by the world-scan gadget - see
+    // gadgets/world-scan.java's own maxCells doc.
+    worldScanMaxCells: num("BRAIN_WORLD_SCAN_MAX_CELLS", 4096),
+
     // Lore Console: a tiny local HTTP page for the operator to type
     // free-text directives ("add a ruined tower...") that get folded into
     // the world's lore - see lib/console-server.mjs.

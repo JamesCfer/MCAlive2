@@ -17,6 +17,17 @@
 //   - get_block {x,y,z}                   -> {material,blockData} - used
 //     ONLY for the NPC off-ground diagnostic, budgeted (see
 //     MAX_GET_BLOCK_PROBES below)
+//   - gadget:world-scan {world?,region?,step?,maxCells?} -> {ok,world,step,
+//     origin:{x,z},cols,rows,sampledColumns,heights:[[int|null,...],...],
+//     surface,loadedChunks,bounds:{x1,z1,x2,z2},spawn:{x,y,z},
+//     players:[{name,x,y,z}]} (brain/gadgets/world-scan.java, auto-installed
+//     on boot by index.mjs's installWorldScan - see README "Gadgets").
+//     PREFERRED terrain source: it surveys every currently-loaded chunk
+//     (spawn, wilderness, wherever players have gone), not just the
+//     bounding box of recorded places. Falls back to the pre-existing
+//     scan_area-over-places behavior below when the gadget call fails
+//     (older server, gadgets disabled, connection down) - see
+//     terrainFromWorldScan()/buildWorldModel()'s try/catch.
 //
 // No npc_list/npc_get (live NPC position) REQUEST/RESPONSE bridge command
 // exists - only ledger_query/ledger_get and npc_context expose NPC data, and
@@ -46,6 +57,10 @@ const DEFAULT_AREA_RADIUS = 64;
 // How far a place's bounding box (or origin) pads the auto-computed terrain
 // area, so a scan isn't razor-tight around a single point.
 const AREA_PADDING = 8;
+// Default cap on cols*rows sampled by the world-scan gadget (mirrors its own
+// default - see gadgets/world-scan.java) when the caller (index.mjs's
+// config.worldScanMaxCells) doesn't override it.
+const DEFAULT_WORLD_SCAN_MAX_CELLS = 4096;
 // Vertical threshold (blocks) a place must clear before floating/buried.
 const PLACE_Y_THRESHOLD = 3;
 // Vertical thresholds (blocks) an NPC must clear before "off-ground".
@@ -122,6 +137,49 @@ function terrainFromScan(scan) {
     rows: xs.length,
     heights,
   };
+}
+
+/** Maps a gadget:world-scan response onto the SAME pinned terrain shape
+ * terrainFromScan() produces - {origin:{x,z}, step, cols, rows, heights} -
+ * so every consumer (nearestGroundHeight, console-server.mjs's terrain
+ * renderer) works unchanged regardless of which source produced it.
+ *
+ * The two sources number their axes oppositely: terrainFromScan's `heights`
+ * is indexed [xIndex][zIndex] with `rows` = count of distinct x values and
+ * `cols` = count of distinct z values (see its own comment). The gadget's
+ * `heights` is ALSO indexed [ix][iz] with ix running over x (0..cols-1) and
+ * iz running over z (0..rows-1) - i.e. the gadget's `cols` is an x-count and
+ * its `rows` is a z-count, the opposite naming. The array itself needs no
+ * reshaping (both are already [xIndex][zIndex]); only the cols/rows SCALARS
+ * swap names on the way in. Nulls (chunk not loaded) pass through as-is. */
+function terrainFromWorldScan(scan) {
+  if (!scan || !Array.isArray(scan.heights) || !scan.heights.length) return null;
+  const origin = scan.origin && isFiniteNum(scan.origin.x) && isFiniteNum(scan.origin.z)
+    ? { x: scan.origin.x, z: scan.origin.z } : { x: 0, z: 0 };
+  return {
+    origin,
+    step: isFiniteNum(scan.step) && scan.step > 0 ? scan.step : 1,
+    rows: isFiniteNum(scan.cols) ? scan.cols : scan.heights.length, // x-count
+    cols: isFiniteNum(scan.rows) ? scan.rows : (scan.heights[0] || []).length, // z-count
+    heights: scan.heights,
+  };
+}
+
+/** Min/max Y across a terrain grid's non-null heights, or null if every cell
+ * is null (nothing loaded yet). Used to derive bounds.minY/maxY from a
+ * gadget:world-scan terrain, which reports no Y range of its own. */
+function terrainYRange(terrain) {
+  if (!terrain || !terrain.heights.length) return null;
+  let minY = Infinity, maxY = -Infinity;
+  for (const row of terrain.heights) {
+    if (!row) continue;
+    for (const h of row) {
+      if (!isFiniteNum(h)) continue;
+      if (h < minY) minY = h;
+      if (h > maxY) maxY = h;
+    }
+  }
+  return minY <= maxY ? { minY, maxY } : null;
 }
 
 /** Nearest terrain grid height under a world (x,z), or null if there is no
@@ -222,6 +280,8 @@ async function checkNpcGrounding(call, pos, budget) {
  *   terrain scan footprint (world_overview's `area` param); overrides the
  *   auto-computed bounding box of all places.
  * @param {number} [opts.maxGetBlockProbes] - override MAX_GET_BLOCK_PROBES (tests only).
+ * @param {number} [opts.worldScanMaxCells] - maxCells passed to the
+ *   gadget:world-scan terrain call (default DEFAULT_WORLD_SCAN_MAX_CELLS).
  * @param {((id: string) => object|null)|Map|object} [opts.npcPositions] -
  *   live-position source (a getter, a Map, or a plain object keyed by npc
  *   id), each entry shaped `{world?,x,y,z,at?,stale?}`. When an entry exists
@@ -290,9 +350,13 @@ export async function buildWorldModel(call, opts = {}) {
     };
   });
 
-  // ---- bounds: bounding box of all places (padded), or a default footprint
-  // around world origin when there are none yet (no bridge command reports
-  // the configured spawn point) ----
+  // ---- places-bounds: bounding box of all places (padded), or a default
+  // footprint around world origin when there are none yet (no bridge
+  // command reports the configured spawn point). Used as: (a) the
+  // terrain-scan fallback footprint when the world-scan gadget is
+  // unavailable, and (b) unioned into the gadget-derived bounds below so a
+  // recorded place or live NPC outside the currently-loaded world extent
+  // still ends up on the map. ----
   let minX, minZ, maxX, maxZ, minY, maxY;
   if (places.length) {
     minX = Infinity; minZ = Infinity; maxX = -Infinity; maxZ = -Infinity; minY = Infinity; maxY = -Infinity;
@@ -316,22 +380,95 @@ export async function buildWorldModel(call, opts = {}) {
     minZ = -DEFAULT_AREA_RADIUS; maxZ = DEFAULT_AREA_RADIUS;
     minY = 0; maxY = 128;
   }
+  const placesBounds = { minX, minZ, maxX, maxZ, minY, maxY };
 
-  const bounds = { minX, minZ, maxX, maxZ, minY, maxY };
-
-  // ---- terrain: one coarse scan_area over the area of interest ----
+  // ---- terrain: PREFER gadget:world-scan - it surveys every currently-
+  // loaded chunk (spawn, wilderness, wherever players have explored)
+  // instead of only the bounding box of recorded places. Falls back to the
+  // pre-existing scan_area-over-places behavior (below) when the gadget
+  // call fails - older server, gadgets disabled, connection down - never a
+  // crash either way; the fallback is recorded in `notes` so a caller/
+  // operator can tell which mode produced the map. See gadgets/world-
+  // scan.java and terrainFromWorldScan() above. ----
+  const notes = [];
   let terrain = null;
-  const scanFootprint = opts.area
-    ? clampScanFootprint(opts.area.x1, opts.area.z1, opts.area.x2, opts.area.z2)
-    : clampScanFootprint(bounds.minX, bounds.minZ, bounds.maxX, bounds.maxZ);
-  const footprintEmpty = scanFootprint.x2 < scanFootprint.x1 || scanFootprint.z2 < scanFootprint.z1;
-  if (!footprintEmpty) {
-    try {
-      const yHint = Math.round((bounds.minY + bounds.maxY) / 2);
-      const scan = await call("scan_area", { x1: scanFootprint.x1, z1: scanFootprint.z1, x2: scanFootprint.x2, z2: scanFootprint.z2, yHint });
-      terrain = terrainFromScan(scan);
-    } catch (e) {
-      diagnostics.push({ severity: "warn", kind: "terrain-scan-failed", subject: "terrain", message: `scan_area failed: ${e.message}`, at: null });
+  let bounds = null;
+  let spawn = null;
+  let players = [];
+  let loadedChunks = null;
+  try {
+    const maxCells = isFiniteNum(opts.worldScanMaxCells) ? opts.worldScanMaxCells : DEFAULT_WORLD_SCAN_MAX_CELLS;
+    const scan = await call("gadget:world-scan", { maxCells });
+    const scannedTerrain = terrainFromWorldScan(scan);
+    if (scan && scan.ok !== false && scannedTerrain) {
+      terrain = scannedTerrain;
+      loadedChunks = isFiniteNum(scan.loadedChunks) ? scan.loadedChunks : null;
+      if (scan.spawn && isFiniteNum(scan.spawn.x) && isFiniteNum(scan.spawn.y) && isFiniteNum(scan.spawn.z)) {
+        spawn = { x: scan.spawn.x, y: scan.spawn.y, z: scan.spawn.z };
+      }
+      if (Array.isArray(scan.players)) {
+        players = scan.players
+          .filter((p) => p && typeof p.name === "string" && isFiniteNum(p.x) && isFiniteNum(p.y) && isFiniteNum(p.z))
+          .map((p) => ({ name: p.name, x: p.x, y: p.y, z: p.z }));
+      }
+      const b = scan.bounds;
+      if (b && ["x1", "z1", "x2", "z2"].every((k) => isFiniteNum(b[k]))) {
+        const yRange = terrainYRange(terrain);
+        bounds = {
+          minX: Math.min(b.x1, b.x2), maxX: Math.max(b.x1, b.x2),
+          minZ: Math.min(b.z1, b.z2), maxZ: Math.max(b.z1, b.z2),
+          minY: yRange ? yRange.minY : placesBounds.minY,
+          maxY: yRange ? yRange.maxY : placesBounds.maxY,
+        };
+      }
+    } else {
+      notes.push("gadget:world-scan returned no usable terrain; falling back to a scan_area scan over recorded places (only that footprint is shown, not the whole loaded world)");
+    }
+  } catch (e) {
+    notes.push(`gadget:world-scan unavailable (${e.message}); falling back to a scan_area scan over recorded places (only that footprint is shown, not the whole loaded world)`);
+  }
+
+  if (!bounds) bounds = { ...placesBounds };
+
+  // Union the map extent with every recorded place and every NPC's current
+  // position, so nothing recorded falls outside the map even if it sits
+  // beyond the currently-loaded world (or the gadget was unavailable and
+  // bounds is places-only to begin with).
+  for (const p of places) {
+    const b = p.bounds;
+    if (b) {
+      bounds.minX = Math.min(bounds.minX, b.x1, b.x2); bounds.maxX = Math.max(bounds.maxX, b.x1, b.x2);
+      bounds.minZ = Math.min(bounds.minZ, b.z1, b.z2); bounds.maxZ = Math.max(bounds.maxZ, b.z1, b.z2);
+      bounds.minY = Math.min(bounds.minY, b.y1, b.y2); bounds.maxY = Math.max(bounds.maxY, b.y1, b.y2);
+    } else {
+      bounds.minX = Math.min(bounds.minX, p.origin.x); bounds.maxX = Math.max(bounds.maxX, p.origin.x);
+      bounds.minZ = Math.min(bounds.minZ, p.origin.z); bounds.maxZ = Math.max(bounds.maxZ, p.origin.z);
+      bounds.minY = Math.min(bounds.minY, p.origin.y); bounds.maxY = Math.max(bounds.maxY, p.origin.y);
+    }
+  }
+  for (const n of npcs) {
+    if (!n.pos) continue;
+    bounds.minX = Math.min(bounds.minX, n.pos.x); bounds.maxX = Math.max(bounds.maxX, n.pos.x);
+    bounds.minZ = Math.min(bounds.minZ, n.pos.z); bounds.maxZ = Math.max(bounds.maxZ, n.pos.z);
+    bounds.minY = Math.min(bounds.minY, n.pos.y); bounds.maxY = Math.max(bounds.maxY, n.pos.y);
+  }
+
+  // ---- fallback terrain: one coarse scan_area over the area of interest,
+  // exactly as before this feature existed - only reached when the gadget
+  // above was unavailable/unusable. ----
+  if (!terrain) {
+    const scanFootprint = opts.area
+      ? clampScanFootprint(opts.area.x1, opts.area.z1, opts.area.x2, opts.area.z2)
+      : clampScanFootprint(placesBounds.minX, placesBounds.minZ, placesBounds.maxX, placesBounds.maxZ);
+    const footprintEmpty = scanFootprint.x2 < scanFootprint.x1 || scanFootprint.z2 < scanFootprint.z1;
+    if (!footprintEmpty) {
+      try {
+        const yHint = Math.round((placesBounds.minY + placesBounds.maxY) / 2);
+        const scan = await call("scan_area", { x1: scanFootprint.x1, z1: scanFootprint.z1, x2: scanFootprint.x2, z2: scanFootprint.z2, yHint });
+        terrain = terrainFromScan(scan);
+      } catch (e) {
+        diagnostics.push({ severity: "warn", kind: "terrain-scan-failed", subject: "terrain", message: `scan_area failed: ${e.message}`, at: null });
+      }
     }
   }
 
@@ -386,7 +523,7 @@ export async function buildWorldModel(call, opts = {}) {
     }
   }
 
-  return { generatedAt, bounds, places, npcs, terrain, diagnostics };
+  return { generatedAt, bounds, places, npcs, terrain, diagnostics, spawn, players, notes, loadedChunks };
 }
 
 // ---------------------------------------------------------------------------
@@ -435,9 +572,12 @@ function drawAsciiMap(model) {
   };
 
   // Spawn marker first so a place letter at the exact same cell wins (more
-  // informative than a bare '+').
-  if (minX <= 0 && 0 <= maxX && minZ <= 0 && 0 <= maxZ) {
-    const { cx, cz } = toCell(0, 0);
+  // informative than a bare '+'). Prefers the real spawn point reported by
+  // gadget:world-scan; falls back to world origin (0,0) when unavailable
+  // (pre-existing behavior).
+  const sx = model.spawn ? model.spawn.x : 0, sz = model.spawn ? model.spawn.z : 0;
+  if (minX <= sx && sx <= maxX && minZ <= sz && sz <= maxZ) {
+    const { cx, cz } = toCell(sx, sz);
     grid[cz][cx] = "+";
   }
 
@@ -474,6 +614,26 @@ export function formatWorldOverview(model, opts = {}) {
     `${model.npcs.length} NPC(s) (${aliveCount} alive / ${deadCount} dead), ` +
     `${model.diagnostics.length} problem(s) (${errorCount} error / ${warnCount} warn / ${infoCount} info)`
   );
+
+  // Extent line: how much of the world this snapshot actually covers - the
+  // gadget:world-scan-derived bounds/loadedChunks/spawn when available, so
+  // the director knows whether it's looking at the whole loaded world or
+  // just the fallback footprint around recorded places (see `notes`).
+  if (model.bounds) {
+    const b = model.bounds;
+    const extentBits = [`x:${Math.round(b.minX)}..${Math.round(b.maxX)} z:${Math.round(b.minZ)}..${Math.round(b.maxZ)}`];
+    if (typeof model.loadedChunks === "number") extentBits.push(`${model.loadedChunks} loaded chunk(s)`);
+    lines.push(`Extent: ${extentBits.join(", ")}`);
+  }
+  if (model.spawn) {
+    lines.push(`Spawn: ${fmtCoord(model.spawn)}`);
+  }
+  if (model.players && model.players.length) {
+    lines.push(`Players online: ${model.players.map((p) => `${p.name} @ ${fmtCoord(p)}`).join(", ")}`);
+  }
+  if (model.notes && model.notes.length) {
+    for (const n of model.notes) lines.push(`Note: ${n}`);
+  }
 
   lines.push("");
   lines.push(`PLACES (${model.places.length})`);

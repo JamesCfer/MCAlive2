@@ -1,0 +1,166 @@
+// MCAlive2 system gadget: world-scan
+// Surveys the ACTUAL loaded world - every currently-loaded chunk - into a coarse
+// heightmap, so the brain's world model and 3D map show the real terrain (spawn,
+// wilderness, whatever players have explored) instead of only the bounding box of
+// recorded places.
+//
+// The plugin's scan_area is footprint-sized and capped; this walks the loaded-chunk
+// set, auto-choosing a sample step so the result stays under maxCells no matter how
+// much of the world is loaded.
+//
+// args: {
+//   world?: string          - defaults to the first world
+//   region?: {x1,z1,x2,z2}  - explicit block bounds; default = bounds of loaded chunks
+//   step?: number           - blocks between samples (default: auto-fit to maxCells)
+//   maxCells?: number       - cap on cols*rows (default 4096)
+// }
+// returns: {
+//   ok, world, step, origin:{x,z}, cols, rows,
+//   heights: [[int|null,...],...]   // null = that column's chunk isn't loaded
+//   surface: [[string|null,...]]|null  // surface material names, omitted if large
+//   loadedChunks, bounds:{x1,z1,x2,z2},
+//   spawn:{x,y,z}, players:[{name,x,y,z}]
+// }
+package dev.celestia.mcalive2.gadget.system;
+
+import com.google.gson.JsonArray;
+import com.google.gson.JsonNull;
+import com.google.gson.JsonObject;
+import dev.celestia.mcalive2.gadget.GadgetContext;
+import dev.celestia.mcalive2.gadget.GadgetContract;
+import org.bukkit.Chunk;
+import org.bukkit.Location;
+import org.bukkit.World;
+import org.bukkit.entity.Player;
+
+public class WorldScan implements GadgetContract {
+
+    private static final int SURFACE_DETAIL_MAX_CELLS = 2500;
+
+    @Override
+    public JsonObject run(JsonObject args, GadgetContext ctx) {
+        String worldName = str(args, "world", null);
+        World w = ctx.world(worldName);
+        if (w == null) throw new IllegalArgumentException("no such world: " + worldName);
+
+        int maxCells = (int) num(args, "maxCells", 4096, 64, 20000);
+
+        // ---- bounds: explicit region, else the extent of all loaded chunks ----
+        int x1, z1, x2, z2;
+        Chunk[] loaded = w.getLoadedChunks();
+        JsonObject region = args != null && args.has("region") && args.get("region").isJsonObject()
+                ? args.getAsJsonObject("region") : null;
+        if (region != null) {
+            x1 = (int) num(region, "x1", 0, Integer.MIN_VALUE, Integer.MAX_VALUE);
+            z1 = (int) num(region, "z1", 0, Integer.MIN_VALUE, Integer.MAX_VALUE);
+            x2 = (int) num(region, "x2", 0, Integer.MIN_VALUE, Integer.MAX_VALUE);
+            z2 = (int) num(region, "z2", 0, Integer.MIN_VALUE, Integer.MAX_VALUE);
+        } else {
+            if (loaded.length == 0) {
+                Location s = w.getSpawnLocation();
+                x1 = s.getBlockX() - 64; x2 = s.getBlockX() + 64;
+                z1 = s.getBlockZ() - 64; z2 = s.getBlockZ() + 64;
+            } else {
+                int minCx = Integer.MAX_VALUE, maxCx = Integer.MIN_VALUE;
+                int minCz = Integer.MAX_VALUE, maxCz = Integer.MIN_VALUE;
+                for (Chunk c : loaded) {
+                    if (c.getX() < minCx) minCx = c.getX();
+                    if (c.getX() > maxCx) maxCx = c.getX();
+                    if (c.getZ() < minCz) minCz = c.getZ();
+                    if (c.getZ() > maxCz) maxCz = c.getZ();
+                }
+                x1 = minCx << 4; x2 = (maxCx << 4) + 15;
+                z1 = minCz << 4; z2 = (maxCz << 4) + 15;
+            }
+        }
+        if (x2 < x1) { int t = x1; x1 = x2; x2 = t; }
+        if (z2 < z1) { int t = z1; z1 = z2; z2 = t; }
+
+        // ---- step: honour an explicit step, else grow it until the grid fits ----
+        int spanX = x2 - x1 + 1, spanZ = z2 - z1 + 1;
+        int step = (int) num(args, "step", 0, 1, 512);
+        if (step <= 0) {
+            step = 4;
+            while (((spanX / step) + 1L) * ((spanZ / step) + 1L) > maxCells && step < 512) step *= 2;
+        }
+
+        int cols = spanX / step + 1;
+        int rows = spanZ / step + 1;
+        boolean withSurface = (long) cols * rows <= SURFACE_DETAIL_MAX_CELLS;
+
+        JsonArray heights = new JsonArray();
+        JsonArray surface = new JsonArray();
+        int sampled = 0;
+        for (int ix = 0; ix < cols; ix++) {
+            int bx = x1 + ix * step;
+            JsonArray hrow = new JsonArray();
+            JsonArray srow = new JsonArray();
+            for (int iz = 0; iz < rows; iz++) {
+                int bz = z1 + iz * step;
+                // Never force-load: an unloaded column is reported as null so the
+                // map shows genuinely-known terrain only.
+                if (!w.isChunkLoaded(bx >> 4, bz >> 4)) {
+                    hrow.add(JsonNull.INSTANCE);
+                    if (withSurface) srow.add(JsonNull.INSTANCE);
+                    continue;
+                }
+                int y = w.getHighestBlockYAt(bx, bz);
+                hrow.add(y);
+                sampled++;
+                if (withSurface) {
+                    srow.add(w.getBlockAt(bx, y, bz).getType().getKey().getKey());
+                }
+            }
+            heights.add(hrow);
+            if (withSurface) surface.add(srow);
+        }
+
+        JsonObject out = new JsonObject();
+        out.addProperty("ok", true);
+        out.addProperty("world", w.getName());
+        out.addProperty("step", step);
+        JsonObject origin = new JsonObject();
+        origin.addProperty("x", x1);
+        origin.addProperty("z", z1);
+        out.add("origin", origin);
+        out.addProperty("cols", cols);
+        out.addProperty("rows", rows);
+        out.addProperty("sampledColumns", sampled);
+        out.add("heights", heights);
+        out.add("surface", withSurface ? surface : JsonNull.INSTANCE);
+        out.addProperty("loadedChunks", loaded.length);
+
+        JsonObject bounds = new JsonObject();
+        bounds.addProperty("x1", x1); bounds.addProperty("z1", z1);
+        bounds.addProperty("x2", x2); bounds.addProperty("z2", z2);
+        out.add("bounds", bounds);
+
+        Location sp = w.getSpawnLocation();
+        JsonObject spawn = new JsonObject();
+        spawn.addProperty("x", sp.getBlockX());
+        spawn.addProperty("y", sp.getBlockY());
+        spawn.addProperty("z", sp.getBlockZ());
+        out.add("spawn", spawn);
+
+        JsonArray players = new JsonArray();
+        for (Player p : w.getPlayers()) {
+            JsonObject o = new JsonObject();
+            o.addProperty("name", p.getName());
+            o.addProperty("x", Math.round(p.getLocation().getX() * 10.0) / 10.0);
+            o.addProperty("y", Math.round(p.getLocation().getY() * 10.0) / 10.0);
+            o.addProperty("z", Math.round(p.getLocation().getZ() * 10.0) / 10.0);
+            players.add(o);
+        }
+        out.add("players", players);
+        return out;
+    }
+
+    private static String str(JsonObject o, String k, String def) {
+        return o != null && o.has(k) && o.get(k).isJsonPrimitive() ? o.get(k).getAsString() : def;
+    }
+
+    private static double num(JsonObject o, String k, double def, double min, double max) {
+        if (o == null || !o.has(k) || !o.get(k).isJsonPrimitive()) return def;
+        try { return Math.max(min, Math.min(max, o.get(k).getAsDouble())); } catch (Exception e) { return def; }
+    }
+}

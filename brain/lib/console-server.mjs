@@ -534,6 +534,8 @@ function renderMapPage() {
         <div class="row"><span class="swatch" style="background:#4caf6b"></span> NPC alive</div>
         <div class="row"><span class="swatch" style="background:#6b7078"></span> NPC dead</div>
         <div class="row"><span class="swatch" style="background:#ff6a3d"></span> NPC has a flag</div>
+      <div class="row"><span class="swatch" style="background:#ffcf5c"></span> world spawn</div>
+      <div class="row"><span class="swatch" style="background:#5cc8ff"></span> player online</div>
       </div>
     </section>
     <section id="problems">
@@ -782,6 +784,81 @@ function buildNpcPrimitives(list) {
   });
 }
 
+// Distinct-shaped marker for the world spawn point (a diamond, gold) - drawn
+// from worldmodel.spawn ({x,y,z}|null), the real spawn reported by the
+// gadget:world-scan terrain source (falls back to nothing drawn if the
+// gadget was unavailable and buildWorldModel() left spawn null).
+function buildSpawnPrimitives(list) {
+  var spawn = worldmodel.spawn;
+  if (!spawn) return;
+  var base = project(spawn.x, spawn.y, spawn.z);
+  var top = project(spawn.x, spawn.y + 2.6, spawn.z);
+  list.push({
+    depth: base.depth,
+    draw: function (ctx) {
+      ctx.beginPath();
+      ctx.moveTo(base.sx, base.sy);
+      ctx.lineTo(top.sx, top.sy);
+      ctx.strokeStyle = '#ffcf5c';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      var r = 7;
+      ctx.beginPath();
+      ctx.moveTo(top.sx, top.sy - r);
+      ctx.lineTo(top.sx + r, top.sy);
+      ctx.lineTo(top.sx, top.sy + r);
+      ctx.lineTo(top.sx - r, top.sy);
+      ctx.closePath();
+      ctx.fillStyle = '#ffcf5c';
+      ctx.fill();
+      ctx.strokeStyle = '#0f1114';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      drawLabel(ctx, { sx: top.sx, sy: top.sy - r - 6 }, 'SPAWN', '#ffcf5c');
+    },
+  });
+  registerHit(top, 9, 'spawn', { id: 'spawn', name: 'World spawn', flags: [] });
+}
+
+// Player markers - distinct color from NPCs, labelled with the player's
+// name, drawn from worldmodel.players ([{name,x,y,z}], empty when the
+// gadget:world-scan terrain source is unavailable - see buildWorldModel()).
+function buildPlayerPrimitives(list) {
+  (worldmodel.players || []).forEach(function (p) {
+    if (typeof p.x !== 'number' || typeof p.y !== 'number' || typeof p.z !== 'number') return;
+    var color = '#5cc8ff';
+    var base = project(p.x, p.y, p.z);
+    var top = project(p.x, p.y + 1.8, p.z);
+    list.push({
+      depth: base.depth,
+      draw: function (ctx) {
+        ctx.beginPath();
+        ctx.moveTo(base.sx, base.sy);
+        ctx.lineTo(top.sx, top.sy);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(top.sx, top.sy, 5, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.strokeStyle = '#0f1114';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        drawLabel(ctx, { sx: top.sx, sy: top.sy - 10 }, p.name, color);
+        if (hoveredKey === 'player:' + p.name) {
+          ctx.beginPath();
+          ctx.arc(top.sx, top.sy, 9, 0, Math.PI * 2);
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+      },
+    });
+    registerHit(top, 9, 'player', { id: p.name, name: p.name, flags: [] });
+  });
+}
+
 function registerHit(pt, r, kind, obj) {
   hitTargets.push({ sx: pt.sx, sy: pt.sy, r: r, kind: kind, obj: obj });
 }
@@ -832,6 +909,8 @@ function draw() {
   buildTerrainPrimitives(primitives);
   buildPlacePrimitives(primitives);
   buildNpcPrimitives(primitives);
+  buildSpawnPrimitives(primitives);
+  buildPlayerPrimitives(primitives);
   primitives.sort(function (a, b) { return b.depth - a.depth; }); // farthest first
   primitives.forEach(function (p) { p.draw(ctx); });
 
@@ -884,6 +963,7 @@ function updateEmptyNotes() {
   if (!worldmodel.terrain) notes.push('No terrain data available.');
   if (!worldmodel.places || !worldmodel.places.length) notes.push('No places recorded yet.');
   if (!worldmodel.npcs || !worldmodel.npcs.length) notes.push('No NPCs recorded yet.');
+  (worldmodel.notes || []).forEach(function (n) { notes.push(n); });
   document.getElementById('empty-notes').textContent = notes.join('  ·  ');
 }
 
@@ -907,6 +987,12 @@ function renderInfo(target) {
     html += '<b>' + escapeHtml(obj.name || obj.id) + '</b><br>';
     html += 'kind: ' + escapeHtml(obj.kind || '(unknown)') + '<br>';
     html += 'built by: ' + escapeHtml(obj.builtBy || '(unknown)') + '<br>';
+  } else if (target.kind === 'spawn') {
+    html += '<b>' + escapeHtml(obj.name) + '</b><br>';
+    html += 'the world spawn point<br>';
+  } else if (target.kind === 'player') {
+    html += '<b>' + escapeHtml(obj.name) + '</b><br>';
+    html += 'online player<br>';
   } else {
     html += '<b>' + escapeHtml(obj.name || obj.id) + '</b><br>';
     html += 'role: ' + escapeHtml(obj.role || '(unknown)') + '<br>';
@@ -1041,10 +1127,21 @@ function updateCounts() {
   var alive = npcs.filter(function (n) { return n.alive; }).length;
   var dead = npcs.length - alive;
   var problems = (worldmodel.diagnostics || []).length;
-  el.innerHTML = 'Places: <b>' + places + '</b> &middot; ' +
+  var players = (worldmodel.players || []).length;
+  var html = 'Places: <b>' + places + '</b> &middot; ' +
     'NPCs: <b>' + alive + '</b> alive / <b>' + dead + '</b> dead &middot; ' +
-    'Problems: <b>' + problems + '</b> &middot; ' +
-    'generated ' + escapeHtml(worldmodel.generatedAt || '?');
+    'Players online: <b>' + players + '</b> &middot; ' +
+    'Problems: <b>' + problems + '</b>';
+  var b = worldmodel.bounds;
+  if (b) {
+    html += ' &middot; extent x:' + Math.round(b.minX) + '..' + Math.round(b.maxX) +
+      ' z:' + Math.round(b.minZ) + '..' + Math.round(b.maxZ);
+  }
+  if (typeof worldmodel.loadedChunks === 'number') {
+    html += ' (' + worldmodel.loadedChunks + ' loaded chunks)';
+  }
+  html += ' &middot; generated ' + escapeHtml(worldmodel.generatedAt || '?');
+  el.innerHTML = html;
 }
 
 function showBanner(html) {
