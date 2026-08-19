@@ -547,6 +547,29 @@ export async function main(env = process.env) {
   }
 
   /**
+   * Install the vanilla-structure placer. Mojang's own village houses, smithies,
+   * libraries and town centres ship with the server as structure templates - far
+   * better architecture than anything generated block by block, and free.
+   */
+  async function installPlaceStructure() {
+    try {
+      const gadgetPath = path.join(BRAIN_ROOT, "gadgets", "place-structure.java");
+      const source = fs.readFileSync(gadgetPath, "utf8");
+      await bridge.call(
+        "gadget_define",
+        { id: "place-structure", source, description: "System: place a vanilla Minecraft structure template (village houses, smithies, libraries, town centres)" },
+        config.npcContextTimeoutMs
+      );
+      log.info("place_structure_installed", {});
+    } catch (e) {
+      const reason = String((e && e.message) || e);
+      log.warn("place_structure_unavailable", {
+        message: `place-structure gadget unavailable: ${reason}`,
+      });
+    }
+  }
+
+  /**
    * Install the update-restart watcher: it applies staged plugin updates by
    * restarting the server, but ONLY when scripts/run-server.cmd's sentinel proves
    * a restart loop is supervising this launch - so an unsupervised server can
@@ -645,6 +668,7 @@ export async function main(env = process.env) {
       installUpdateRestart(); // fire-and-forget: never throws, sentinel-gated
       installWorldScan(); // fire-and-forget: never throws, see its own comment
       installBuildStructure(); // fire-and-forget: never throws, see its own comment
+      installPlaceStructure(); // fire-and-forget: never throws, see its own comment
     },
   });
   bridge.start();

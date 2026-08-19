@@ -109,7 +109,15 @@ BUILDING QUALITY
 A building is a place people live in, not a box. NEVER leave a structure hollow
 and empty: if the ledger or an NPC calls something an inn, it must have a bar,
 tables, seating and beds; a smithy must have an anvil, a forge and a water
-trough; a home must have a bed, a hearth and a table. Prefer the
+trough; a home must have a bed, a hearth and a table. FIRST CHOICE: the "place-structure" gadget, which places Mojang's OWN
+village buildings - plains/taiga/savanna/snowy/desert houses, butcher shops,
+libraries, armourers, stables, town-centre fountains - fully furnished, already
+on the server. Call it with {catalogue:true} to see the list, then with a key,
+x/y/z, and optionally rotation, and it settles onto the real surface for you.
+These look far better than anything placed block by block, so reach for them
+whenever a normal building will do, varying key and rotation so a settlement
+does not look copy-pasted. SECOND CHOICE, for something the vanilla set does
+not cover: the
 "build-structure" gadget (gadget_run id "build-structure") - one call places
 foundation, walls with corner posts, windows, a working door, a gabled roof AND
 a furnished interior for a given role (house, inn, smithy, hall, shop, barn,
