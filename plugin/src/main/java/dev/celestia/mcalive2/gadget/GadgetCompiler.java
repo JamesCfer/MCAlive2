@@ -147,32 +147,68 @@ public class GadgetCompiler {
      * plugin classes, and any library already on the classpath.
      */
     private static String assembleClasspath() {
-        List<String> entries = new ArrayList<>();
+        java.util.LinkedHashSet<String> entries = new java.util.LinkedHashSet<>();
+
+        // This plugin's own jar (GadgetContract/GadgetContext live here).
         addCodeSourceLocation(entries, GadgetCompiler.class);
-        addCodeSourceLocation(entries, bukkitClassOrNull());
+
+        // Everything a gadget realistically writes against. These are resolved
+        // reflectively and each contributes the jar it actually lives in, which on
+        // Paper is NOT necessarily the launched server.jar (paperclip patches and
+        // caches the real server jar elsewhere, and libraries like gson and
+        // adventure are loaded from their own paths). Missing any of these shows up
+        // as a baffling "package does not exist" for gadget authors.
+        for (String name : new String[]{
+                "org.bukkit.Bukkit",                       // Bukkit/Paper API
+                "com.google.gson.JsonObject",              // gadget args/return type
+                "net.kyori.adventure.text.Component",      // chat components
+                "io.papermc.paper.threadedregions.scheduler.ScheduledTask", // Paper API extras
+        }) {
+            addCodeSourceLocation(entries, classOrNull(name));
+        }
+
+        // Anything else the plugin classloader was given (Paper exposes plugin and
+        // library jars this way), so gadgets can use whatever the plugin can.
+        ClassLoader cl = GadgetCompiler.class.getClassLoader();
+        if (cl instanceof java.net.URLClassLoader ucl) {
+            for (java.net.URL u : ucl.getURLs()) addLocation(entries, u);
+        }
+
         String jcp = System.getProperty("java.class.path");
         if (jcp != null && !jcp.isBlank()) entries.add(jcp);
         return String.join(java.io.File.pathSeparator, entries);
     }
 
-    private static Class<?> bukkitClassOrNull() {
+    private static Class<?> classOrNull(String name) {
         try {
-            return Class.forName("org.bukkit.Bukkit");
-        } catch (ClassNotFoundException e) {
+            return Class.forName(name, false, GadgetCompiler.class.getClassLoader());
+        } catch (Throwable e) {
             return null;
         }
     }
 
-    private static void addCodeSourceLocation(List<String> entries, Class<?> cls) {
+    private static void addCodeSourceLocation(java.util.Collection<String> entries, Class<?> cls) {
         if (cls == null) return;
         try {
             ProtectionDomain pd = cls.getProtectionDomain();
             if (pd == null) return;
             CodeSource cs = pd.getCodeSource();
             if (cs == null || cs.getLocation() == null) return;
-            entries.add(new java.io.File(cs.getLocation().toURI()).getAbsolutePath());
+            addLocation(entries, cs.getLocation());
         } catch (Exception ignored) {
             // best-effort; the java.class.path fallback usually covers this anyway
+        }
+    }
+
+    private static void addLocation(java.util.Collection<String> entries, java.net.URL url) {
+        if (url == null) return;
+        try {
+            entries.add(new java.io.File(url.toURI()).getAbsolutePath());
+        } catch (Exception e) {
+            // Non-file URLs (jar:, nested paths) can't be handed to javac directly;
+            // fall back to the raw path, which is right often enough to be worth trying.
+            String p = url.getPath();
+            if (p != null && !p.isBlank()) entries.add(p);
         }
     }
 

@@ -4,7 +4,7 @@
   <groupId>dev.celestia</groupId>
   <artifactId>mcalive2</artifactId>
   <name>MCAlive2</name>
-  <version>0.5.1</version>
+  <version>0.5.2</version>
   <build>
     <resources>
       <resource>
