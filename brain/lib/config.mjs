@@ -175,6 +175,11 @@ export function loadConfig(env = process.env) {
     // home positions, exactly as before this feature existed).
     positionTrackingEnabled: bool01("BRAIN_POSITION_TRACKING", true),
     positionIntervalTicks: num("BRAIN_POSITION_INTERVAL_TICKS", 20),
+    // Server auto-restart to apply staged plugin updates. Gated server-side by
+    // scripts/run-server.cmd's sentinel, so this is safe to leave on.
+    serverAutoRestartEnabled: bool01("BRAIN_SERVER_AUTORESTART", true),
+    serverRestartCheckSec: num("BRAIN_SERVER_RESTART_CHECK_SEC", 30),
+    serverRestartGraceSec: num("BRAIN_SERVER_RESTART_GRACE_SEC", 30),
     positionStaleSec: num("BRAIN_POSITION_STALE_SEC", 30),
 
     // Lore Console: a tiny local HTTP page for the operator to type

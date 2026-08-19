@@ -381,6 +381,49 @@ export async function main(env = process.env) {
     }
   }
 
+  /**
+   * Install the update-restart watcher: it applies staged plugin updates by
+   * restarting the server, but ONLY when scripts/run-server.cmd's sentinel proves
+   * a restart loop is supervising this launch - so an unsupervised server can
+   * never be shut down and left stranded.
+   */
+  async function installUpdateRestart() {
+    if (!config.serverAutoRestartEnabled) {
+      log.info("server_autorestart_disabled", { reason: "BRAIN_SERVER_AUTORESTART=0" });
+      return;
+    }
+    try {
+      const gadgetPath = path.join(BRAIN_ROOT, "gadgets", "update-restart.java");
+      const source = fs.readFileSync(gadgetPath, "utf8");
+      await bridge.call(
+        "gadget_define",
+        { id: "update-restart", source, description: "System: restart the server to apply staged updates" },
+        config.npcContextTimeoutMs
+      );
+      const res = await bridge.call(
+        "gadget_run",
+        {
+          id: "update-restart",
+          args: {
+            checkSeconds: config.serverRestartCheckSec,
+            graceSeconds: config.serverRestartGraceSec,
+          },
+        },
+        config.npcContextTimeoutMs
+      );
+      log.info("server_autorestart_installed", {
+        checkSeconds: config.serverRestartCheckSec,
+        graceSeconds: config.serverRestartGraceSec,
+        sentinelPresent: !!(res && res.sentinelPresent),
+      });
+    } catch (e) {
+      const reason = String((e && e.message) || e);
+      log.warn("server_autorestart_unavailable", {
+        message: `server auto-restart unavailable: ${reason}; staged plugin updates will apply on your next manual restart`,
+      });
+    }
+  }
+
   // ---------------- Event routing ----------------
 
   const bridge = new BridgeClient({
@@ -427,6 +470,7 @@ export async function main(env = process.env) {
   });
   bridge.start();
   installPositionTracker(); // fire-and-forget: never throws, see its own comment
+  installUpdateRestart(); // fire-and-forget: never throws, sentinel-gated
 
   const stop = () => {
     bridge.stop();
