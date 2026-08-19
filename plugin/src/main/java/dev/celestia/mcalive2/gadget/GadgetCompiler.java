@@ -174,9 +174,44 @@ public class GadgetCompiler {
             for (java.net.URL u : ucl.getURLs()) addLocation(entries, u);
         }
 
+        // Every jar Paper downloaded into the server's libraries/ tree. Naming
+        // individual classes above is not enough: javac also needs the TRANSITIVE
+        // deps of the API it is reading (adventure-key behind Component, guava
+        // behind Material, bungee-chat behind the chat API...). Those only exist as
+        // library jars, so hand javac the whole tree rather than playing
+        // whack-a-mole with "class file for X not found".
+        addServerLibraryJars(entries);
+
         String jcp = System.getProperty("java.class.path");
         if (jcp != null && !jcp.isBlank()) entries.add(jcp);
         return String.join(java.io.File.pathSeparator, entries);
+    }
+
+    /**
+     * Recursively collect every .jar under the server's {@code libraries/} directory
+     * (Paper's Maven-layout cache of its own dependencies), relative to the server's
+     * working directory. Best-effort and bounded: a missing directory is fine, and a
+     * hard cap keeps a pathological tree from building an enormous classpath.
+     */
+    private static void addServerLibraryJars(java.util.Collection<String> entries) {
+        java.io.File root = new java.io.File("libraries");
+        if (!root.isDirectory()) return;
+        java.util.ArrayDeque<java.io.File> stack = new java.util.ArrayDeque<>();
+        stack.push(root);
+        int added = 0;
+        while (!stack.isEmpty() && added < 2000) {
+            java.io.File dir = stack.pop();
+            java.io.File[] kids = dir.listFiles();
+            if (kids == null) continue;
+            for (java.io.File f : kids) {
+                if (f.isDirectory()) {
+                    stack.push(f);
+                } else if (f.getName().endsWith(".jar")) {
+                    entries.add(f.getAbsolutePath());
+                    added++;
+                }
+            }
+        }
     }
 
     private static Class<?> classOrNull(String name) {
