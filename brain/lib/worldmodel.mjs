@@ -136,6 +136,7 @@ function terrainFromScan(scan) {
     cols: zs.length,
     rows: xs.length,
     heights,
+    materials: null,
   };
 }
 
@@ -156,12 +157,19 @@ function terrainFromWorldScan(scan) {
   if (!scan || !Array.isArray(scan.heights) || !scan.heights.length) return null;
   const origin = scan.origin && isFiniteNum(scan.origin.x) && isFiniteNum(scan.origin.z)
     ? { x: scan.origin.x, z: scan.origin.z } : { x: 0, z: 0 };
+  // `surface` is an optional [cols][rows] array of block-type names (or
+  // nulls) the gadget only includes for smaller scans - same [ix][iz]
+  // indexing as `heights`, so it can be carried through with no reshaping.
+  // Absent (large scans) -> materials stays null, and every consumer (the
+  // /map voxel renderer) falls back to the height-based colour ramp.
+  const materials = Array.isArray(scan.surface) && scan.surface.length ? scan.surface : null;
   return {
     origin,
     step: isFiniteNum(scan.step) && scan.step > 0 ? scan.step : 1,
     rows: isFiniteNum(scan.cols) ? scan.cols : scan.heights.length, // x-count
     cols: isFiniteNum(scan.rows) ? scan.rows : (scan.heights[0] || []).length, // z-count
     heights: scan.heights,
+    materials,
   };
 }
 

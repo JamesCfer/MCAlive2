@@ -502,6 +502,40 @@ async function main() {
     assert(digest.includes("Extent:") && digest.includes("12 loaded chunk"), "the text digest's header mentions the world extent and loaded chunk count");
     assert(digest.includes("Spawn:"), "the text digest's header mentions the spawn coordinate");
     assert(digest.includes("Steve"), "the text digest's header mentions the online player");
+
+    assert(model.terrain.materials === null, "a world-scan payload with surface:null exposes terrain.materials === null");
+  }
+
+  console.log("\n1a⁹⁵. World model: a gadget:world-scan payload WITH a surface array exposes terrain.materials, same [ix][iz] indexing as heights");
+  {
+    const surfaceScanCall = async (cmd, args) => {
+      if (cmd === "ledger_query") return { records: [] };
+      if (cmd === "gadget:world-scan") {
+        return {
+          ok: true, world: "world", step: 4, origin: { x: 0, z: 0 }, cols: 3, rows: 3, sampledColumns: 9,
+          heights: [
+            [64, 64, 64],
+            [64, 70, 64],
+            [64, 64, 64],
+          ],
+          surface: [
+            ["grass_block", "grass_block", "sand"],
+            ["grass_block", "stone", "sand"],
+            ["grass_block", "grass_block", "sand"],
+          ],
+          loadedChunks: 9,
+          bounds: { x1: 0, z1: 0, x2: 8, z2: 8 },
+          spawn: null,
+          players: [],
+        };
+      }
+      throw new Error(`surfaceScanCall: unexpected command ${cmd}`);
+    };
+
+    const model = await buildWorldModel(surfaceScanCall, { now: "2026-01-01T00:00:00.000Z" });
+    assert(Array.isArray(model.terrain.materials), "terrain.materials is an array when the gadget's surface field is present");
+    assert(model.terrain.materials[1][1] === "stone", "terrain.materials uses the same [ix][iz] indexing as terrain.heights");
+    assert(model.terrain.materials[0][2] === "sand", "terrain.materials preserves per-cell material names");
   }
 
   console.log("\n1a¹⁰. World model: a gadget:world-scan failure falls back to scan_area exactly as before, and records a note");
@@ -527,6 +561,7 @@ async function main() {
     assert(Array.isArray(model.notes) && model.notes.length === 1, "exactly one fallback note is recorded when the gadget call throws");
     assert(/gadget:world-scan unavailable/.test(model.notes[0]), "the fallback note names gadget:world-scan as the reason for falling back");
     assert(!model.diagnostics.some((d) => d.kind === "terrain-scan-failed"), "buildWorldModel never crashes/errors out when the gadget is unavailable - it degrades silently to scan_area");
+    assert(model.terrain.materials === null, "the scan_area fallback path (no surface data at all) exposes terrain.materials === null");
   }
 
   console.log("\n1a¹¹. 3D map page: renders SPAWN + player markers");
@@ -536,7 +571,7 @@ async function main() {
     assert(/function buildPlayerPrimitives/.test(consoleServerSrc), "console-server.mjs defines buildPlayerPrimitives()");
     assert(/worldmodel\.spawn/.test(consoleServerSrc), "the map page reads worldmodel.spawn");
     assert(/worldmodel\.players/.test(consoleServerSrc), "the map page reads worldmodel.players");
-    assert(/buildSpawnPrimitives\(primitives\)/.test(consoleServerSrc) && /buildPlayerPrimitives\(primitives\)/.test(consoleServerSrc), "draw() invokes both new primitive builders");
+    assert(/buildSpawnPrimitives\(primitives,\s*sideFacing\)/.test(consoleServerSrc) && /buildPlayerPrimitives\(primitives,\s*sideFacing\)/.test(consoleServerSrc), "draw() invokes both new primitive builders (now with the shared sideFacing selection)");
     assert(/'SPAWN'/.test(consoleServerSrc), "the spawn marker is labelled SPAWN");
     assert(/loadedChunks/.test(consoleServerSrc), "the map header surfaces loadedChunks");
   }
@@ -1264,6 +1299,15 @@ async function main() {
   assert(mapHtml.includes('id="problem-list"') && mapHtml.includes("Problems (worst first)"), "GET /map page has the problems panel markup");
   assert(pageWithOrderHtml.includes('href="/map"'), "GET / page links to /map");
   assert(mapHtml.includes('href="/"'), "GET /map page links back to the Lore Console (/)");
+
+  console.log("\n5c¹. 3D map page: terrain renders as cubes/voxels, coloured by block type via a material lookup");
+  assert(/function pushCube\(/.test(mapHtml), "GET /map page defines pushCube() - the shared cube-face builder");
+  assert(/function computeSideFacing\(/.test(mapHtml), "GET /map page defines computeSideFacing() - picks the 2 camera-facing side faces from yaw");
+  assert(/MATERIAL_COLORS/.test(mapHtml), "GET /map page defines a MATERIAL_COLORS lookup");
+  assert(/grass_block/.test(mapHtml) && /deepslate/.test(mapHtml) && /oak_log|_log\$/.test(mapHtml) && /snow_block/.test(mapHtml), "the material lookup covers common Minecraft blocks (grass_block, deepslate, logs, snow_block)");
+  assert(/function colorForMaterial\(/.test(mapHtml), "GET /map page defines colorForMaterial() with an unknown-material fallback");
+  assert(/function heightRampColor\(/.test(mapHtml), "GET /map page keeps the height-based grey/green ramp as the fallback for unknown/absent materials");
+  assert(/function buildEntityCubeStack\(/.test(mapHtml), "GET /map page renders NPCs/players/spawn as cube stacks, not pillar markers");
 
   console.log("\n5d. GET /worldmodel: token-authed like every other console route, returns the raw world-model JSON");
   const worldmodelUnauthed = await fetch(`${base}/worldmodel`);

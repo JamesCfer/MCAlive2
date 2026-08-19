@@ -452,17 +452,30 @@ fixed timer (`BRAIN_POSITION_INTERVAL_TICKS`, default 20 ticks ≈ 1s).
 ### 3D map
 
 `/map` (linked from the console header, and links back) is a dependency-free
-schematic viewer of the live world — a hand-rolled orthographic 3D
+voxel/cube viewer of the live world — a hand-rolled orthographic 3D
 projection on a `<canvas>`, no three.js, no CDN, fetching `GET /worldmodel`
-same-origin (same cookie auth as the rest of the console). It renders the
-terrain heightmap as a shaded surface (skipping any `null` — unloaded-chunk —
-cell rather than drawing a hole or guessing), places as translucent colored
-boxes (color = `builtBy`, red outline = an error flag) or origin markers when
-they have no bounds, NPCs as small vertical markers (green alive, gray dead,
-orange/red if flagged), a gold diamond labelled `SPAWN` at `model.spawn`
-(from the `gadget:world-scan` terrain source — absent if it's unavailable,
-see above), and a cyan marker per online player from `model.players`,
-labelled with their name. Drag to orbit, right-drag/shift-drag to pan, wheel
+same-origin (same cookie auth as the rest of the console). The world is
+Minecraft, so it looks like blocks: every terrain grid cell is drawn as a
+cube (world-size `step`) with its top face at that cell's scanned height,
+extruded down to a shared floor so the ground reads as solid rather than a
+floating tile-sheet (skipping any `null` — unloaded-chunk — cell rather than
+drawing a hole or guessing). Only the top face plus the two side faces the
+camera can actually see are drawn (picked from the orbit camera's yaw), kept
+correctly occluded by the existing painter's-algorithm depth sort. Cubes are
+colored by `terrain.materials` when the scan is small enough to carry it — a
+lookup of common Minecraft blocks (grass, dirt, stone, deepslate, sand,
+gravel, water, snow, logs, leaves, sandstone, clay, terracotta, ice,
+netherrack, cobblestone, mud, moss, podzol) to flat colors, top face
+brightest and the two visible sides shaded darker so the cube form reads;
+unknown materials or a scan with no material data at all fall back to the
+original height-based grey/green ramp. Places stay translucent crisp-edged
+boxes (color = `builtBy`, red outline = an error flag) or origin markers
+when they have no bounds. NPCs, players, and the world spawn are now small
+cube stacks instead of pillar markers — a 1-wide, 2-tall stack for an NPC or
+player (green alive, gray dead, orange/red if flagged; cyan for a player,
+labelled with their name), and a distinct gold cube labelled `SPAWN` at
+`model.spawn` (from the `gadget:world-scan` terrain source — absent if it's
+unavailable, see above). Drag to orbit, right-drag/shift-drag to pan, wheel
 to zoom, hover or click a marker (place, NPC, spawn, or player) for its
 details in the side panel. A fixed problems panel lists every diagnostic
 worst-first (error → warn → info); clicking one recenters the camera on its

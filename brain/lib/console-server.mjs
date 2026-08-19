@@ -536,6 +536,7 @@ function renderMapPage() {
         <div class="row"><span class="swatch" style="background:#ff6a3d"></span> NPC has a flag</div>
       <div class="row"><span class="swatch" style="background:#ffcf5c"></span> world spawn</div>
       <div class="row"><span class="swatch" style="background:#5cc8ff"></span> player online</div>
+      <div class="row" style="color:#6b7078">terrain cubes: coloured by block type when known, grey/green by height otherwise</div>
       </div>
     </section>
     <section id="problems">
@@ -628,51 +629,208 @@ function hasErrorFlag(flags) {
   return Array.isArray(flags) && flags.some(function (f) { return /error/i.test(String(f)); });
 }
 
-function buildTerrainPrimitives(list) {
+// =========================================================================
+// SECTION: voxel/cube rendering helpers
+// -------------------------------------------------------------------------
+// The world is Minecraft, so terrain (and small entities) are drawn as
+// blocky cubes rather than a smooth shaded surface: flat, untextured faces,
+// no lighting model - just enough shading (top brightest, one visible side
+// mid, the other darkest) for the cube form to read. Only the top face plus
+// the two side faces the camera can actually see are ever drawn, chosen
+// once per draw() from the camera's yaw (see computeSideFacing()) - the
+// other two sides and the bottom are always occluded/off-screen for an
+// orbit camera that never dips below the horizon, so skipping them is free
+// correctness, not just a perf trick.
+// =========================================================================
+
+// Small lookup of common Minecraft blocks -> plausible flat top-face
+// colours (as [r,g,b] arrays - cheaper to shade per-frame than parsing hex
+// strings repeatedly in the hot terrain loop). Unmatched/null materials
+// fall back to heightRampColor() below (the pre-existing grey/green ramp).
+var MATERIAL_COLORS = {
+  grass_block: [92, 156, 70],
+  dirt: [134, 96, 60],
+  coarse_dirt: [122, 88, 56],
+  mud: [74, 64, 56],
+  podzol: [92, 69, 48],
+  moss_block: [91, 122, 52],
+  stone: [138, 138, 138],
+  cobblestone: [122, 122, 118],
+  deepslate: [69, 69, 72],
+  cobbled_deepslate: [76, 76, 80],
+  netherrack: [117, 54, 52],
+  sand: [220, 205, 143],
+  red_sand: [201, 111, 58],
+  sandstone: [216, 201, 138],
+  gravel: [141, 133, 121],
+  clay: [154, 163, 172],
+  ice: [168, 212, 240],
+  packed_ice: [150, 196, 232],
+  blue_ice: [130, 176, 232],
+  snow: [242, 246, 250],
+  snow_block: [242, 246, 250],
+  water: [58, 111, 216],
+  terracotta: [165, 87, 58],
+};
+
+function colorForMaterial(material) {
+  if (!material) return null;
+  var m = String(material).toLowerCase().replace(/^minecraft:/, '');
+  if (MATERIAL_COLORS[m]) return MATERIAL_COLORS[m];
+  if (/_log$/.test(m) || m === 'log') return [107, 74, 44];
+  if (/_leaves$/.test(m)) return [63, 122, 52];
+  if (/terracotta$/.test(m)) return [165, 87, 58]; // dyed terracotta variants
+  return null; // unknown material -> caller falls back to heightRampColor()
+}
+
+// Pre-existing grey/green height ramp, kept as the fallback for cells with
+// no known material (large scans, where terrain.materials is null, or an
+// unrecognized block name).
+function heightRampColor(h, bounds) {
+  var lowCol = [72, 92, 62], highCol = [150, 158, 128];
+  var t = clamp((h - bounds.minY) / Math.max(1, bounds.maxY - bounds.minY), 0, 1);
+  return [0, 1, 2].map(function (k) { return Math.round(lowCol[k] + (highCol[k] - lowCol[k]) * t); });
+}
+
+function shadeColor(rgb, factor) {
+  return [0, 1, 2].map(function (k) { return clamp(Math.round(rgb[k] * factor), 0, 255); });
+}
+
+function rgbCss(rgb) { return 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')'; }
+
+function hexToRgbArr(hex) {
+  return [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];
+}
+
+// Which vertical side faces (one along X, one along Z) are front-facing to
+// the camera, derived from the orbit camera's yaw (see project()'s header
+// comment for the rotation convention). Pitch is ignored: cos(pitch) stays
+// positive across the whole allowed pitch range (-1.45..1.45 rad), so it
+// never flips which horizontal side faces the camera. Computed once per
+// draw() call, not per cube.
+function computeSideFacing() {
+  return {
+    x: Math.sin(camera.yaw) < 0 ? 'x2' : 'x1', // 'x2' = +X (east) face visible
+    z: Math.cos(camera.yaw) < 0 ? 'z2' : 'z1', // 'z2' = +Z (south) face visible
+  };
+}
+
+// Pushes one paintable quad (4 world-space corners, already in face-winding
+// order) onto the given list, projecting them once and capturing only what
+// draw() needs (no extra per-vertex allocation beyond the projected points
+// themselves, which draw() requires anyway).
+function pushQuad(list, corners, fillCss, strokeCss, lineWidth) {
+  var pr = [project(corners[0].x, corners[0].y, corners[0].z),
+    project(corners[1].x, corners[1].y, corners[1].z),
+    project(corners[2].x, corners[2].y, corners[2].z),
+    project(corners[3].x, corners[3].y, corners[3].z)];
+  var depth = (pr[0].depth + pr[1].depth + pr[2].depth + pr[3].depth) / 4;
+  list.push({
+    depth: depth,
+    draw: function (pr, fillCss, strokeCss, lineWidth) {
+      return function (ctx) {
+        ctx.beginPath();
+        ctx.moveTo(pr[0].sx, pr[0].sy);
+        ctx.lineTo(pr[1].sx, pr[1].sy);
+        ctx.lineTo(pr[2].sx, pr[2].sy);
+        ctx.lineTo(pr[3].sx, pr[3].sy);
+        ctx.closePath();
+        ctx.fillStyle = fillCss;
+        ctx.fill();
+        if (strokeCss) {
+          ctx.strokeStyle = strokeCss;
+          ctx.lineWidth = lineWidth || 1;
+          ctx.stroke();
+        }
+      };
+    }(pr, fillCss, strokeCss, lineWidth),
+  });
+}
+
+// Pushes a full cube's visible faces (top + the 2 camera-facing sides, see
+// computeSideFacing()) between (x1..x2, yBottom..yTop, z1..z2). topRgb is
+// shaded down for the two side faces so top stays brightest, one side mid,
+// the other darkest - the minimal shading needed for the cube form to read
+// without any real lighting model.
+function pushCube(list, x1, x2, yBottom, yTop, z1, z2, topRgb, sideFacing, strokeCss, lineWidth) {
+  var sideXRgb = shadeColor(topRgb, 0.72);
+  var sideZRgb = shadeColor(topRgb, 0.5);
+  var topCss = rgbCss(topRgb), sideXCss = rgbCss(sideXRgb), sideZCss = rgbCss(sideZRgb);
+
+  pushQuad(list, [
+    { x: x1, y: yTop, z: z1 }, { x: x2, y: yTop, z: z1 },
+    { x: x2, y: yTop, z: z2 }, { x: x1, y: yTop, z: z2 },
+  ], topCss, strokeCss, lineWidth);
+
+  if (sideFacing.x === 'x2') {
+    pushQuad(list, [
+      { x: x2, y: yBottom, z: z1 }, { x: x2, y: yBottom, z: z2 },
+      { x: x2, y: yTop, z: z2 }, { x: x2, y: yTop, z: z1 },
+    ], sideXCss, strokeCss, lineWidth);
+  } else {
+    pushQuad(list, [
+      { x: x1, y: yBottom, z: z1 }, { x: x1, y: yTop, z: z1 },
+      { x: x1, y: yTop, z: z2 }, { x: x1, y: yBottom, z: z2 },
+    ], sideXCss, strokeCss, lineWidth);
+  }
+
+  if (sideFacing.z === 'z2') {
+    pushQuad(list, [
+      { x: x1, y: yBottom, z: z2 }, { x: x2, y: yBottom, z: z2 },
+      { x: x2, y: yTop, z: z2 }, { x: x1, y: yTop, z: z2 },
+    ], sideZCss, strokeCss, lineWidth);
+  } else {
+    pushQuad(list, [
+      { x: x1, y: yBottom, z: z1 }, { x: x2, y: yBottom, z: z1 },
+      { x: x2, y: yTop, z: z1 }, { x: x1, y: yTop, z: z1 },
+    ], sideZCss, strokeCss, lineWidth);
+  }
+}
+
+var TERRAIN_STROKE = 'rgba(0,0,0,.25)';
+
+// Each terrain grid cell becomes one cube of world-size step, top face
+// sitting at that cell's scanned height, extruded down to a shared floor a
+// few blocks below the lowest known height in the whole grid (clamped so a
+// single deep cell can't blow up the geometry) - this reads as solid ground
+// with real depth and never leaves a gap under a neighboring cliff, since
+// every column shares the same floor. Coloured by terrain.materials when
+// available (see colorForMaterial()); unknown material or no materials data
+// at all falls back to the pre-existing height-based grey/green ramp.
+function buildTerrainPrimitives(list, sideFacing) {
   var terrain = worldmodel.terrain;
   if (!terrain || !terrain.heights || !terrain.heights.length) return;
-  var heights = terrain.heights, step = terrain.step || 1;
+  var heights = terrain.heights, materials = terrain.materials, step = terrain.step || 1;
   var ox = terrain.origin ? terrain.origin.x : 0, oz = terrain.origin ? terrain.origin.z : 0;
   var bounds = worldmodel.bounds || { minY: 0, maxY: 256 };
-  var lightDir = normalize3({ x: 0.35, y: 1, z: 0.25 });
-  var lowCol = [72, 92, 62], highCol = [150, 158, 128];
-  var rows = heights.length;
-  for (var j = 0; j < rows - 1; j++) {
-    var row0 = heights[j], row1 = heights[j + 1];
-    if (!row0 || !row1) continue;
-    var cols = row0.length;
-    for (var i = 0; i < cols - 1; i++) {
-      var h00 = row0[i], h10 = row0[i + 1], h11 = row1[i + 1], h01 = row1[i];
-      if (h00 == null || h10 == null || h11 == null || h01 == null) continue;
-      var p00 = { x: ox + i * step, y: h00, z: oz + j * step };
-      var p10 = { x: ox + (i + 1) * step, y: h10, z: oz + j * step };
-      var p11 = { x: ox + (i + 1) * step, y: h11, z: oz + (j + 1) * step };
-      var p01 = { x: ox + i * step, y: h01, z: oz + (j + 1) * step };
-      var normal = faceNormal(p00, p10, p11);
-      var shade = clamp(0.35 + 0.75 * dot3(normal, lightDir), 0.3, 1.15);
-      var avgH = (h00 + h10 + h11 + h01) / 4;
-      var t = clamp((avgH - bounds.minY) / Math.max(1, bounds.maxY - bounds.minY), 0, 1);
-      var col = [0, 1, 2].map(function (k) { return Math.round((lowCol[k] + (highCol[k] - lowCol[k]) * t) * shade); });
-      var pr = [p00, p10, p11, p01].map(function (p) { return project(p.x, p.y, p.z); });
-      var depth = (pr[0].depth + pr[1].depth + pr[2].depth + pr[3].depth) / 4;
-      list.push({
-        depth: depth,
-        draw: function (pr, col) {
-          return function (ctx) {
-            ctx.beginPath();
-            ctx.moveTo(pr[0].sx, pr[0].sy);
-            ctx.lineTo(pr[1].sx, pr[1].sy);
-            ctx.lineTo(pr[2].sx, pr[2].sy);
-            ctx.lineTo(pr[3].sx, pr[3].sy);
-            ctx.closePath();
-            ctx.fillStyle = 'rgb(' + col[0] + ',' + col[1] + ',' + col[2] + ')';
-            ctx.fill();
-            ctx.strokeStyle = 'rgba(0,0,0,.18)';
-            ctx.lineWidth = 1;
-            ctx.stroke();
-          };
-        }(pr, col),
-      });
+
+  var minH = Infinity;
+  for (var r = 0; r < heights.length; r++) {
+    var hrow = heights[r];
+    if (!hrow) continue;
+    for (var c = 0; c < hrow.length; c++) {
+      if (hrow[c] != null && hrow[c] < minH) minH = hrow[c];
+    }
+  }
+  if (!isFinite(minH)) return;
+  var maxDepth = Math.max(step * 4, 16);
+
+  for (var i = 0; i < heights.length; i++) {
+    var row = heights[i];
+    if (!row) continue;
+    var matRow = materials ? materials[i] : null;
+    for (var j = 0; j < row.length; j++) {
+      var h = row[j];
+      if (h == null) continue;
+      var x1 = ox + i * step, x2 = x1 + step;
+      var z1 = oz + j * step, z2 = z1 + step;
+      var yTop = h;
+      var yBottom = Math.max(minH - 3, h - maxDepth);
+      if (yBottom >= yTop) yBottom = yTop - step;
+
+      var mat = matRow ? matRow[j] : null;
+      var topRgb = colorForMaterial(mat) || heightRampColor(h, bounds);
+      pushCube(list, x1, x2, yBottom, yTop, z1, z2, topRgb, sideFacing, TERRAIN_STROKE, 1);
     }
   }
 }
@@ -750,112 +908,72 @@ function buildPlacePrimitives(list) {
   });
 }
 
-function buildNpcPrimitives(list) {
+// Builds a small 1-wide (width blocks square footprint), levels-tall
+// stack of cubes centered on (x,z) starting at yBase - how NPCs, players,
+// and spawn now read as blocky volumes rather than pillar/pin markers, same
+// cube-face machinery (pushCube) as the terrain. Registers one hit target
+// and one label at the stack's top, exactly like the old marker code did.
+function buildEntityCubeStack(list, sideFacing, opts) {
+  var hw = opts.width / 2;
+  var x1 = opts.x - hw, x2 = opts.x + hw, z1 = opts.z - hw, z2 = opts.z + hw;
+  var strokeCss = opts.hovered ? '#ffffff' : 'rgba(0,0,0,.4)';
+  var lineWidth = opts.hovered ? 2 : 1;
+  for (var lvl = 0; lvl < opts.levels; lvl++) {
+    var yBottom = opts.yBase + lvl, yTop = yBottom + 1;
+    pushCube(list, x1, x2, yBottom, yTop, z1, z2, opts.colorRgb, sideFacing, strokeCss, lineWidth);
+  }
+  var top = project(opts.x, opts.yBase + opts.levels, opts.z);
+  if (opts.label) {
+    list.push({
+      depth: top.depth - 0.01,
+      draw: function (ctx) { drawLabel(ctx, top, opts.label, opts.labelColor); },
+    });
+  }
+  registerHit(top, 10, opts.hitKind, opts.hitObj);
+}
+
+function buildNpcPrimitives(list, sideFacing) {
   (worldmodel.npcs || []).forEach(function (npc) {
     if (!npc.pos) return; // skip gracefully - no marker without a position
     var color = '#4caf6b';
     if (hasErrorFlag(npc.flags) || (Array.isArray(npc.flags) && npc.flags.length)) color = '#ff6a3d';
     else if (!npc.alive) color = '#6b7078';
-    var base = project(npc.pos.x, npc.pos.y, npc.pos.z);
-    var top = project(npc.pos.x, npc.pos.y + 1.8, npc.pos.z);
-    list.push({
-      depth: base.depth,
-      draw: function (ctx) {
-        ctx.beginPath();
-        ctx.moveTo(base.sx, base.sy);
-        ctx.lineTo(top.sx, top.sy);
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 3;
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(top.sx, top.sy, 4, 0, Math.PI * 2);
-        ctx.fillStyle = color;
-        ctx.fill();
-        if (hoveredKey === 'npc:' + npc.id) {
-          ctx.beginPath();
-          ctx.arc(top.sx, top.sy, 8, 0, Math.PI * 2);
-          ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth = 1.5;
-          ctx.stroke();
-        }
-      },
+    buildEntityCubeStack(list, sideFacing, {
+      x: npc.pos.x, z: npc.pos.z, yBase: npc.pos.y, width: 0.7, levels: 2,
+      colorRgb: hexToRgbArr(color), hovered: hoveredKey === 'npc:' + npc.id,
+      hitKind: 'npc', hitObj: npc, label: null, labelColor: color,
     });
-    registerHit(top, 9, 'npc', npc);
   });
 }
 
-// Distinct-shaped marker for the world spawn point (a diamond, gold) - drawn
-// from worldmodel.spawn ({x,y,z}|null), the real spawn reported by the
+// Distinct cube marker for the world spawn point (gold) - drawn from
+// worldmodel.spawn ({x,y,z}|null), the real spawn reported by the
 // gadget:world-scan terrain source (falls back to nothing drawn if the
 // gadget was unavailable and buildWorldModel() left spawn null).
-function buildSpawnPrimitives(list) {
+function buildSpawnPrimitives(list, sideFacing) {
   var spawn = worldmodel.spawn;
   if (!spawn) return;
-  var base = project(spawn.x, spawn.y, spawn.z);
-  var top = project(spawn.x, spawn.y + 2.6, spawn.z);
-  list.push({
-    depth: base.depth,
-    draw: function (ctx) {
-      ctx.beginPath();
-      ctx.moveTo(base.sx, base.sy);
-      ctx.lineTo(top.sx, top.sy);
-      ctx.strokeStyle = '#ffcf5c';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      var r = 7;
-      ctx.beginPath();
-      ctx.moveTo(top.sx, top.sy - r);
-      ctx.lineTo(top.sx + r, top.sy);
-      ctx.lineTo(top.sx, top.sy + r);
-      ctx.lineTo(top.sx - r, top.sy);
-      ctx.closePath();
-      ctx.fillStyle = '#ffcf5c';
-      ctx.fill();
-      ctx.strokeStyle = '#0f1114';
-      ctx.lineWidth = 1;
-      ctx.stroke();
-      drawLabel(ctx, { sx: top.sx, sy: top.sy - r - 6 }, 'SPAWN', '#ffcf5c');
-    },
+  buildEntityCubeStack(list, sideFacing, {
+    x: spawn.x, z: spawn.z, yBase: spawn.y, width: 1.3, levels: 1,
+    colorRgb: hexToRgbArr('#ffcf5c'), hovered: hoveredKey === 'spawn:spawn',
+    hitKind: 'spawn', hitObj: { id: 'spawn', name: 'World spawn', flags: [] },
+    label: 'SPAWN', labelColor: '#ffcf5c',
   });
-  registerHit(top, 9, 'spawn', { id: 'spawn', name: 'World spawn', flags: [] });
 }
 
 // Player markers - distinct color from NPCs, labelled with the player's
 // name, drawn from worldmodel.players ([{name,x,y,z}], empty when the
 // gadget:world-scan terrain source is unavailable - see buildWorldModel()).
-function buildPlayerPrimitives(list) {
+function buildPlayerPrimitives(list, sideFacing) {
   (worldmodel.players || []).forEach(function (p) {
     if (typeof p.x !== 'number' || typeof p.y !== 'number' || typeof p.z !== 'number') return;
     var color = '#5cc8ff';
-    var base = project(p.x, p.y, p.z);
-    var top = project(p.x, p.y + 1.8, p.z);
-    list.push({
-      depth: base.depth,
-      draw: function (ctx) {
-        ctx.beginPath();
-        ctx.moveTo(base.sx, base.sy);
-        ctx.lineTo(top.sx, top.sy);
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 3;
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(top.sx, top.sy, 5, 0, Math.PI * 2);
-        ctx.fillStyle = color;
-        ctx.fill();
-        ctx.strokeStyle = '#0f1114';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        drawLabel(ctx, { sx: top.sx, sy: top.sy - 10 }, p.name, color);
-        if (hoveredKey === 'player:' + p.name) {
-          ctx.beginPath();
-          ctx.arc(top.sx, top.sy, 9, 0, Math.PI * 2);
-          ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth = 1.5;
-          ctx.stroke();
-        }
-      },
+    buildEntityCubeStack(list, sideFacing, {
+      x: p.x, z: p.z, yBase: p.y, width: 0.7, levels: 2,
+      colorRgb: hexToRgbArr(color), hovered: hoveredKey === 'player:' + p.name,
+      hitKind: 'player', hitObj: { id: p.name, name: p.name, flags: [] },
+      label: p.name, labelColor: color,
     });
-    registerHit(top, 9, 'player', { id: p.name, name: p.name, flags: [] });
   });
 }
 
@@ -878,16 +996,6 @@ function drawLabel(ctx, pt, text, color) {
 // SECTION: small math helpers
 // =========================================================================
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-function dot3(a, b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
-function normalize3(v) {
-  var len = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z) || 1;
-  return { x: v.x / len, y: v.y / len, z: v.z / len };
-}
-function faceNormal(a, b, c) {
-  var u = { x: b.x - a.x, y: b.y - a.y, z: b.z - a.z };
-  var v = { x: c.x - a.x, y: c.y - a.y, z: c.z - a.z };
-  return normalize3({ x: u.y * v.z - u.z * v.y, y: u.z * v.x - u.x * v.z, z: u.x * v.y - u.y * v.x });
-}
 function hexToRgba(hex, alpha) {
   var r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
   return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
@@ -906,11 +1014,12 @@ function draw() {
 
   hitTargets = [];
   var primitives = [];
-  buildTerrainPrimitives(primitives);
+  var sideFacing = computeSideFacing();
+  buildTerrainPrimitives(primitives, sideFacing);
   buildPlacePrimitives(primitives);
-  buildNpcPrimitives(primitives);
-  buildSpawnPrimitives(primitives);
-  buildPlayerPrimitives(primitives);
+  buildNpcPrimitives(primitives, sideFacing);
+  buildSpawnPrimitives(primitives, sideFacing);
+  buildPlayerPrimitives(primitives, sideFacing);
   primitives.sort(function (a, b) { return b.depth - a.depth; }); // farthest first
   primitives.forEach(function (p) { p.draw(ctx); });
 
