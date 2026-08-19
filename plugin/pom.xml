@@ -6,7 +6,7 @@
 
   <groupId>dev.celestia</groupId>
   <artifactId>mcalive2</artifactId>
-  <version>0.5.0</version>
+  <version>0.5.1</version>
   <packaging>jar</packaging>
   <name>MCAlive2</name>
 

@@ -41,9 +41,17 @@ public final class TerrainSampler {
         int minY = world.getMinHeight();
         int maxY = world.getMaxHeight() - 1;
         int requestedFeetY = Math.max(minY, Math.min(maxY, yHint));
-        int feetY = Standing.resolve(requestedFeetY, minY, maxY, SURFACE_SCAN_RADIUS,
-                y -> y >= minY && y <= maxY && world.getBlockAt(x, y, z).isPassable());
-        return feetY - 1;
+        try {
+            int feetY = Standing.resolve(requestedFeetY, minY, maxY, SURFACE_SCAN_RADIUS,
+                    y -> y >= minY && y <= maxY && world.getBlockAt(x, y, z).isPassable());
+            return feetY - 1;
+        } catch (IllegalStateException noStandingSpot) {
+            // Nothing standable near the hint in THIS column - e.g. open sky beside a
+            // floating island, or a sheer drop. That is a normal feature of terrain, not
+            // an error: fall back to the plain highest-block surface so one such column
+            // can never abort an entire scan of thousands of columns.
+            return world.getHighestBlockYAt(x, z);
+        }
     }
 
     /**

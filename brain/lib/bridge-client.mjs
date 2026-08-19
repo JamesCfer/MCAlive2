@@ -22,12 +22,17 @@
 import { log } from "./logger.mjs";
 
 export class BridgeClient {
-  constructor({ url, token, baseMs = 1000, maxMs = 30000, onEvent }) {
+  constructor({ url, token, baseMs = 1000, maxMs = 30000, onEvent, onAuthed }) {
     this.url = url;
     this.token = token;
     this.baseMs = baseMs;
     this.maxMs = maxMs;
     this.onEvent = onEvent || (() => {});
+    // Called after EVERY successful auth, not just the first. Server restarts
+    // (including the automatic update restarts) drop and remake this
+    // connection, and anything installed server-side - gadgets especially -
+    // must be re-established each time rather than only once at brain boot.
+    this.onAuthed = onAuthed || (() => {});
     this.attempt = 0;
     this.stopped = false;
     this.ws = null;
@@ -94,6 +99,10 @@ export class BridgeClient {
           this.attempt = 0; // reset backoff on a clean connection
           log.info("bridge_auth_ok", { url: this.url });
           this._flushReadyWaiters(null);
+          try {
+            const r = this.onAuthed();
+            if (r && typeof r.catch === "function") r.catch(() => {});
+          } catch { /* never let a hook break the connection */ }
         } else {
           log.error("bridge_auth_failed", { error: msg.error });
           this._flushReadyWaiters(new Error("auth failed: " + msg.error));

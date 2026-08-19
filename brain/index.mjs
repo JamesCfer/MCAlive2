@@ -506,11 +506,21 @@ export async function main(env = process.env) {
       // a sense event the director cares about at all.
       if (DIRECTOR_WAKE_EVENTS.has(event)) scheduler.push(event, data);
     },
+    // Re-install system gadgets on EVERY successful auth, not just at boot.
+    // The brain may connect before the server is gadget-capable (an older
+    // plugin still running), and every server restart - including the
+    // automatic update restarts - remakes this connection. Installing only
+    // once at boot left the world with no live positions and no world-scan
+    // until someone happened to restart the brain. All three installs are
+    // idempotent (gadget_define overwrites; the timer gadgets cancel their
+    // previous task), so repeating them is free.
+    onAuthed: () => {
+      installPositionTracker(); // fire-and-forget: never throws, see its own comment
+      installUpdateRestart(); // fire-and-forget: never throws, sentinel-gated
+      installWorldScan(); // fire-and-forget: never throws, see its own comment
+    },
   });
   bridge.start();
-  installPositionTracker(); // fire-and-forget: never throws, see its own comment
-  installUpdateRestart(); // fire-and-forget: never throws, sentinel-gated
-  installWorldScan(); // fire-and-forget: never throws, see its own comment
 
   const stop = () => {
     bridge.stop();
