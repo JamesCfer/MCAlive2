@@ -210,6 +210,18 @@ export function formatHumanLine(level, msg, fields = {}, now = new Date()) {
       body = `brain is up to date (${fields.head})`;
       break;
 
+    case "position_tracking_installed":
+      body = `live position tracking installed (interval ${fields.intervalTicks} ticks)`;
+      break;
+
+    case "position_tracking_unavailable":
+      body = `⚠ ${fields.message}`;
+      break;
+
+    case "position_tracking_disabled":
+      body = `live position tracking disabled (${fields.reason})`;
+      break;
+
     default: {
       const rest = Object.entries(fields)
         .map(([k, v]) => `${k}=${typeof v === "object" && v !== null ? compactArgs(v, 60) : v}`)

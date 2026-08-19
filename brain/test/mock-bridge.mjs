@@ -91,6 +91,11 @@ function scheduleEvents(sock) {
     [300, "player_chat", { player: "Steve", message: "anyone home?", location: { x: 481, y: 75, z: 5 } }],
     [700, "npc_interact", { npcId: "mara-baker", player: "Steve", location: { x: 500, y: 75, z: 2 } }],
     [900, "player_chat", { player: "Steve", message: "what have you found?", nearNpcId: "kess-smith", location: { x: 505, y: 75, z: -3 } }],
+    // Pushed telemetry (see gadgets/position-tracker.java) - the smoke test
+    // asserts this reaches index.mjs's event handler but never lands inside
+    // a director scene's batched events (it is pure cache-feed, not a wake
+    // event; see config.mjs's DIRECTOR_WAKE_EVENTS).
+    [1000, "entity_positions", { at: Date.now(), npcs: [{ id: "mara-baker", world: "world", x: 500.5, y: 75, z: 2.5 }], players: [{ name: "Steve", world: "world", x: 480, y: 75, z: 5 }] }],
     [2200, "npc_death", { npcId: "sella", npcName: "Sella", dead: true, location: { x: 502, y: 75, z: 2 } }],
     [3000, "region_enter", { player: "Steve", regionId: "village-square", regionName: "Village Square", location: { x: 490, y: 75, z: 3 } }],
     [3050, "region_exit", { player: "Steve", regionId: "village-square", regionName: "Village Square", location: { x: 492, y: 75, z: 3 } }],

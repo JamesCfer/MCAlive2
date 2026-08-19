@@ -371,11 +371,55 @@ total per snapshot, spent only on the NPC off-ground check):
 | error | `off-ground` | an alive NPC whose position is >2 blocks above or >1 block below the nearest solid ground found within its probe budget |
 | info | `dead` | a dead NPC |
 
-No `npc_list`/`npc_get` (live NPC position) bridge command exists — only
-`ledger_query`/`npc_context` expose NPC data, neither carries a *live*
-position. NPC `pos` falls back to the ledger record's `home` coordinate,
-flagged `position-from-ledger-home (no live-position bridge command
-exists)` so callers know it's a static approximation, not a live read.
+No `npc_list`/`npc_get` (live NPC position) REQUEST/RESPONSE bridge command
+exists — only `ledger_query`/`npc_context` expose NPC data that way, neither
+carrying a *live* position. See "Live position tracking" directly below for
+where a live position DOES now come from, and NPC `pos`'s fallback to the
+ledger record's `home` coordinate when there is none.
+
+### Live position tracking
+
+Instead of the world model polling for positions on every request, the
+plugin now **pushes** them: `gadgets/position-tracker.java` is a runtime-
+injected [gadget](#gadgets) that broadcasts an `entity_positions` bridge
+event (`{at, npcs:[{id,world,x,y,z}], players:[{name,world,x,y,z}]}`) on a
+fixed timer (`BRAIN_POSITION_INTERVAL_TICKS`, default 20 ticks ≈ 1s).
+
+- **Boot auto-install** — right after `index.mjs`'s own bridge connection
+  authenticates, it reads `gadgets/position-tracker.java`, calls
+  `gadget_define {id:"position-tracker", source, description}` then
+  `gadget_run {id:"position-tracker", args:{intervalTicks}}`. Both calls are
+  wrapped so a failure (server not yet on a gadget-capable plugin version,
+  gadgets disabled, a bridge that's still reconnecting) is logged as a clear
+  `⚠ live position tracking unavailable: <reason>; world model will fall
+  back to ledger home positions` and otherwise ignored — the brain never
+  crashes over this. Set `BRAIN_POSITION_TRACKING=0` to skip the auto-install
+  outright. Safe to run again on every boot: `gadget_define` overwrites the
+  same id's source, and the gadget's own `run()` cancels its previous timer
+  task before starting a new one (tracked in a JVM system property, so it
+  survives a brain restart even though the gadget's classloader doesn't).
+- **Caching** — `index.mjs`'s event router feeds every pushed
+  `entity_positions` event into `lib/position-cache.mjs` (a small
+  per-npc-id / per-player-name latest-position map with an injectable
+  clock, independently unit-tested). This is **pure telemetry**: it is
+  deliberately absent from `config.mjs`'s `DIRECTOR_WAKE_EVENTS`, so it
+  never debounces into a director scene — only `lib/worldmodel.mjs` reads
+  from it.
+- **World model** — `buildWorldModel()` takes an optional
+  `opts.npcPositions` getter/Map/object; `index.mjs` passes one bound to the
+  live cache when building `/worldmodel`'s snapshot. A fresh cached position
+  wins over the ledger `home` fallback (dropping the
+  `position-from-ledger-home` flag); a *stale* one (older than
+  `BRAIN_POSITION_STALE_SEC`, default 30s) is still used rather than
+  discarded, just flagged `position-stale`; with nothing cached at all, an
+  NPC falls back to its ledger `home` coordinate exactly as before this
+  feature. The off-ground diagnostic runs against whichever position won.
+- **Scope** — this only benefits world-model consumers running in the SAME
+  process as `index.mjs`'s bridge connection (today: `GET /worldmodel`, the
+  `/map` viewer's data source). `mcp-bridge.mjs` (the director/actor Agent
+  SDK tool server, spawned fresh per `query()`) is a separate process that
+  explicitly ignores pushed bridge events on its own connection, so its
+  `world_overview` tool keeps using ledger-home positions only.
 
 ### 3D map
 
@@ -558,6 +602,9 @@ It exits non-zero if any assertion fails.
 | `BRAIN_UPDATE_CHECK_MIN` | unset | Fallback (minutes, converted to seconds) if `BRAIN_UPDATE_CHECK_SEC` is unset; ignored otherwise |
 | `BRAIN_UPDATE_IDLE_WAIT_SEC` | `600` | Cap on how long self-update's restart waits for the director/actor idle point before restarting anyway (`<=0` waits forever) |
 | `BRAIN_DEBUG` | `0` | `1` = also show debug-level lines (e.g. self-update's "up to date" check) in the default human-readable console |
+| `BRAIN_POSITION_TRACKING` | `1` | Set to `0` to skip the boot auto-install of `gadgets/position-tracker.java` entirely (world model always falls back to ledger home positions, exactly as before this feature existed) |
+| `BRAIN_POSITION_INTERVAL_TICKS` | `20` | `intervalTicks` passed to the position-tracker gadget on `gadget_run` — how often (in server ticks, 20/s) it broadcasts `entity_positions` |
+| `BRAIN_POSITION_STALE_SEC` | `30` | Age (seconds) past which a cached live position is marked `stale` (still used, not discarded — see Live position tracking below) |
 
 ## Files
 
@@ -605,7 +652,14 @@ It exits non-zero if any assertion fails.
   aggregates ledger places/NPCs + a coarse `scan_area` + budgeted
   `get_block` probes into the world model and its text digest, backing the
   `world_overview` tool and `GET /worldmodel` (see World model & map data
-  above).
+  above). Prefers a live position from `opts.npcPositions` over the ledger
+  `home` fallback when one is available (see Live position tracking above).
+- `lib/position-cache.mjs` — small per-npc-id / per-player-name latest-
+  position cache fed by pushed `entity_positions` bridge events; see Live
+  position tracking above.
+- `gadgets/position-tracker.java` — the runtime-injected gadget source
+  (Java) that streams `entity_positions`; auto-installed on boot by
+  `index.mjs` (see Live position tracking above).
 - `lib/self-update.mjs` — checks `origin/main` on a timer and pulls +
   restarts (exit 75) when new code has landed; see Auto-update above.
 - `run-forever.cmd` — Windows restart-loop wrapper around `npm start` that

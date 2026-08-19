@@ -18,13 +18,19 @@
 //     ONLY for the NPC off-ground diagnostic, budgeted (see
 //     MAX_GET_BLOCK_PROBES below)
 //
-// No npc_list/npc_get (live NPC position) bridge command exists - only
-// ledger_query/ledger_get and npc_context expose NPC data, and none of those
-// carry a *live* position (the plugin does not register any such command;
-// see plugin/src/main/java/dev/celestia/mcalive2/actuators/NpcActuators.java
-// and CommandDispatcher's registration list). So NPC "pos" falls back to the
-// ledger record's `home` coordinate, flagged so callers know it is a static
-// approximation, not a live read.
+// No npc_list/npc_get (live NPC position) REQUEST/RESPONSE bridge command
+// exists - only ledger_query/ledger_get and npc_context expose NPC data, and
+// none of those carry a *live* position. Live positions instead arrive as a
+// PUSHED "entity_positions" bridge event (brain/gadgets/position-tracker.java,
+// auto-installed on boot by index.mjs), cached by lib/position-cache.mjs.
+// buildWorldModel() stays pure/testable by never importing that cache
+// directly - callers (index.mjs) pass a getter/map via opts.npcPositions
+// (see normalizeNpcPositionsGetter() below). When no live position is cached
+// for an NPC (never seen yet, or opts.npcPositions wasn't supplied at all -
+// e.g. mcp-bridge.mjs's world_overview, a separate short-lived process that
+// never sees pushed events), NPC "pos" falls back to the ledger record's
+// `home` coordinate, flagged so callers know it is a static approximation,
+// not a live read.
 
 // Hard cap on total get_block calls a single buildWorldModel() run may make
 // (all spent on the NPC off-ground diagnostic) - keeps a scene with many
@@ -52,6 +58,19 @@ function isFiniteNum(v) {
 
 function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
+}
+
+/** Normalizes opts.npcPositions - a `(id) => pos|null` getter, a Map, or a
+ * plain object keyed by npc id - into a single getter function, so the rest
+ * of buildWorldModel() doesn't care which shape the caller passed. Absent
+ * entirely -> every lookup returns null (today's ledger-home-only
+ * behavior). Keeps this module import-free of lib/position-cache.mjs, so it
+ * stays independently testable with plain injected data. */
+function normalizeNpcPositionsGetter(npcPositions) {
+  if (!npcPositions) return () => null;
+  if (typeof npcPositions === "function") return (id) => npcPositions(id) || null;
+  if (npcPositions instanceof Map) return (id) => npcPositions.get(id) || null;
+  return (id) => npcPositions[id] || null;
 }
 
 /** Extracts a {x1,y1,z1,x2,y2,z2} bounds object from a place record, or null
@@ -203,11 +222,19 @@ async function checkNpcGrounding(call, pos, budget) {
  *   terrain scan footprint (world_overview's `area` param); overrides the
  *   auto-computed bounding box of all places.
  * @param {number} [opts.maxGetBlockProbes] - override MAX_GET_BLOCK_PROBES (tests only).
+ * @param {((id: string) => object|null)|Map|object} [opts.npcPositions] -
+ *   live-position source (a getter, a Map, or a plain object keyed by npc
+ *   id), each entry shaped `{world?,x,y,z,at?,stale?}`. When an entry exists
+ *   and carries finite x/y/z it is preferred over the ledger's `home`
+ *   coordinate; `stale:true` on the entry adds the "position-stale" flag
+ *   instead of dropping the position. Omit entirely to keep today's
+ *   ledger-home-only behavior (see index.mjs / lib/position-cache.mjs).
  * @returns {Promise<object>} the pinned world model shape - see module header.
  */
 export async function buildWorldModel(call, opts = {}) {
   const generatedAt = opts.now;
   const diagnostics = [];
+  const getLivePosition = normalizeNpcPositionsGetter(opts.npcPositions);
 
   // ---- places ----
   let placeRecords = [];
@@ -237,15 +264,21 @@ export async function buildWorldModel(call, opts = {}) {
     flags: [],
   }));
 
-  // No live-position bridge command exists for NPCs (see module header) -
-  // fall back to the ledger's `home` coordinate and flag it so callers know
-  // this is a static approximation, not a live read.
+  // Prefer a live position (pushed "entity_positions" event, cached - see
+  // module header) over the ledger's static `home` coordinate. Stale-but-
+  // present live data is still used (flagged, not discarded) rather than
+  // silently reverting to ledger-home, which would hide a gadget/plugin
+  // problem behind an equally-plausible-looking static answer.
   const npcs = npcRecords.map((r) => {
     const flags = [];
     let pos = null;
-    if (r.home && isFiniteNum(r.home.x) && isFiniteNum(r.home.y) && isFiniteNum(r.home.z)) {
+    const live = getLivePosition(r.id);
+    if (live && isFiniteNum(live.x) && isFiniteNum(live.y) && isFiniteNum(live.z)) {
+      pos = { x: live.x, y: live.y, z: live.z };
+      if (live.stale) flags.push("position-stale");
+    } else if (r.home && isFiniteNum(r.home.x) && isFiniteNum(r.home.y) && isFiniteNum(r.home.z)) {
       pos = { x: r.home.x, y: r.home.y, z: r.home.z };
-      flags.push("position-from-ledger-home (no live-position bridge command exists)");
+      flags.push("position-from-ledger-home (no live-position cached)");
     }
     return {
       id: r.id,
@@ -337,7 +370,7 @@ export async function buildWorldModel(call, opts = {}) {
       continue;
     }
     if (!npc.pos) {
-      diagnostics.push({ severity: "warn", kind: "no-position", subject: npc.id, message: `${npc.name} has no known position (no live-position command and no ledger home)`, at: null });
+      diagnostics.push({ severity: "warn", kind: "no-position", subject: npc.id, message: `${npc.name} has no known position (no cached live position and no ledger home)`, at: null });
       continue;
     }
     if (probeBudget.remaining <= 0) continue; // probe budget exhausted - skip silently, don't false-flag

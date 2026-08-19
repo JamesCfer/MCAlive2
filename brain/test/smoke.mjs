@@ -51,6 +51,7 @@ import { runDirectorTurn, maxTurnsFor } from "../lib/director-turn.mjs";
 import { runActorTurn } from "../lib/actor-turn.mjs";
 import { DirectorScheduler } from "../lib/director-scheduler.mjs";
 import { buildWorldModel, formatWorldOverview } from "../lib/worldmodel.mjs";
+import { PositionCache } from "../lib/position-cache.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BRAIN_DIR = path.resolve(__dirname, "..");
@@ -336,6 +337,116 @@ async function main() {
     const summaryDigest = formatWorldOverview(model, { detail: "summary" });
     assert(!/^[A-Z+.]{5,}$/m.test(summaryDigest.split("PROBLEMS")[0]), "detail:\"summary\" omits the ASCII map's raw grid lines");
   }
+
+  console.log("\n1a⁶. Live position tracking: lib/position-cache.mjs stores/serves fresh vs. stale positions with an injected clock");
+  {
+    const cache = new PositionCache({ staleSec: 30 });
+
+    assert(cache.npcPosition("mara-baker") === null, "an id never seen returns null, not a stale/empty object");
+    assert(cache.playerPosition("Steve") === null, "same for a never-seen player name");
+
+    const t0 = 1_000_000;
+    cache.updateFromEvent(
+      {
+        at: t0,
+        npcs: [{ id: "mara-baker", world: "world", x: 500, y: 75, z: 2 }],
+        players: [{ name: "Steve", world: "world", x: 480, y: 75, z: 5 }],
+      },
+      t0
+    );
+
+    const fresh = cache.npcPosition("mara-baker", t0 + 5000); // 5s later - well under the 30s staleSec
+    assert(fresh && fresh.x === 500 && fresh.y === 75 && fresh.z === 2, "npcPosition returns the cached x/y/z");
+    assert(fresh && fresh.world === "world", "npcPosition carries the world through");
+    assert(fresh && fresh.stale === false, "a position read 5s after its update, under a 30s staleSec, is NOT marked stale");
+
+    const stalePos = cache.npcPosition("mara-baker", t0 + 31_000); // 31s later - past staleSec
+    assert(stalePos && stalePos.stale === true, "the SAME position read 31s later (past staleSec=30) IS marked stale");
+    assert(stalePos && stalePos.x === 500, "a stale position is still returned with its last-known coordinates, not hidden");
+
+    const freshPlayer = cache.playerPosition("Steve", t0 + 1000);
+    assert(freshPlayer && freshPlayer.x === 480 && freshPlayer.stale === false, "playerPosition mirrors npcPosition's fresh behavior");
+
+    // A second event for the SAME npc id overwrites, doesn't accumulate.
+    cache.updateFromEvent({ at: t0 + 10_000, npcs: [{ id: "mara-baker", world: "world", x: 501, y: 75, z: 3 }], players: [] }, t0 + 10_000);
+    const moved = cache.npcPosition("mara-baker", t0 + 10_000);
+    assert(moved && moved.x === 501 && moved.z === 3, "a later event for the same npc id overwrites its cached position rather than adding a second entry");
+
+    // Malformed/partial events never throw.
+    cache.updateFromEvent(null, t0);
+    cache.updateFromEvent({}, t0);
+    cache.updateFromEvent({ npcs: "not an array", players: null }, t0);
+    assert(true, "updateFromEvent tolerates null/empty/malformed payloads without throwing");
+
+    const snapshot = cache.all(t0 + 10_000);
+    assert(snapshot.npcs["mara-baker"] && snapshot.players["Steve"], "all() snapshots every cached npc and player");
+  }
+
+  console.log("\n1a⁷. Live position tracking: worldmodel.mjs prefers a live position over ledger home, and flags staleness");
+  {
+    const npcRecordsCall = async (cmd, args) => {
+      if (cmd === "ledger_query" && args.collection === "places") return { records: [] };
+      if (cmd === "ledger_query" && args.collection === "npcs") {
+        return {
+          records: [
+            { id: "mara-baker", name: "Mara the Baker", home: { x: -5, y: 65, z: -5 }, alive: true },
+            { id: "kess-smith", name: "Kess the Smith", home: { x: 505, y: 75, z: -3 }, alive: true },
+          ],
+        };
+      }
+      if (cmd === "scan_area") return { minY: 60, maxY: 60, medianY: 60, flat: true, columns: [{ x: 0, z: 0, y: 60, material: "grass_block" }] };
+      if (cmd === "get_block") return { material: "grass_block", blockData: "minecraft:grass_block" };
+      throw new Error(`unexpected command ${cmd}`);
+    };
+
+    // mara has a FRESH live position (should win over her ledger home);
+    // kess has no cached entry at all (should fall back to ledger home,
+    // same as before this feature).
+    const livePositions = {
+      "mara-baker": { world: "world", x: 42, y: 70, z: 42, stale: false },
+    };
+    const modelWithLive = await buildWorldModel(npcRecordsCall, { now: "2026-01-01T00:00:00.000Z", npcPositions: livePositions });
+
+    const maraLive = modelWithLive.npcs.find((n) => n.id === "mara-baker");
+    assert(maraLive && maraLive.pos.x === 42 && maraLive.pos.y === 70 && maraLive.pos.z === 42, "mara's pos comes from the live-position getter, not her ledger home (-5,65,-5)");
+    assert(maraLive && !maraLive.flags.some((f) => /ledger-home/.test(f)), "a fresh live position DROPS the position-from-ledger-home flag");
+    assert(maraLive && !maraLive.flags.includes("position-stale"), "a fresh live position does not carry the position-stale flag");
+
+    const kessFallback = modelWithLive.npcs.find((n) => n.id === "kess-smith");
+    assert(kessFallback && kessFallback.pos.x === 505 && kessFallback.pos.z === -3, "kess (no cached live position) still falls back to her ledger home");
+    assert(kessFallback && kessFallback.flags.some((f) => /ledger-home/.test(f)), "kess's fallback position is flagged as ledger-home, exactly as before this feature");
+
+    // Now mara's cached entry is STALE.
+    const staleLivePositions = {
+      "mara-baker": { world: "world", x: 42, y: 70, z: 42, stale: true },
+    };
+    const modelWithStale = await buildWorldModel(npcRecordsCall, { now: "2026-01-01T00:00:00.000Z", npcPositions: staleLivePositions });
+    const maraStale = modelWithStale.npcs.find((n) => n.id === "mara-baker");
+    assert(maraStale && maraStale.pos.x === 42, "a stale live position is still USED (not silently dropped back to ledger home)");
+    assert(maraStale && maraStale.flags.includes("position-stale"), "a stale live position adds the position-stale flag");
+    assert(maraStale && !maraStale.flags.some((f) => /ledger-home/.test(f)), "a stale-but-present live position still does not fall back to (or get flagged as) ledger-home");
+
+    // opts.npcPositions also accepts a getter function or a Map, per the
+    // JSDoc - not just a plain object.
+    const modelWithGetter = await buildWorldModel(npcRecordsCall, {
+      now: "2026-01-01T00:00:00.000Z",
+      npcPositions: (id) => (id === "mara-baker" ? { x: 7, y: 8, z: 9 } : null),
+    });
+    assert(modelWithGetter.npcs.find((n) => n.id === "mara-baker").pos.x === 7, "opts.npcPositions accepts a getter FUNCTION, not just a plain object");
+
+    const modelWithMap = await buildWorldModel(npcRecordsCall, {
+      now: "2026-01-01T00:00:00.000Z",
+      npcPositions: new Map([["mara-baker", { x: 11, y: 12, z: 13 }]]),
+    });
+    assert(modelWithMap.npcs.find((n) => n.id === "mara-baker").pos.x === 11, "opts.npcPositions also accepts a Map");
+
+    // No opts.npcPositions at all -> today's ledger-home-only behavior, unchanged.
+    const modelNoOpt = await buildWorldModel(npcRecordsCall, { now: "2026-01-01T00:00:00.000Z" });
+    assert(modelNoOpt.npcs.find((n) => n.id === "mara-baker").pos.x === -5, "omitting opts.npcPositions entirely keeps the old ledger-home-only behavior");
+  }
+
+  console.log("\n1a⁸. entity_positions is pure telemetry: NOT a director wake event");
+  assert(!DIRECTOR_WAKE_EVENTS.has("entity_positions"), "\"entity_positions\" is absent from DIRECTOR_WAKE_EVENTS - it must never debounce into a director scene");
 
   console.log("\n1b. Actor report parsing (pure, no process needed)");
   const wellFormed = parseActorReport(
@@ -772,6 +883,19 @@ async function main() {
   const npcContextCalls = bridge1.logs.filter((l) => l.mock === "command_received" && l.cmd === "npc_context");
   assert(npcContextCalls.some((c) => c.args.npcId === "mara-baker"), "mock bridge received npc_context(mara-baker)");
   assert(npcContextCalls.some((c) => c.args.npcId === "kess-smith"), "mock bridge received npc_context(kess-smith)");
+
+  // --- live position tracking: entity_positions reaches the handler but never a scene ---
+  const gotPositionEvent = await waitFor(brain1.logs, (l) => l.msg === "event_received" && l.event === "entity_positions", 5000);
+  assert(gotPositionEvent, "brain received the pushed entity_positions event over its bridge connection");
+  assert(!sceneStarts().some((s) => s.events.includes("entity_positions")), "entity_positions never appears inside a director scene's batched events (it is telemetry-only, not a wake event)");
+
+  // --- boot auto-install of the position-tracker gadget ---
+  const gotPositionInstalled = await waitFor(brain1.logs, (l) => l.msg === "position_tracking_installed", 5000);
+  assert(gotPositionInstalled, "boot auto-install called gadget_define + gadget_run for position-tracker against the mock bridge (which answers ok:true to both)");
+  const gadgetDefineCalls = bridge1.logs.filter((l) => l.mock === "command_received" && l.cmd === "gadget_define" && l.args && l.args.id === "position-tracker");
+  assert(gadgetDefineCalls.length >= 1, "mock bridge received gadget_define for id=\"position-tracker\" on boot");
+  const gadgetRunCalls = bridge1.logs.filter((l) => l.mock === "command_received" && l.cmd === "gadget_run" && l.args && l.args.id === "position-tracker");
+  assert(gadgetRunCalls.length >= 1, "mock bridge received gadget_run for id=\"position-tracker\" on boot");
 
   // --- separate director scene for the later, well-separated event ---
   const gotSecondScene = await waitFor(brain1.logs, () => sceneStarts().length >= 2, 3000);

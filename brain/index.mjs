@@ -19,6 +19,15 @@
 //                                                    director's scene queue
 //   - player_quit                                -> presence tracking only,
 //                                                    never wakes anything
+//   - entity_positions                            -> pure telemetry (pushed
+//                                                    ~1s by the auto-
+//                                                    installed position-
+//                                                    tracker gadget - see
+//                                                    installPositionTracker
+//                                                    below); feeds
+//                                                    lib/position-cache.mjs
+//                                                    and NEVER wakes the
+//                                                    director
 //
 // Director scenes and actor turns are independent: director turns never
 // run concurrently with each other (lib/director-scheduler.mjs), while
@@ -32,12 +41,13 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { loadConfig, DIRECTOR_WAKE_EVENTS } from "./lib/config.mjs";
+import { loadConfig, DIRECTOR_WAKE_EVENTS, BRAIN_ROOT } from "./lib/config.mjs";
 import { log, nextSceneNumber } from "./lib/logger.mjs";
 import { journalSkip } from "./lib/decisions-journal.mjs";
 import { loadLore, watchLore } from "./lib/lore.mjs";
 import { startConsoleServer, queuedOrders, setOrderStatus } from "./lib/console-server.mjs";
 import { buildWorldModel } from "./lib/worldmodel.mjs";
+import { positionCache } from "./lib/position-cache.mjs";
 import { UsageTracker } from "./lib/usage-tracker.mjs";
 import { RateLimiter } from "./lib/rate-limiter.mjs";
 import { BridgeClient } from "./lib/bridge-client.mjs";
@@ -50,6 +60,7 @@ import { SelfUpdater } from "./lib/self-update.mjs";
 
 export async function main(env = process.env) {
   const config = loadConfig(env);
+  positionCache.staleSec = config.positionStaleSec;
 
   log.info("brain_starting", {
     directorModel: config.directorModel,
@@ -96,7 +107,15 @@ export async function main(env = process.env) {
   // request handled long after this synchronous setup finishes. Backs GET
   // /worldmodel (console-server.mjs), which the /map 3D viewer polls.
   function getWorldModel() {
-    return buildWorldModel((cmd, args) => bridge.call(cmd, args), { now: new Date().toISOString() });
+    return buildWorldModel((cmd, args) => bridge.call(cmd, args), {
+      now: new Date().toISOString(),
+      // Live positions (pushed "entity_positions" events, cached by
+      // lib/position-cache.mjs - see installPositionTracker below) are
+      // available in THIS process, unlike mcp-bridge.mjs's world_overview
+      // tool, which runs in a separate short-lived process that never sees
+      // pushed events - see position-cache.mjs's module comment.
+      npcPositions: (id) => positionCache.npcPosition(id, Date.now()),
+    });
   }
 
   let consoleServer = null;
@@ -316,6 +335,52 @@ export async function main(env = process.env) {
     return next;
   }
 
+  // ---------------- Live position tracking (boot auto-install) ----------------
+
+  /** Injects+starts brain/gadgets/position-tracker.java on the running
+   * server via gadget_define/gadget_run (see README "Gadgets") so it
+   * streams "entity_positions" bridge events on a timer, feeding
+   * lib/position-cache.mjs. bridge.call() itself waits for auth (see
+   * BridgeClient#_waitUntilReady), so this can safely be kicked off right
+   * after bridge.start() rather than needing its own "authed" callback.
+   *
+   * Idempotent/safe to call again on every boot: gadget_define overwrites
+   * the same id's source, and the gadget's own run() cancels its previous
+   * timer task (tracked in a JVM system property) before starting a new
+   * one - see the gadget source's own comment.
+   *
+   * Never throws: any failure (server not yet on a gadget-capable plugin
+   * version, gadgets disabled, compile error, connection down) is caught
+   * and logged as a WARN, and the brain carries on exactly as it did before
+   * this feature existed - lib/worldmodel.mjs falls back to ledger home
+   * positions when the cache has nothing for an NPC. */
+  async function installPositionTracker() {
+    if (!config.positionTrackingEnabled) {
+      log.info("position_tracking_disabled", { reason: "BRAIN_POSITION_TRACKING=0" });
+      return;
+    }
+    try {
+      const gadgetPath = path.join(BRAIN_ROOT, "gadgets", "position-tracker.java");
+      const source = fs.readFileSync(gadgetPath, "utf8");
+      await bridge.call(
+        "gadget_define",
+        { id: "position-tracker", source, description: "System: stream live NPC/player positions" },
+        config.npcContextTimeoutMs
+      );
+      await bridge.call(
+        "gadget_run",
+        { id: "position-tracker", args: { intervalTicks: config.positionIntervalTicks } },
+        config.npcContextTimeoutMs
+      );
+      log.info("position_tracking_installed", { intervalTicks: config.positionIntervalTicks });
+    } catch (e) {
+      const reason = String((e && e.message) || e);
+      log.warn("position_tracking_unavailable", {
+        message: `live position tracking unavailable: ${reason}; world model will fall back to ledger home positions`,
+      });
+    }
+  }
+
   // ---------------- Event routing ----------------
 
   const bridge = new BridgeClient({
@@ -330,6 +395,16 @@ export async function main(env = process.env) {
       if (event === "player_quit") {
         if (data && data.player) onlinePlayers.delete(data.player);
         return; // presence tracking only, never wakes anything
+      }
+
+      if (event === "entity_positions") {
+        // Pure telemetry pushed ~1s by gadgets/position-tracker.java - feed
+        // the cache and stop. Deliberately NOT routed to the director
+        // scheduler: it is not a wake event (see config.mjs's
+        // DIRECTOR_WAKE_EVENTS, which omits "entity_positions" on purpose),
+        // just a background position refresh lib/worldmodel.mjs reads from.
+        positionCache.updateFromEvent(data, Date.now());
+        return;
       }
 
       if (event === "npc_interact" && data && data.npcId && data.player) {
@@ -351,6 +426,7 @@ export async function main(env = process.env) {
     },
   });
   bridge.start();
+  installPositionTracker(); // fire-and-forget: never throws, see its own comment
 
   const stop = () => {
     bridge.stop();

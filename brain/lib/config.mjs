@@ -165,6 +165,18 @@ export function loadConfig(env = process.env) {
     actorHistoryTurns: num("BRAIN_ACTOR_HISTORY_TURNS", 20),
     npcContextTimeoutMs: num("BRAIN_NPC_CONTEXT_TIMEOUT_MS", 8000),
 
+    // Live position tracking: on boot (after the bridge authenticates),
+    // index.mjs auto-installs+starts brain/gadgets/position-tracker.java (a
+    // runtime-injected gadget - see README "Gadgets") which pushes an
+    // "entity_positions" bridge event on a timer, cached by
+    // lib/position-cache.mjs and preferred by lib/worldmodel.mjs over the
+    // static ledger `home` fallback. BRAIN_POSITION_TRACKING=0 disables the
+    // boot auto-install entirely (world model always falls back to ledger
+    // home positions, exactly as before this feature existed).
+    positionTrackingEnabled: bool01("BRAIN_POSITION_TRACKING", true),
+    positionIntervalTicks: num("BRAIN_POSITION_INTERVAL_TICKS", 20),
+    positionStaleSec: num("BRAIN_POSITION_STALE_SEC", 30),
+
     // Lore Console: a tiny local HTTP page for the operator to type
     // free-text directives ("add a ruined tower...") that get folded into
     // the world's lore - see lib/console-server.mjs.
