@@ -602,6 +602,46 @@ async function main() {
     assert(/loadedChunks/.test(consoleServerSrc), "the map header surfaces loadedChunks");
   }
 
+  console.log("\n1a¹². True cubic voxel map: world-scan gadget voxel mode + console /voxels route + map renderer, director path untouched");
+  {
+    // --- the gadget stays a valid single-class GadgetContract with the new voxel mode ---
+    const gadgetSrc = fs.readFileSync(path.join(BRAIN_DIR, "gadgets", "world-scan.java"), "utf8");
+    assert(/public class WorldScan implements GadgetContract/.test(gadgetSrc), "world-scan.java is still a single public class implementing GadgetContract");
+    assert(/import dev\.celestia\.mcalive2\.gadget\.GadgetContract;/.test(gadgetSrc), "world-scan.java imports the GadgetContract interface (class discovery is by interface)");
+    const gadgetImports = gadgetSrc.match(/^import .+;$/gm) || [];
+    assert(gadgetImports.every((i) => /import (com\.google\.gson|dev\.celestia\.mcalive2\.gadget|org\.bukkit)\./.test(i)), `world-scan.java's imports stay Bukkit + gson + gadget contract only (got: ${gadgetImports.join(", ")})`);
+    assert(/bool\(args, "voxels", false\)/.test(gadgetSrc), "world-scan.java gates the voxel mode on args.voxels");
+    assert(/voxelScan\(/.test(gadgetSrc), "world-scan.java defines the voxelScan() mode");
+    assert(/"maxBlocks", 20000/.test(gadgetSrc), "voxel mode budgets emitted blocks (maxBlocks, default 20000)");
+    assert(/"maxChunks", 12/.test(gadgetSrc), "voxel mode budgets per-call chunks (maxChunks) so one call never stalls the main thread");
+    assert(/"cursor", 0/.test(gadgetSrc) && /nextCursor/.test(gadgetSrc), "voxel mode pages via cursor/nextCursor");
+    assert(/SHELL = 3/.test(gadgetSrc), "the voxel shell is Chebyshev distance 3 from air");
+    assert(/palette/.test(gadgetSrc) && /runJson\(lx, lz, runStart, runLen, runPi\)/.test(gadgetSrc), "voxels are palette-indexed and vertical-run-length encoded (never one JSON object per block)");
+    assert(/getChunkSnapshot\(\)/.test(gadgetSrc), "voxel mode reads block data via ChunkSnapshot (no per-block getBlockAt storm)");
+    assert(/isChunkLoaded\(cx [-+] 1, cz\)/.test(gadgetSrc), "voxel mode pads the air mask from loaded edge-neighbor chunks (no seam holes), never force-loading");
+    // --- console server: /voxels route wired to the gadget through the bridge ---
+    const consoleServerSrc = fs.readFileSync(path.join(BRAIN_DIR, "lib", "console-server.mjs"), "utf8");
+    assert(/url\.pathname === "\/voxels"/.test(consoleServerSrc), "console-server.mjs serves GET /voxels");
+    assert(/getVoxels/.test(consoleServerSrc), "console-server.mjs takes a getVoxels dep");
+    assert(/VOXEL_CACHE_MS = 10_000/.test(consoleServerSrc), "GET /voxels responses are cached ~10s server-side");
+    const indexSrc = fs.readFileSync(path.join(BRAIN_DIR, "index.mjs"), "utf8");
+    assert(/"gadget:world-scan", \{ voxels: true/.test(indexSrc), "index.mjs's getVoxels calls gadget:world-scan with voxels:true");
+    assert(/getVoxels,/.test(indexSrc), "index.mjs passes getVoxels to startConsoleServer");
+    // --- map page: true-voxel renderer with face culling, heightmap fallback kept ---
+    assert(/function buildVoxelPrimitives\(/.test(consoleServerSrc), "map page defines buildVoxelPrimitives()");
+    assert(/function pushCubeFaces\(/.test(consoleServerSrc), "map page defines pushCubeFaces() (per-face cube drawing for culling)");
+    assert(/function fetchVoxels\(/.test(consoleServerSrc), "map page defines fetchVoxels()");
+    assert(/'\/voxels\?cursor=' \+ cursor/.test(consoleServerSrc), "map page tiles /voxels requests by cursor");
+    assert(/VOXEL_REFRESH_MS = 10000/.test(consoleServerSrc), "static voxels are re-fetched at most every ~10s");
+    assert(/set\.has\(v\.x \+ ',' \+ \(v\.y \+ 1\) \+ ',' \+ v\.z\)/.test(consoleServerSrc), "voxel renderer culls faces hidden behind adjacent returned voxels");
+    assert(/if \(voxels && voxels\.count\) buildVoxelPrimitives/.test(consoleServerSrc), "draw() prefers voxel terrain and keeps buildTerrainPrimitives as the fallback");
+    assert(/function buildTerrainPrimitives\(/.test(consoleServerSrc), "the heightmap terrain renderer is still present as the fallback");
+    // --- the director's world-model path is untouched by voxels (token cost) ---
+    const worldmodelSrc = fs.readFileSync(path.join(BRAIN_DIR, "lib", "worldmodel.mjs"), "utf8");
+    assert(!/voxels\s*:\s*true/.test(worldmodelSrc), "lib/worldmodel.mjs (director world_overview path) never invokes the gadget's voxel mode");
+    assert(!/nextCursor|palette/.test(worldmodelSrc), "lib/worldmodel.mjs has no voxel payload handling (the compact director digest stays untouched)");
+  }
+
   console.log("\n1b. Actor report parsing (pure, no process needed)");
   const wellFormed = parseActorReport(
     'Hello there!\n```report\n{"facts": [{"text": "The well ran dry.", "knownBy": ["mara-baker"]}], "promise": {"toWhom": "Steve", "text": "flour by dawn"}, "questOffered": null, "mood": "worried"}\n```'
@@ -1626,6 +1666,25 @@ async function main() {
   assert(/function colorForMaterial\(/.test(mapHtml), "GET /map page defines colorForMaterial() with an unknown-material fallback");
   assert(/function heightRampColor\(/.test(mapHtml), "GET /map page keeps the height-based grey/green ramp as the fallback for unknown/absent materials");
   assert(/function buildEntityCubeStack\(/.test(mapHtml), "GET /map page renders NPCs/players/spawn as cube stacks, not pillar markers");
+
+  console.log("\n5c². GET /voxels: token-authed, proxies gadget:world-scan's voxel mode through the bridge, and the map page consumes it");
+  assert(mapHtml.includes("/voxels?cursor="), "GET /map page's inline script tiles fetches of /voxels by cursor");
+  assert(/function buildVoxelPrimitives\(/.test(mapHtml), "GET /map page defines buildVoxelPrimitives() - the true-voxel renderer");
+  const voxelsUnauthed = await fetch(`${base}/voxels`);
+  assert(voxelsUnauthed.status === 401, `GET /voxels with no token is rejected (got ${voxelsUnauthed.status})`);
+  const voxelsRes = await fetch(`${base}/voxels?cursor=0&token=${consoleToken}`);
+  assert(voxelsRes.status === 200, `GET /voxels with a valid token succeeds (got ${voxelsRes.status})`);
+  const voxelsJson = await voxelsRes.json();
+  assert(voxelsJson && typeof voxelsJson === "object", "GET /voxels returns a JSON object (mock bridge answers ok:true data:{} to the gadget call)");
+  const gotVoxelGadgetCall = await waitFor(bridge4.logs, (l) => l.mock === "command_received" && l.cmd === "gadget:world-scan" && l.args && l.args.voxels === true, 3000);
+  assert(gotVoxelGadgetCall, "the /voxels request reached the bridge as gadget:world-scan with voxels:true");
+  const voxelGadgetCalls = () => bridge4.logs.filter((l) => l.mock === "command_received" && l.cmd === "gadget:world-scan" && l.args && l.args.voxels === true);
+  assert(voxelGadgetCalls().every((l) => l.args.cursor === 0), "the requested cursor was forwarded to the gadget call");
+  const voxelCallsBefore = voxelGadgetCalls().length;
+  const voxelsRes2 = await fetch(`${base}/voxels?cursor=0&token=${consoleToken}`);
+  assert(voxelsRes2.status === 200, "a second immediate GET /voxels succeeds");
+  await new Promise((r) => setTimeout(r, 300)); // let any (unexpected) gadget call reach the mock's stderr log
+  assert(voxelGadgetCalls().length === voxelCallsBefore, "a second immediate GET /voxels for the same page hits the 10s server-side cache instead of re-calling the gadget");
 
   console.log("\n5d. GET /worldmodel: token-authed like every other console route, returns the raw world-model JSON");
   const worldmodelUnauthed = await fetch(`${base}/worldmodel`);

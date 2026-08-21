@@ -489,7 +489,9 @@ setInterval(refreshStatus, 5000);
 
 // ---------------- 3D world map page (GET /map) ----------------
 //
-// A second, independent page hitting GET /worldmodel (same-origin, so the
+// A second, independent page hitting GET /worldmodel (entities, places,
+// diagnostics, heightmap fallback) and GET /voxels (true cubic-voxel
+// terrain, tiled by cursor) - both same-origin, so the
 // cookie set by checkAuth() above already authenticates its fetch() calls
 // exactly like the / page's own fetch()es). Entirely self-contained: no
 // external/CDN resources, no npm deps - a hand-rolled orthographic 3D
@@ -618,7 +620,7 @@ function renderMapPage() {
         <div class="row"><span class="swatch" style="background:#ff6a3d"></span> NPC has a flag</div>
       <div class="row"><span class="swatch" style="background:#ffcf5c"></span> world spawn</div>
       <div class="row"><span class="swatch" style="background:#5cc8ff"></span> player online</div>
-      <div class="row" style="color:#6b7078">terrain cubes: coloured by block type when known, grey/green by height otherwise</div>
+      <div class="row" style="color:#6b7078">terrain: true cubic voxels — solid blocks within 3 of air (interiors, overhangs and caves show); coloured by block type, grey/green by height otherwise. Falls back to coarse heightmap cubes while voxels load.</div>
       </div>
     </section>
     <section id="problems">
@@ -642,6 +644,21 @@ var lastMouse = null;        // {x,y} in canvas-local pixels, for the coord read
 var focusPoint = null;       // {x,y,z,until} - a transient highlight ring, see focusOn()
 var autoRefreshTimer = null;
 var hoveredKey = null;       // "place:<id>" / "npc:<id>" of the currently hovered marker
+
+// TRUE cubic-voxel terrain, fetched from GET /voxels (gadget:world-scan's
+// voxel mode: every solid block within Chebyshev distance 3 of air, so
+// building interiors, overhangs, and near-surface caves render as real
+// cubes). Tiled by cursor until nextCursor is null; static, so re-fetched
+// at most every VOXEL_REFRESH_MS (entities keep their own live cadence).
+// Shape: { mats:[name], set:Set('x,y,z'), list:[{x,y,z,m}], minY, maxY,
+// count, partial } - null until the first successful fetch, in which case
+// draw() falls back to the pre-existing heightmap terrain cubes.
+var voxels = null;
+var voxelFetchedAt = 0;
+var voxelFetching = false;
+var VOXEL_REFRESH_MS = 10000;
+var VOXEL_MAX_PAGES = 40;    // tiling safety cap (pages per refresh)
+var VOXEL_MAX_TOTAL = 120000; // aggregate voxel cap so the canvas stays interactive
 
 var canvas = document.getElementById('c');
 var ctx = canvas.getContext('2d');
@@ -753,14 +770,66 @@ var MATERIAL_COLORS = {
   snow_block: [242, 246, 250],
   water: [58, 111, 216],
   terracotta: [165, 87, 58],
+  bedrock: [46, 46, 50],
+  obsidian: [26, 21, 38],
+  lava: [207, 92, 20],
+  andesite: [130, 132, 130],
+  diorite: [188, 188, 190],
+  granite: [154, 106, 90],
+  tuff: [108, 110, 102],
+  calcite: [223, 224, 220],
+  dripstone_block: [134, 107, 92],
+  stone_bricks: [118, 118, 122],
+  mossy_stone_bricks: [104, 118, 96],
+  mossy_cobblestone: [104, 116, 96],
+  bricks: [150, 97, 83],
+  bookshelf: [162, 130, 78],
+  crafting_table: [140, 106, 62],
+  furnace: [110, 110, 110],
+  glowstone: [252, 218, 120],
+  sea_lantern: [200, 232, 224],
+  hay_block: [198, 168, 44],
+  pumpkin: [214, 126, 32],
+  melon: [116, 168, 48],
+  farmland: [110, 78, 48],
+  dirt_path: [148, 120, 68],
+  mycelium: [110, 96, 106],
+  soul_sand: [82, 62, 50],
+  soul_soil: [76, 58, 46],
+  basalt: [74, 74, 78],
+  blackstone: [42, 38, 44],
+  end_stone: [220, 222, 158],
+  prismarine: [96, 156, 140],
+  magma_block: [142, 62, 30],
+  sponge: [196, 192, 76],
+  slime_block: [112, 192, 92],
+  honey_block: [232, 156, 44],
+  bone_block: [210, 206, 178],
+  quartz_block: [234, 228, 220],
+  smooth_quartz: [234, 228, 220],
+  coal_ore: [96, 96, 96],
+  iron_ore: [150, 132, 116],
+  copper_ore: [122, 122, 106],
+  gold_ore: [158, 140, 92],
 };
 
 function colorForMaterial(material) {
   if (!material) return null;
   var m = String(material).toLowerCase().replace(/^minecraft:/, '');
   if (MATERIAL_COLORS[m]) return MATERIAL_COLORS[m];
-  if (/_log$/.test(m) || m === 'log') return [107, 74, 44];
+  if (/_log$/.test(m) || /_wood$/.test(m) || /stripped_/.test(m) || m === 'log') return [107, 74, 44];
   if (/_leaves$/.test(m)) return [63, 122, 52];
+  if (/_planks$/.test(m)) return [162, 130, 78];
+  if (/glass/.test(m)) return [186, 214, 228];
+  if (/_wool$|_carpet$|_bed$/.test(m)) return [206, 206, 206];
+  if (/_concrete/.test(m)) return [178, 178, 178];
+  if (/copper/.test(m)) return [186, 108, 70];
+  if (/deepslate/.test(m)) return [72, 72, 76];
+  if (/sandstone/.test(m)) return [216, 201, 138];
+  if (/_ore$/.test(m)) return [128, 124, 118];
+  if (/_stairs$|_slab$|_wall$|_fence/.test(m)) return [148, 132, 106];
+  if (/door$|trapdoor$/.test(m)) return [140, 104, 58];
+  if (/_coral/.test(m)) return [214, 108, 158];
   if (/terracotta$/.test(m)) return [165, 87, 58]; // dyed terracotta variants
   return null; // unknown material -> caller falls back to heightRampColor()
 }
@@ -835,16 +904,26 @@ function pushQuad(list, corners, fillCss, strokeCss, lineWidth) {
 // the other darkest - the minimal shading needed for the cube form to read
 // without any real lighting model.
 function pushCube(list, x1, x2, yBottom, yTop, z1, z2, topRgb, sideFacing, strokeCss, lineWidth) {
+  pushCubeFaces(list, x1, x2, yBottom, yTop, z1, z2, topRgb, sideFacing,
+    { top: true, sideX: true, sideZ: true }, strokeCss, lineWidth);
+}
+
+// Per-face variant of pushCube used by the voxel renderer's face culling:
+// the faces arg gates which of the three potentially-visible faces (top + the two
+// camera-facing sides) actually get pushed - a face hidden behind an
+// adjacent voxel is skipped entirely, which is what makes drawing tens of
+// thousands of 1-block cubes tractable on a 2D canvas.
+function pushCubeFaces(list, x1, x2, yBottom, yTop, z1, z2, topRgb, sideFacing, faces, strokeCss, lineWidth) {
   var sideXRgb = shadeColor(topRgb, 0.72);
   var sideZRgb = shadeColor(topRgb, 0.5);
   var topCss = rgbCss(topRgb), sideXCss = rgbCss(sideXRgb), sideZCss = rgbCss(sideZRgb);
 
-  pushQuad(list, [
+  if (faces.top) pushQuad(list, [
     { x: x1, y: yTop, z: z1 }, { x: x2, y: yTop, z: z1 },
     { x: x2, y: yTop, z: z2 }, { x: x1, y: yTop, z: z2 },
   ], topCss, strokeCss, lineWidth);
 
-  if (sideFacing.x === 'x2') {
+  if (!faces.sideX) { /* culled */ } else if (sideFacing.x === 'x2') {
     pushQuad(list, [
       { x: x2, y: yBottom, z: z1 }, { x: x2, y: yBottom, z: z2 },
       { x: x2, y: yTop, z: z2 }, { x: x2, y: yTop, z: z1 },
@@ -856,7 +935,7 @@ function pushCube(list, x1, x2, yBottom, yTop, z1, z2, topRgb, sideFacing, strok
     ], sideXCss, strokeCss, lineWidth);
   }
 
-  if (sideFacing.z === 'z2') {
+  if (!faces.sideZ) { /* culled */ } else if (sideFacing.z === 'z2') {
     pushQuad(list, [
       { x: x1, y: yBottom, z: z2 }, { x: x2, y: yBottom, z: z2 },
       { x: x2, y: yTop, z: z2 }, { x: x1, y: yTop, z: z2 },
@@ -914,6 +993,92 @@ function buildTerrainPrimitives(list, sideFacing) {
       var topRgb = colorForMaterial(mat) || heightRampColor(h, bounds);
       pushCube(list, x1, x2, yBottom, yTop, z1, z2, topRgb, sideFacing, TERRAIN_STROKE, 1);
     }
+  }
+}
+
+// True cubic-voxel terrain: one 1x1x1 cube per returned voxel, with face
+// culling against the voxel set - a face is only drawn when no returned
+// voxel sits on its far side (top: y+1; sides: the camera-facing x/z
+// neighbor from computeSideFacing()), so interiors, overhangs, and caves
+// read correctly and the primitive count stays tractable. Colours come from
+// the same MATERIAL_COLORS/colorForMaterial() lookup as the heightmap
+// renderer, falling back to the height ramp for unknown materials.
+function buildVoxelPrimitives(list, sideFacing) {
+  var vb = { minY: voxels.minY, maxY: voxels.maxY };
+  var set = voxels.set;
+  var dx = sideFacing.x === 'x2' ? 1 : -1;
+  var dz = sideFacing.z === 'z2' ? 1 : -1;
+  var arr = voxels.list;
+  for (var i = 0; i < arr.length; i++) {
+    var v = arr[i];
+    var topOpen = !set.has(v.x + ',' + (v.y + 1) + ',' + v.z);
+    var xOpen = !set.has((v.x + dx) + ',' + v.y + ',' + v.z);
+    var zOpen = !set.has(v.x + ',' + v.y + ',' + (v.z + dz));
+    if (!topOpen && !xOpen && !zOpen) continue; // fully hidden from this camera
+    var rgb = colorForMaterial(voxels.mats[v.m]) || heightRampColor(v.y, vb);
+    pushCubeFaces(list, v.x, v.x + 1, v.y, v.y + 1, v.z, v.z + 1, rgb, sideFacing,
+      { top: topOpen, sideX: xOpen, sideZ: zOpen }, TERRAIN_STROKE, 1);
+  }
+}
+
+// Fetches the whole voxel shell, tiled by cursor (GET /voxels?cursor=N ->
+// {palette, chunks:[{cx,cz,runs:[[lx,lz,yStart,len,pi],...]}], nextCursor}),
+// merging each page's palette into one materials list. Gated to at most one
+// fetch per VOXEL_REFRESH_MS (terrain is static; entities stay live via the
+// /worldmodel poll), and never runs concurrently with itself.
+async function fetchVoxels() {
+  if (voxelFetching) return;
+  if (Date.now() - voxelFetchedAt < VOXEL_REFRESH_MS) return;
+  voxelFetching = true;
+  try {
+    var mats = [], matIdx = {}, list = [], set = new Set();
+    var minY = Infinity, maxY = -Infinity;
+    var cursor = 0, partial = false, sawAny = false;
+    for (var page = 0; page < VOXEL_MAX_PAGES; page++) {
+      var res = await fetch('/voxels?cursor=' + cursor);
+      if (!res.ok) { partial = sawAny; break; }
+      var data = await res.json();
+      if (!data || data.ok === false || !Array.isArray(data.chunks)) { partial = sawAny; break; }
+      sawAny = true;
+      var remap = (data.palette || []).map(function (name) {
+        if (matIdx[name] == null) { matIdx[name] = mats.length; mats.push(name); }
+        return matIdx[name];
+      });
+      data.chunks.forEach(function (ch) {
+        var bx = ch.cx * 16, bz = ch.cz * 16;
+        (ch.runs || []).forEach(function (run) {
+          var x = bx + run[0], z = bz + run[1], y0 = run[2], len = run[3];
+          var m = remap[run[4]] != null ? remap[run[4]] : -1;
+          for (var k = 0; k < len; k++) {
+            var y = y0 + k;
+            var key = x + ',' + y + ',' + z;
+            if (set.has(key)) continue;
+            set.add(key);
+            list.push({ x: x, y: y, z: z, m: m });
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+          }
+        });
+      });
+      if (data.nextCursor == null) break;
+      cursor = data.nextCursor;
+      if (list.length >= VOXEL_MAX_TOTAL) { partial = true; break; }
+    }
+    if (page >= VOXEL_MAX_PAGES) partial = true;
+    if (list.length) {
+      voxels = {
+        mats: mats, set: set, list: list,
+        minY: isFinite(minY) ? minY : 0, maxY: isFinite(maxY) ? maxY : 0,
+        count: list.length, partial: partial,
+      };
+      voxelFetchedAt = Date.now();
+      updateCounts();
+      draw();
+    }
+  } catch (e) {
+    // keep whatever voxel data (or heightmap fallback) we already have
+  } finally {
+    voxelFetching = false;
   }
 }
 
@@ -1097,7 +1262,11 @@ function draw() {
   hitTargets = [];
   var primitives = [];
   var sideFacing = computeSideFacing();
-  buildTerrainPrimitives(primitives, sideFacing);
+  // Prefer the true cubic-voxel terrain; the coarse heightmap cubes remain
+  // only as the fallback while /voxels hasn't returned anything yet (older
+  // server without the gadget's voxel mode, fetch still in flight, error).
+  if (voxels && voxels.count) buildVoxelPrimitives(primitives, sideFacing);
+  else buildTerrainPrimitives(primitives, sideFacing);
   buildPlacePrimitives(primitives);
   buildNpcPrimitives(primitives, sideFacing);
   buildSpawnPrimitives(primitives, sideFacing);
@@ -1151,7 +1320,8 @@ function drawCompass() {
 
 function updateEmptyNotes() {
   var notes = [];
-  if (!worldmodel.terrain) notes.push('No terrain data available.');
+  if (!worldmodel.terrain && !(voxels && voxels.count)) notes.push('No terrain data available.');
+  if (!(voxels && voxels.count) && worldmodel.terrain) notes.push('Voxel terrain not loaded yet — showing coarse heightmap.');
   if (!worldmodel.places || !worldmodel.places.length) notes.push('No places recorded yet.');
   if (!worldmodel.npcs || !worldmodel.npcs.length) notes.push('No NPCs recorded yet.');
   (worldmodel.notes || []).forEach(function (n) { notes.push(n); });
@@ -1331,6 +1501,9 @@ function updateCounts() {
   if (typeof worldmodel.loadedChunks === 'number') {
     html += ' (' + worldmodel.loadedChunks + ' loaded chunks)';
   }
+  if (voxels && voxels.count) {
+    html += ' &middot; voxels: <b>' + voxels.count + '</b>' + (voxels.partial ? ' (partial)' : '');
+  }
   html += ' &middot; generated ' + escapeHtml(worldmodel.generatedAt || '?');
   el.innerHTML = html;
 }
@@ -1368,6 +1541,10 @@ async function fetchAndRender() {
   } catch (err) {
     showBanner('Failed to reach /worldmodel: ' + escapeHtml(String(err)));
   }
+  // Voxel terrain rides the same refresh triggers but is internally gated
+  // to one fetch per VOXEL_REFRESH_MS - static blocks don't need the live
+  // cadence the entity markers get from /worldmodel.
+  fetchVoxels();
 }
 
 document.getElementById('refresh').addEventListener('click', fetchAndRender);
@@ -1463,6 +1640,11 @@ function sendJson(res, status, obj, extraHeaders = {}) {
  *   source. Its result is cached for WORLDMODEL_CACHE_MS so rapid page
  *   refreshes/auto-refresh polling don't hammer the bridge with a fresh
  *   ledger_query + scan_area round trip every time.
+ *   - getVoxels (index.mjs) fetches one page of gadget:world-scan's VOXEL
+ *   mode ({voxels:true, cursor?, area?, maxBlocks?}) for GET /voxels below -
+ *   the /map page's true cubic-voxel terrain source (solid blocks within
+ *   Chebyshev distance 3 of air, palette + per-column vertical RLE). Human
+ *   map only; never part of the director's world_overview path.
  *   - getStatus (index.mjs) builds the JSON snapshot for GET /status below -
  *   token budget, kill switch, rate limit, scene/bridge state - polled by
  *   both console pages' status strip so an operator can see AT A GLANCE
@@ -1474,7 +1656,7 @@ function sendJson(res, status, obj, extraHeaders = {}) {
  *   rather than wait for the UTC midnight roll.
  * @returns {Promise<{ server: import('node:http').Server, port: number, stop: () => Promise<void> }>}
  */
-export function startConsoleServer(config, { reloadLore, submitOrder, getWorldModel, getStatus, resetBudget }) {
+export function startConsoleServer(config, { reloadLore, submitOrder, getWorldModel, getVoxels, getStatus, resetBudget }) {
   const token = config.consoleToken;
   const decisionsPath = path.join(config.stateDir, "decisions.log");
 
@@ -1491,6 +1673,32 @@ export function startConsoleServer(config, { reloadLore, submitOrder, getWorldMo
       throw e;
     });
     worldModelCache = { at: now, promise };
+    return promise;
+  }
+
+  // ---- GET /voxels: per-page cache (deps.getVoxels - index.mjs's wrapper
+  // around gadget:world-scan's voxel mode). Static terrain changes slowly,
+  // so each distinct page (cursor/area querystring) is cached for 10s: the
+  // /map viewer's own 10s refresh gate plus this server-side cache means
+  // repeated map loads never hammer the bridge with voxel rescans. Bounded
+  // LRU-ish: oldest entry dropped past VOXEL_CACHE_MAX. ----
+  const VOXEL_CACHE_MS = 10_000;
+  const VOXEL_CACHE_MAX = 64;
+  const voxelCache = new Map(); // key (querystring) -> { at, promise }
+  function cachedVoxels(key, params) {
+    const now = Date.now();
+    const hit = voxelCache.get(key);
+    if (hit && now - hit.at < VOXEL_CACHE_MS) return hit.promise;
+    const promise = Promise.resolve(getVoxels(params)).catch((e) => {
+      voxelCache.delete(key); // don't cache a failure - the next request should retry
+      throw e;
+    });
+    voxelCache.set(key, { at: now, promise });
+    if (voxelCache.size > VOXEL_CACHE_MAX) {
+      let oldestKey = null, oldestAt = Infinity;
+      for (const [k, v] of voxelCache) if (v.at < oldestAt) { oldestAt = v.at; oldestKey = k; }
+      if (oldestKey !== null) voxelCache.delete(oldestKey);
+    }
     return promise;
   }
 
@@ -1526,6 +1734,34 @@ export function startConsoleServer(config, { reloadLore, submitOrder, getWorldMo
         } catch (e) {
           log.error("worldmodel_request_failed", { error: String((e && e.stack) || e) });
           sendJson(res, 502, { ok: false, error: "failed to build world model" }, extraHeaders);
+        }
+        return;
+      }
+
+      // GET /voxels?cursor=N[&x1=..&z1=..&x2=..&z2=..][&maxBlocks=N] - one
+      // page of the world's cubic-voxel shell (gadget:world-scan voxel mode
+      // via deps.getVoxels), for the /map page's true-voxel renderer. The
+      // page tiles requests with the returned nextCursor until null.
+      if (req.method === "GET" && url.pathname === "/voxels") {
+        if (typeof getVoxels !== "function") {
+          sendJson(res, 501, { ok: false, error: "voxel source not configured" }, extraHeaders);
+          return;
+        }
+        const params = {};
+        const cursor = Number(url.searchParams.get("cursor"));
+        if (Number.isFinite(cursor) && cursor >= 0) params.cursor = Math.floor(cursor);
+        const maxBlocks = Number(url.searchParams.get("maxBlocks"));
+        if (Number.isFinite(maxBlocks) && maxBlocks > 0) params.maxBlocks = Math.floor(maxBlocks);
+        const areaNums = ["x1", "z1", "x2", "z2"].map((k) => Number(url.searchParams.get(k)));
+        if (areaNums.every((n) => Number.isFinite(n))) {
+          params.area = { x1: areaNums[0], z1: areaNums[1], x2: areaNums[2], z2: areaNums[3] };
+        }
+        try {
+          const data = await cachedVoxels(url.search || "?", params);
+          sendJson(res, 200, data && typeof data === "object" ? data : {}, extraHeaders);
+        } catch (e) {
+          log.error("voxels_request_failed", { error: String((e && e.stack) || e) });
+          sendJson(res, 502, { ok: false, error: "failed to fetch voxels" }, extraHeaders);
         }
         return;
       }

@@ -8,7 +8,7 @@
 // set, auto-choosing a sample step so the result stays under maxCells no matter how
 // much of the world is loaded.
 //
-// args: {
+// args (heightmap mode, the default): {
 //   world?: string          - defaults to the first world
 //   region?: {x1,z1,x2,z2}  - explicit block bounds; default = bounds of loaded chunks
 //   step?: number           - blocks between samples (default: auto-fit to maxCells)
@@ -21,6 +21,29 @@
 //   loadedChunks, bounds:{x1,z1,x2,z2},
 //   spawn:{x,y,z}, players:[{name,x,y,z}]
 // }
+//
+// args (VOXEL mode - {voxels:true}): returns the TRUE cubic-voxel shell of the
+// loaded world for the human /map viewer (console-server.mjs) - every solid
+// block within Chebyshev distance 3 of at least one air block, so building
+// interiors, overhangs, and near-surface caves render as real cubes instead
+// of a top-surface heightmap. NEVER fed to the director (token cost).
+// {
+//   voxels: true,
+//   world?: string,
+//   area?: {x1,z1,x2,z2}    - block bounds; only loaded chunks inside are scanned
+//   maxBlocks?: number      - stop after ~this many emitted voxels (default 20000)
+//   maxChunks?: number      - hard per-call chunk budget (default 12) so one call
+//                             never stalls the main thread; page with `cursor`
+//   cursor?: number         - index into the deterministic (x,z)-sorted loaded-
+//                             chunk list to resume from (from a prior nextCursor)
+// }
+// returns: {
+//   ok, mode:"voxels", world, palette:[materialName,...],
+//   chunks:[{cx,cz,runs:[[lx,lz,yStart,runLen,paletteIdx],...]}],  // lx/lz 0..15,
+//     vertical run-length encoding per column - compact, never one object/block
+//   cursor, nextCursor:int|null,  // null = scan complete; else pass back as cursor
+//   blocks, chunkTotal, loadedChunks
+// }
 package dev.celestia.mcalive2.gadget.system;
 
 import com.google.gson.JsonArray;
@@ -29,19 +52,30 @@ import com.google.gson.JsonObject;
 import dev.celestia.mcalive2.gadget.GadgetContext;
 import dev.celestia.mcalive2.gadget.GadgetContract;
 import org.bukkit.Chunk;
+import org.bukkit.ChunkSnapshot;
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.entity.Player;
 
 public class WorldScan implements GadgetContract {
 
     private static final int SURFACE_DETAIL_MAX_CELLS = 2500;
+    // Voxel mode: shell thickness (Chebyshev distance from air) and the cap on
+    // how tall a single chunk's scanned band may be (bounds per-chunk work).
+    private static final int SHELL = 3;
+    private static final int MAX_BAND_HEIGHT = 128;
+    // How far below a chunk's lowest surface the scan band starts - deep enough
+    // to catch near-surface caves and basements without walking to bedrock.
+    private static final int BAND_BELOW_SURFACE = 16;
 
     @Override
     public JsonObject run(JsonObject args, GadgetContext ctx) {
         String worldName = str(args, "world", null);
         World w = ctx.world(worldName);
         if (w == null) throw new IllegalArgumentException("no such world: " + worldName);
+
+        if (bool(args, "voxels", false)) return voxelScan(args, w);
 
         int maxCells = (int) num(args, "maxCells", 4096, 64, 20000);
 
@@ -153,6 +187,203 @@ public class WorldScan implements GadgetContract {
         }
         out.add("players", players);
         return out;
+    }
+
+    // ------------------------------------------------------------------
+    // Voxel mode: per loaded chunk, find the band of interest (lowest
+    // surface - BAND_BELOW_SURFACE up to highest surface), build an air
+    // mask over the band (padded 3 blocks into the 4 edge-neighbor chunks
+    // when they are loaded, so cliff faces on chunk seams don't get holes),
+    // dilate it by SHELL along each axis (three separable passes = exact
+    // Chebyshev-distance-SHELL ball), then emit every solid block the
+    // dilated mask covers, vertical-run-length-encoded per column against a
+    // shared material palette. Budgeted by maxChunks + maxBlocks with a
+    // cursor so one call never stalls the main thread; callers page.
+    // ------------------------------------------------------------------
+    private JsonObject voxelScan(JsonObject args, World w) {
+        int maxBlocks = (int) num(args, "maxBlocks", 20000, 1000, 60000);
+        int maxChunks = (int) num(args, "maxChunks", 12, 1, 64);
+        int cursor = (int) num(args, "cursor", 0, 0, Integer.MAX_VALUE);
+
+        // Optional block-coordinate area -> inclusive chunk-coordinate bounds.
+        boolean hasArea = false;
+        int acx1 = 0, acz1 = 0, acx2 = 0, acz2 = 0;
+        if (args != null && args.has("area") && args.get("area").isJsonObject()) {
+            JsonObject a = args.getAsJsonObject("area");
+            int ax1 = (int) num(a, "x1", 0, Integer.MIN_VALUE, Integer.MAX_VALUE);
+            int az1 = (int) num(a, "z1", 0, Integer.MIN_VALUE, Integer.MAX_VALUE);
+            int ax2 = (int) num(a, "x2", 0, Integer.MIN_VALUE, Integer.MAX_VALUE);
+            int az2 = (int) num(a, "z2", 0, Integer.MIN_VALUE, Integer.MAX_VALUE);
+            acx1 = Math.min(ax1, ax2) >> 4; acx2 = Math.max(ax1, ax2) >> 4;
+            acz1 = Math.min(az1, az2) >> 4; acz2 = Math.max(az1, az2) >> 4;
+            hasArea = true;
+        }
+
+        Chunk[] loaded = w.getLoadedChunks();
+        java.util.ArrayList<Chunk> chunks = new java.util.ArrayList<>();
+        for (Chunk c : loaded) {
+            if (hasArea && (c.getX() < acx1 || c.getX() > acx2 || c.getZ() < acz1 || c.getZ() > acz2)) continue;
+            chunks.add(c);
+        }
+        // Deterministic order so cursor paging is stable across calls.
+        chunks.sort((a, b) -> a.getX() != b.getX() ? Integer.compare(a.getX(), b.getX()) : Integer.compare(a.getZ(), b.getZ()));
+
+        int wMin = w.getMinHeight(), wMax = w.getMaxHeight();
+        java.util.ArrayList<String> palette = new java.util.ArrayList<>();
+        java.util.HashMap<String, Integer> paletteIdx = new java.util.HashMap<>();
+        JsonArray chunkArr = new JsonArray();
+        int blocks = 0, done = 0;
+        Integer nextCursor = null;
+
+        for (int ci = cursor; ci < chunks.size(); ci++) {
+            if (done >= maxChunks || blocks >= maxBlocks) { nextCursor = ci; break; }
+            Chunk c = chunks.get(ci);
+            int cx = c.getX(), cz = c.getZ();
+            ChunkSnapshot snap = c.getChunkSnapshot();
+
+            int minSurf = Integer.MAX_VALUE, maxSurf = Integer.MIN_VALUE;
+            for (int lx = 0; lx < 16; lx++) {
+                for (int lz = 0; lz < 16; lz++) {
+                    int hy = snap.getHighestBlockYAt(lx, lz);
+                    if (hy < minSurf) minSurf = hy;
+                    if (hy > maxSurf) maxSurf = hy;
+                }
+            }
+            done++;
+            if (maxSurf < wMin) continue; // entirely-empty chunk: nothing to emit
+
+            int yLo = Math.max(wMin, minSurf - BAND_BELOW_SURFACE);
+            int yHiSolid = Math.min(wMax - 1, maxSurf);
+            // Air band reaches one above the highest solid so every top surface
+            // sits within SHELL of sky air even on a perfectly flat chunk.
+            int yHiAir = Math.min(wMax - 1, maxSurf + 1);
+            if (yHiAir - yLo + 1 > MAX_BAND_HEIGHT) yLo = yHiAir - MAX_BAND_HEIGHT + 1;
+            int H = yHiAir - yLo + 1;
+
+            // Edge-neighbor snapshots (loaded only) for the seam pad.
+            ChunkSnapshot west = w.isChunkLoaded(cx - 1, cz) ? w.getChunkAt(cx - 1, cz).getChunkSnapshot() : null;
+            ChunkSnapshot east = w.isChunkLoaded(cx + 1, cz) ? w.getChunkAt(cx + 1, cz).getChunkSnapshot() : null;
+            ChunkSnapshot north = w.isChunkLoaded(cx, cz - 1) ? w.getChunkAt(cx, cz - 1).getChunkSnapshot() : null;
+            ChunkSnapshot south = w.isChunkLoaded(cx, cz + 1) ? w.getChunkAt(cx, cz + 1).getChunkSnapshot() : null;
+
+            int W = 16 + 2 * SHELL; // padded footprint
+            boolean[] air = new boolean[W * H * W]; // idx = (px*H + y)*W + pz
+            for (int px = 0; px < W; px++) {
+                int gx = px - SHELL;
+                for (int pz = 0; pz < W; pz++) {
+                    int gz = pz - SHELL;
+                    ChunkSnapshot sel = null;
+                    int sx = gx, sz = gz;
+                    if (gx >= 0 && gx < 16 && gz >= 0 && gz < 16) { sel = snap; }
+                    else if (gx < 0 && gz >= 0 && gz < 16) { sel = west; sx = gx + 16; }
+                    else if (gx > 15 && gz >= 0 && gz < 16) { sel = east; sx = gx - 16; }
+                    else if (gz < 0 && gx >= 0 && gx < 16) { sel = north; sz = gz + 16; }
+                    else if (gz > 15 && gx >= 0 && gx < 16) { sel = south; sz = gz - 16; }
+                    if (sel == null) continue; // unloaded neighbor / diagonal corner: no air known
+                    int base = (px * H) * W + pz;
+                    for (int y = 0; y < H; y++) {
+                        if (sel.getBlockType(sx, yLo + y, sz).isAir()) air[base + y * W] = true;
+                    }
+                }
+            }
+
+            // Separable Chebyshev-SHELL dilation: x pass air->tmp, z pass
+            // tmp->air, y pass air->tmp; tmp is the final mask.
+            boolean[] tmp = new boolean[air.length];
+            for (int px = 0; px < W; px++) {
+                for (int y = 0; y < H; y++) {
+                    for (int pz = 0; pz < W; pz++) {
+                        boolean v = false;
+                        for (int d = -SHELL; d <= SHELL && !v; d++) {
+                            int q = px + d;
+                            if (q >= 0 && q < W && air[(q * H + y) * W + pz]) v = true;
+                        }
+                        tmp[(px * H + y) * W + pz] = v;
+                    }
+                }
+            }
+            for (int px = 0; px < W; px++) {
+                for (int y = 0; y < H; y++) {
+                    for (int pz = 0; pz < W; pz++) {
+                        boolean v = false;
+                        for (int d = -SHELL; d <= SHELL && !v; d++) {
+                            int q = pz + d;
+                            if (q >= 0 && q < W && tmp[(px * H + y) * W + q]) v = true;
+                        }
+                        air[(px * H + y) * W + pz] = v;
+                    }
+                }
+            }
+            for (int px = 0; px < W; px++) {
+                for (int y = 0; y < H; y++) {
+                    for (int pz = 0; pz < W; pz++) {
+                        boolean v = false;
+                        for (int d = -SHELL; d <= SHELL && !v; d++) {
+                            int q = y + d;
+                            if (q >= 0 && q < H && air[(px * H + q) * W + pz]) v = true;
+                        }
+                        tmp[(px * H + y) * W + pz] = v;
+                    }
+                }
+            }
+
+            // Emit the center 16x16: solid blocks inside the dilated-air mask,
+            // vertical-run-length encoded per column as [lx,lz,yStart,len,pi].
+            JsonArray runs = new JsonArray();
+            for (int lx = 0; lx < 16; lx++) {
+                for (int lz = 0; lz < 16; lz++) {
+                    int px = lx + SHELL, pz = lz + SHELL;
+                    int runStart = 0, runLen = 0, runPi = -1;
+                    for (int y = yLo; y <= yHiSolid; y++) {
+                        int pi = -1;
+                        if (tmp[(px * H + (y - yLo)) * W + pz]) {
+                            Material m = snap.getBlockType(lx, y, lz);
+                            if (!m.isAir()) {
+                                String key = m.getKey().getKey();
+                                Integer id = paletteIdx.get(key);
+                                if (id == null) { id = palette.size(); palette.add(key); paletteIdx.put(key, id); }
+                                pi = id;
+                            }
+                        }
+                        if (pi == runPi && pi >= 0) { runLen++; continue; }
+                        if (runPi >= 0) { runs.add(runJson(lx, lz, runStart, runLen, runPi)); blocks += runLen; }
+                        runPi = pi; runStart = y; runLen = pi >= 0 ? 1 : 0;
+                    }
+                    if (runPi >= 0) { runs.add(runJson(lx, lz, runStart, runLen, runPi)); blocks += runLen; }
+                }
+            }
+            JsonObject cj = new JsonObject();
+            cj.addProperty("cx", cx);
+            cj.addProperty("cz", cz);
+            cj.add("runs", runs);
+            chunkArr.add(cj);
+        }
+
+        JsonObject out = new JsonObject();
+        out.addProperty("ok", true);
+        out.addProperty("mode", "voxels");
+        out.addProperty("world", w.getName());
+        JsonArray pal = new JsonArray();
+        for (String p : palette) pal.add(p);
+        out.add("palette", pal);
+        out.add("chunks", chunkArr);
+        out.addProperty("cursor", cursor);
+        if (nextCursor != null) out.addProperty("nextCursor", nextCursor); else out.add("nextCursor", JsonNull.INSTANCE);
+        out.addProperty("blocks", blocks);
+        out.addProperty("chunkTotal", chunks.size());
+        out.addProperty("loadedChunks", loaded.length);
+        return out;
+    }
+
+    private static JsonArray runJson(int lx, int lz, int yStart, int len, int pi) {
+        JsonArray run = new JsonArray();
+        run.add(lx); run.add(lz); run.add(yStart); run.add(len); run.add(pi);
+        return run;
+    }
+
+    private static boolean bool(JsonObject o, String k, boolean def) {
+        if (o == null || !o.has(k) || !o.get(k).isJsonPrimitive()) return def;
+        try { return o.get(k).getAsBoolean(); } catch (Exception e) { return def; }
     }
 
     private static String str(JsonObject o, String k, String def) {

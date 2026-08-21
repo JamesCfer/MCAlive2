@@ -119,12 +119,22 @@ export async function main(env = process.env) {
     });
   }
 
+  // getVoxels backs GET /voxels (console-server.mjs) - the /map viewer's
+  // TRUE cubic-voxel terrain source: one page of gadget:world-scan's voxel
+  // mode (solid blocks within Chebyshev distance 3 of air, RLE-encoded; see
+  // brain/gadgets/world-scan.java). Human map only - NEVER fed into the
+  // director's world_overview/worldmodel prompt path (token cost).
+  function getVoxels(params) {
+    return bridge.call("gadget:world-scan", { voxels: true, ...params }, config.npcContextTimeoutMs);
+  }
+
   let consoleServer = null;
   if (config.consoleEnabled) {
     consoleServer = await startConsoleServer(config, {
       reloadLore: loreWatch.tick,
       submitOrder,
       getWorldModel,
+      getVoxels,
       getStatus,
       resetBudget,
     });
@@ -511,7 +521,7 @@ export async function main(env = process.env) {
       const source = fs.readFileSync(gadgetPath, "utf8");
       await bridge.call(
         "gadget_define",
-        { id: "world-scan", source, description: "System: survey the whole loaded world into a coarse heightmap for the world model/map" },
+        { id: "world-scan", source, description: "System: survey the whole loaded world into a coarse heightmap for the world model/map (plus a voxel mode for the console 3D map)" },
         config.npcContextTimeoutMs
       );
       log.info("world_scan_installed", {});
