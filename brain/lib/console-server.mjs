@@ -994,7 +994,12 @@ function initGL() {
     '  float z1 = p.x * uRot.y + p.z * uRot.x;',
     '  float y2 = p.y * uRot.z - z1 * uRot.w;',
     '  float z2 = p.y * uRot.w + z1 * uRot.z;',
-    '  gl_Position = vec4(x1 * uView.x / uView.y, y2 * uView.x / uView.z, z2 / uDepthRange, 1.0);',
+    // NOTE the -z2: the z2 of project() grows AWAY from a viewer placed above
+    // the terrain (the orbit camera never dips below the horizon), so the
+    // depth-test-nearer point is the LARGER z2 - negate it for gl_Position
+    // where smaller depth wins. Without this the depth buffer resolves the
+    // scene as seen from underneath.
+    '  gl_Position = vec4(x1 * uView.x / uView.y, y2 * uView.x / uView.z, -z2 / uDepthRange, 1.0);',
     '  vCol = aCol;',
     '}',
   ].join('\\n');
