@@ -1752,9 +1752,12 @@ export function startConsoleServer(config, { reloadLore, submitOrder, getWorldMo
         if (Number.isFinite(cursor) && cursor >= 0) params.cursor = Math.floor(cursor);
         const maxBlocks = Number(url.searchParams.get("maxBlocks"));
         if (Number.isFinite(maxBlocks) && maxBlocks > 0) params.maxBlocks = Math.floor(maxBlocks);
-        const areaNums = ["x1", "z1", "x2", "z2"].map((k) => Number(url.searchParams.get(k)));
-        if (areaNums.every((n) => Number.isFinite(n))) {
-          params.area = { x1: areaNums[0], z1: areaNums[1], x2: areaNums[2], z2: areaNums[3] };
+        // Number(null) is 0, so require the params to actually be present -
+        // otherwise a bare /voxels request would ask for area {0,0,0,0} (just
+        // chunk 0,0) instead of every loaded chunk.
+        const areaRaw = ["x1", "z1", "x2", "z2"].map((k) => url.searchParams.get(k));
+        if (areaRaw.every((v) => v !== null && v !== "" && Number.isFinite(Number(v)))) {
+          params.area = { x1: Number(areaRaw[0]), z1: Number(areaRaw[1]), x2: Number(areaRaw[2]), z2: Number(areaRaw[3]) };
         }
         try {
           const data = await cachedVoxels(url.search || "?", params);

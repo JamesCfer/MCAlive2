@@ -1680,6 +1680,10 @@ async function main() {
   assert(gotVoxelGadgetCall, "the /voxels request reached the bridge as gadget:world-scan with voxels:true");
   const voxelGadgetCalls = () => bridge4.logs.filter((l) => l.mock === "command_received" && l.cmd === "gadget:world-scan" && l.args && l.args.voxels === true);
   assert(voxelGadgetCalls().every((l) => l.args.cursor === 0), "the requested cursor was forwarded to the gadget call");
+  // Regression: Number(null) is 0, so a bare request (no x1/z1/x2/z2 params)
+  // must NOT synthesize area {0,0,0,0} - that asks the gadget for just chunk
+  // 0,0 and the live map rendered an empty world because of it.
+  assert(voxelGadgetCalls().every((l) => l.args.area === undefined), "a /voxels request without x1/z1/x2/z2 params sends NO area to the gadget (Number(null)===0 regression)");
   const voxelCallsBefore = voxelGadgetCalls().length;
   const voxelsRes2 = await fetch(`${base}/voxels?cursor=0&token=${consoleToken}`);
   assert(voxelsRes2.status === 200, "a second immediate GET /voxels succeeds");
