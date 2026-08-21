@@ -494,9 +494,10 @@ setInterval(refreshStatus, 5000);
 // terrain, tiled by cursor) - both same-origin, so the
 // cookie set by checkAuth() above already authenticates its fetch() calls
 // exactly like the / page's own fetch()es). Entirely self-contained: no
-// external/CDN resources, no npm deps - a hand-rolled orthographic 3D
-// projection drawn on a <canvas>, in the same dark theme as the / page.
-// See the inline <script> below for the camera/projection/picking code.
+// external/CDN resources, no npm deps. Terrain renders through raw WebGL
+// (depth-buffered voxel cubes, see the "WebGL terrain renderer" section);
+// entities/labels/picking draw on a 2D overlay canvas sharing the same
+// hand-rolled orthographic projection, in the same dark theme as /.
 
 function renderMapPage() {
   return `<!doctype html>
@@ -526,9 +527,11 @@ function renderMapPage() {
   button:hover { background: #5081f8; }
   label.toggle { font-size: .8rem; color: #9aa0a8; display: flex; align-items: center; gap: .35rem; cursor: pointer; }
   #layout { display: flex; height: calc(100% - 48px); }
-  #canvas-wrap { position: relative; flex: 1; min-width: 0; }
-  canvas { display: block; background: #0f1114; cursor: grab; }
-  canvas.dragging { cursor: grabbing; }
+  #canvas-wrap { position: relative; flex: 1; min-width: 0; background: #0f1114; }
+  #canvas-wrap canvas { display: block; position: absolute; top: 0; left: 0; }
+  #gl { z-index: 0; }
+  #c { z-index: 1; background: transparent; cursor: grab; }
+  #c.dragging { cursor: grabbing; }
   #banner {
     position: absolute; top: 0; left: 0; right: 0; padding: .6rem 1rem; font-size: .85rem;
     background: #3a1a1a; color: #ffb0b0; border-bottom: 1px solid #6a2a2a; display: none;
@@ -600,6 +603,7 @@ function renderMapPage() {
 <div id="layout">
   <div id="canvas-wrap">
     <div id="banner"></div>
+    <canvas id="gl"></canvas>
     <canvas id="c"></canvas>
     <div id="empty-notes"></div>
     <div id="hover-coord"></div>
@@ -620,7 +624,7 @@ function renderMapPage() {
         <div class="row"><span class="swatch" style="background:#ff6a3d"></span> NPC has a flag</div>
       <div class="row"><span class="swatch" style="background:#ffcf5c"></span> world spawn</div>
       <div class="row"><span class="swatch" style="background:#5cc8ff"></span> player online</div>
-      <div class="row" style="color:#6b7078">terrain: true cubic voxels — solid blocks within 3 of air (interiors, overhangs and caves show); coloured by block type, grey/green by height otherwise. Falls back to coarse heightmap cubes while voxels load.</div>
+      <div class="row" style="color:#6b7078">terrain: true cubic voxels rendered on the GPU (WebGL, exact occlusion from every angle) — solid blocks within 3 of air; coloured by block type, grey/green by height otherwise. Falls back to coarse heightmap cubes while voxels load.</div>
       </div>
     </section>
     <section id="problems">
@@ -650,18 +654,17 @@ var hoveredKey = null;       // "place:<id>" / "npc:<id>" of the currently hover
 // building interiors, overhangs, and near-surface caves render as real
 // cubes). Tiled by cursor until nextCursor is null; static, so re-fetched
 // at most every VOXEL_REFRESH_MS (entities keep their own live cadence).
-// Shape: { mats:[name], set:Set('x,y,z'), list:[{x,y,z,m}], boxes:[{x,y,z,
-// dx,dy,dz,m,topOpen,xOpen1,xOpen2,zOpen1,zOpen2}], boxCount, minY, maxY,
-// count, partial } - null until the first successful fetch, in which case
-// draw() falls back to the pre-existing heightmap terrain cubes. boxes is
-// the greedy-meshed form of list (see greedyMeshVoxels()) that the renderer
-// actually draws; list and set stay intact for coverage checks/diagnostics.
+// The raw voxel list is turned into a WebGL vertex buffer ONCE per fetch
+// (see buildVoxelGeometry/uploadVoxelGeometry) and then discarded - only
+// summary stats survive here: { mats:[name], count, faceCount, minY, maxY,
+// partial }. null until the first successful fetch, in which case draw()
+// falls back to the pre-existing heightmap terrain cubes on the overlay.
 var voxels = null;
 var voxelFetchedAt = 0;
 var voxelFetching = false;
 var VOXEL_REFRESH_MS = 10000;
-var VOXEL_MAX_PAGES = 40;    // tiling safety cap (pages per refresh)
-var VOXEL_MAX_TOTAL = 120000; // aggregate voxel cap so the canvas stays interactive
+var VOXEL_MAX_PAGES = 200;    // tiling safety cap (pages per refresh)
+var VOXEL_MAX_TOTAL = 600000; // aggregate voxel cap (GPU-rendered, so generous)
 
 var canvas = document.getElementById('c');
 var ctx = canvas.getContext('2d');
@@ -907,26 +910,16 @@ function pushQuad(list, corners, fillCss, strokeCss, lineWidth) {
 // the other darkest - the minimal shading needed for the cube form to read
 // without any real lighting model.
 function pushCube(list, x1, x2, yBottom, yTop, z1, z2, topRgb, sideFacing, strokeCss, lineWidth) {
-  pushCubeFaces(list, x1, x2, yBottom, yTop, z1, z2, topRgb, sideFacing,
-    { top: true, sideX: true, sideZ: true }, strokeCss, lineWidth);
-}
-
-// Per-face variant of pushCube used by the voxel renderer's face culling:
-// the faces arg gates which of the three potentially-visible faces (top + the two
-// camera-facing sides) actually get pushed - a face hidden behind an
-// adjacent voxel is skipped entirely, which is what makes drawing tens of
-// thousands of 1-block cubes tractable on a 2D canvas.
-function pushCubeFaces(list, x1, x2, yBottom, yTop, z1, z2, topRgb, sideFacing, faces, strokeCss, lineWidth) {
   var sideXRgb = shadeColor(topRgb, 0.72);
   var sideZRgb = shadeColor(topRgb, 0.5);
   var topCss = rgbCss(topRgb), sideXCss = rgbCss(sideXRgb), sideZCss = rgbCss(sideZRgb);
 
-  if (faces.top) pushQuad(list, [
+  pushQuad(list, [
     { x: x1, y: yTop, z: z1 }, { x: x2, y: yTop, z: z1 },
     { x: x2, y: yTop, z: z2 }, { x: x1, y: yTop, z: z2 },
   ], topCss, strokeCss, lineWidth);
 
-  if (!faces.sideX) { /* culled */ } else if (sideFacing.x === 'x2') {
+  if (sideFacing.x === 'x2') {
     pushQuad(list, [
       { x: x2, y: yBottom, z: z1 }, { x: x2, y: yBottom, z: z2 },
       { x: x2, y: yTop, z: z2 }, { x: x2, y: yTop, z: z1 },
@@ -938,7 +931,7 @@ function pushCubeFaces(list, x1, x2, yBottom, yTop, z1, z2, topRgb, sideFacing, 
     ], sideXCss, strokeCss, lineWidth);
   }
 
-  if (!faces.sideZ) { /* culled */ } else if (sideFacing.z === 'z2') {
+  if (sideFacing.z === 'z2') {
     pushQuad(list, [
       { x: x1, y: yBottom, z: z2 }, { x: x2, y: yBottom, z: z2 },
       { x: x2, y: yTop, z: z2 }, { x: x1, y: yTop, z: z2 },
@@ -951,27 +944,6 @@ function pushCubeFaces(list, x1, x2, yBottom, yTop, z1, z2, topRgb, sideFacing, 
   }
 }
 
-// =========================================================================
-// SECTION: terrain layer cache. The terrain is by far the most expensive
-// part of a frame, and it only changes when the camera or the voxel data
-// does - so it renders into an offscreen canvas keyed by both, and draw()
-// blits it. While the camera is moving (renderFast) the layer uses the
-// greedy-meshed boxes - an order of magnitude fewer quads, with occasional
-// painter's-algorithm artifacts that are invisible in motion. 180ms after
-// the last interaction it re-renders exact per-voxel cubes (verified
-// pixel-identical to the pre-mesh renderer).
-// =========================================================================
-var terrainLayer = document.createElement('canvas');
-var terrainKey = '';
-var renderFast = false;
-var settleTimer = null;
-
-function noteInteraction() {
-  renderFast = true;
-  if (settleTimer) clearTimeout(settleTimer);
-  settleTimer = setTimeout(function () { renderFast = false; draw(); }, 180);
-}
-
 // Coalesce bursts of input events (mousemove fires far faster than the
 // display refreshes) into at most one draw() per animation frame.
 var drawQueued = false;
@@ -981,27 +953,221 @@ function scheduleDraw() {
   requestAnimationFrame(function () { drawQueued = false; draw(); });
 }
 
-function drawTerrainLayer(sideFacing) {
-  if (!canvas.width || !canvas.height) return;
-  var key = [camera.yaw.toFixed(4), camera.pitch.toFixed(4), camera.scale.toFixed(4),
-    camera.target.x.toFixed(2), camera.target.y.toFixed(2), camera.target.z.toFixed(2),
-    canvas.width, canvas.height, renderFast ? 'fast' : 'exact',
-    voxels ? voxels.count : 'heightmap', voxelFetchedAt].join('|');
-  if (key !== terrainKey) {
-    terrainLayer.width = canvas.width;
-    terrainLayer.height = canvas.height;
-    var tctx = terrainLayer.getContext('2d');
-    tctx.clearRect(0, 0, terrainLayer.width, terrainLayer.height);
-    var prims = [];
-    // Prefer the true cubic-voxel terrain; the coarse heightmap cubes remain
-    // only as the fallback while /voxels hasn't returned anything yet.
-    if (voxels && voxels.count) buildVoxelPrimitives(prims, sideFacing, renderFast);
-    else buildTerrainPrimitives(prims, sideFacing);
-    prims.sort(function (a, b) { return b.depth - a.depth; }); // farthest first
-    prims.forEach(function (p) { p.draw(tctx); });
-    terrainKey = key;
+// =========================================================================
+// SECTION: WebGL terrain renderer.
+// -------------------------------------------------------------------------
+// Terrain draws on its own <canvas id="gl"> UNDER the 2D overlay canvas,
+// through raw WebGL (no libraries): the voxel list becomes one static
+// vertex buffer at fetch time (buildVoxelGeometry - one quad per exposed
+// face, per-face shading and colour baked into the vertices), and every
+// frame after that is a single drawArrays call with the camera passed as
+// uniforms. The GPU depth buffer makes occlusion exact from every angle -
+// no painter's-algorithm sorting, no greedy meshing, no fast/exact modes,
+// none of the artifacts those caused. The vertex shader reproduces
+// project()'s exact orthographic math, so the 2D overlay (entities, labels,
+// picking, hover coords) stays pixel-aligned with the terrain beneath it.
+// =========================================================================
+var glCanvas = document.getElementById('gl');
+var GL = null;            // WebGL context, or null until initGL()/if unsupported
+var glProgram = null;
+var glBufPos = null, glBufCol = null;
+var glAttrs = null, glUnis = null;
+var glVertexCount = 0;
+var GL_DEPTH_RANGE = 8192; // ortho depth normalization; world fits easily
+
+function initGL() {
+  if (GL) return true;
+  var gl = glCanvas.getContext('webgl', { antialias: true, depth: true })
+    || glCanvas.getContext('experimental-webgl', { antialias: true, depth: true });
+  if (!gl) return false;
+  var vsSrc = [
+    'attribute vec3 aPos;',
+    'attribute vec3 aCol;',
+    'uniform vec3 uTarget;',
+    'uniform vec4 uRot;',  // cos(yaw), sin(yaw), cos(pitch), sin(pitch)
+    'uniform vec3 uView;', // scale, halfWidth, halfHeight (px)
+    'uniform float uDepthRange;',
+    'varying vec3 vCol;',
+    'void main() {',
+    '  vec3 p = aPos - uTarget;',
+    '  float x1 = p.x * uRot.x - p.z * uRot.y;',
+    '  float z1 = p.x * uRot.y + p.z * uRot.x;',
+    '  float y2 = p.y * uRot.z - z1 * uRot.w;',
+    '  float z2 = p.y * uRot.w + z1 * uRot.z;',
+    '  gl_Position = vec4(x1 * uView.x / uView.y, y2 * uView.x / uView.z, z2 / uDepthRange, 1.0);',
+    '  vCol = aCol;',
+    '}',
+  ].join('\n');
+  var fsSrc = [
+    'precision mediump float;',
+    'varying vec3 vCol;',
+    'void main() { gl_FragColor = vec4(vCol, 1.0); }',
+  ].join('\n');
+  function compile(type, src) {
+    var s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
   }
-  ctx.drawImage(terrainLayer, 0, 0);
+  try {
+    var prog = gl.createProgram();
+    gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSrc));
+    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSrc));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    glProgram = prog;
+    glAttrs = { pos: gl.getAttribLocation(prog, 'aPos'), col: gl.getAttribLocation(prog, 'aCol') };
+    glUnis = {
+      target: gl.getUniformLocation(prog, 'uTarget'),
+      rot: gl.getUniformLocation(prog, 'uRot'),
+      view: gl.getUniformLocation(prog, 'uView'),
+      depthRange: gl.getUniformLocation(prog, 'uDepthRange'),
+    };
+    glBufPos = gl.createBuffer();
+    glBufCol = gl.createBuffer();
+    gl.enable(gl.DEPTH_TEST);
+    GL = gl;
+    return true;
+  } catch (e) {
+    return false; // shader failure -> heightmap fallback keeps the page useful
+  }
+}
+
+// --- BEGIN pure voxel geometry builder (extracted verbatim by
+// test/smoke.mjs for a headless sanity run; keep this block self-contained:
+// no DOM access, no WebGL, no outer-scope variables) ---
+
+// Turns the fetched voxel list into flat vertex arrays: for each voxel,
+// each of its 6 faces is emitted (two triangles, 6 vertices) ONLY if no
+// voxel occupies the neighboring cell - interior faces between shell voxels
+// never reach the GPU. matColors[m] is a precomputed [r,g,b] per palette
+// index or null; null falls back to the same grey/green height ramp the 2D
+// renderer used (rampLo..rampHi are the voxel Y bounds). Per-face shading
+// (top brightest, bottom darkest) plus a tiny per-voxel brightness hash is
+// baked into the colour bytes so adjacent same-material cubes still read as
+// distinct blocks without any stroke lines. Occupancy keys pack the
+// bounds-normalized integer coords, so the neighbor test is Set-of-numbers
+// fast even at hundreds of thousands of voxels.
+function buildVoxelGeometry(list, matColors, rampLo, rampHi) {
+  var n = list.length;
+  var empty = { pos: new Float32Array(0), col: new Uint8Array(0), vertexCount: 0, faceCount: 0 };
+  if (!n) return empty;
+  var minX = Infinity, minY = Infinity, minZ = Infinity;
+  var maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  var i, v;
+  for (i = 0; i < n; i++) {
+    v = list[i];
+    if (v.x < minX) minX = v.x;
+    if (v.x > maxX) maxX = v.x;
+    if (v.y < minY) minY = v.y;
+    if (v.y > maxY) maxY = v.y;
+    if (v.z < minZ) minZ = v.z;
+    if (v.z > maxZ) maxZ = v.z;
+  }
+  var spanY = maxY - minY + 3, spanZ = maxZ - minZ + 3;
+  function okey(x, y, z) {
+    return ((x - minX + 1) * spanZ + (z - minZ + 1)) * spanY + (y - minY + 1);
+  }
+  var occ = new Set();
+  for (i = 0; i < n; i++) occ.add(okey(list[i].x, list[i].y, list[i].z));
+  // 6 faces: unit-cube corner offsets (quad order) + neighbor direction +
+  // shade factor. Top brightest, bottom darkest, X/Z sides two mid tones.
+  var FACES = [
+    { d: [0, 1, 0], s: 1.0, c: [[0, 1, 0], [1, 1, 0], [1, 1, 1], [0, 1, 1]] },
+    { d: [0, -1, 0], s: 0.45, c: [[0, 0, 0], [0, 0, 1], [1, 0, 1], [1, 0, 0]] },
+    { d: [1, 0, 0], s: 0.8, c: [[1, 0, 0], [1, 0, 1], [1, 1, 1], [1, 1, 0]] },
+    { d: [-1, 0, 0], s: 0.66, c: [[0, 0, 0], [0, 1, 0], [0, 1, 1], [0, 0, 1]] },
+    { d: [0, 0, 1], s: 0.58, c: [[0, 0, 1], [0, 1, 1], [1, 1, 1], [1, 0, 1]] },
+    { d: [0, 0, -1], s: 0.52, c: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]] },
+  ];
+  // Pass 1: count exposed faces so both arrays are allocated exactly once.
+  var faceCount = 0, f;
+  for (i = 0; i < n; i++) {
+    v = list[i];
+    for (f = 0; f < 6; f++) {
+      var d = FACES[f].d;
+      if (!occ.has(okey(v.x + d[0], v.y + d[1], v.z + d[2]))) faceCount++;
+    }
+  }
+  if (!faceCount) return empty;
+  var pos = new Float32Array(faceCount * 6 * 3);
+  var col = new Uint8Array(faceCount * 6 * 3);
+  var pi = 0, ci = 0;
+  var rampSpan = Math.max(1, rampHi - rampLo);
+  var QUAD = [0, 1, 2, 0, 2, 3]; // two triangles per face
+  for (i = 0; i < n; i++) {
+    v = list[i];
+    var base = (v.m >= 0 && matColors[v.m]) ? matColors[v.m] : null;
+    if (!base) {
+      var t = Math.max(0, Math.min(1, (v.y - rampLo) / rampSpan));
+      base = [72 + (150 - 72) * t, 92 + (158 - 92) * t, 62 + (128 - 62) * t];
+    }
+    // Small deterministic per-voxel brightness variation (0.95..1.03) so a
+    // flat same-material area still shows individual blocks.
+    var h = ((v.x * 73856093) ^ (v.y * 19349663) ^ (v.z * 83492791)) & 7;
+    var jitter = 0.95 + h * 0.0114;
+    for (f = 0; f < 6; f++) {
+      var face = FACES[f];
+      if (occ.has(okey(v.x + face.d[0], v.y + face.d[1], v.z + face.d[2]))) continue;
+      var shade = face.s * jitter;
+      var r = Math.max(0, Math.min(255, Math.round(base[0] * shade)));
+      var g = Math.max(0, Math.min(255, Math.round(base[1] * shade)));
+      var b = Math.max(0, Math.min(255, Math.round(base[2] * shade)));
+      for (var q = 0; q < 6; q++) {
+        var corner = face.c[QUAD[q]];
+        pos[pi++] = v.x + corner[0];
+        pos[pi++] = v.y + corner[1];
+        pos[pi++] = v.z + corner[2];
+        col[ci++] = r;
+        col[ci++] = g;
+        col[ci++] = b;
+      }
+    }
+  }
+  return { pos: pos, col: col, vertexCount: faceCount * 6, faceCount: faceCount };
+}
+// --- END pure voxel geometry builder ---
+
+// Uploads freshly built geometry into the two static GPU buffers. The
+// source arrays are garbage afterwards - nothing per-voxel is retained on
+// the JS side.
+function uploadVoxelGeometry(geo) {
+  if (!initGL()) return false;
+  var gl = GL;
+  gl.bindBuffer(gl.ARRAY_BUFFER, glBufPos);
+  gl.bufferData(gl.ARRAY_BUFFER, geo.pos, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, glBufCol);
+  gl.bufferData(gl.ARRAY_BUFFER, geo.col, gl.STATIC_DRAW);
+  glVertexCount = geo.vertexCount;
+  return true;
+}
+
+// One frame of terrain: clear (the page-background colour, so the GL canvas
+// doubles as the map background), set the camera uniforms, one drawArrays.
+function drawGL() {
+  if (!GL && !initGL()) return;
+  var gl = GL;
+  if (glCanvas.width !== canvas.width || glCanvas.height !== canvas.height) {
+    glCanvas.width = canvas.width;
+    glCanvas.height = canvas.height;
+  }
+  gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+  gl.clearColor(0x0f / 255, 0x11 / 255, 0x14 / 255, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  if (!glVertexCount || !glCanvas.width || !glCanvas.height) return;
+  gl.useProgram(glProgram);
+  gl.uniform3f(glUnis.target, camera.target.x, camera.target.y, camera.target.z);
+  gl.uniform4f(glUnis.rot, Math.cos(camera.yaw), Math.sin(camera.yaw), Math.cos(camera.pitch), Math.sin(camera.pitch));
+  gl.uniform3f(glUnis.view, camera.scale, glCanvas.width / 2, glCanvas.height / 2);
+  gl.uniform1f(glUnis.depthRange, GL_DEPTH_RANGE);
+  gl.bindBuffer(gl.ARRAY_BUFFER, glBufPos);
+  gl.enableVertexAttribArray(glAttrs.pos);
+  gl.vertexAttribPointer(glAttrs.pos, 3, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, glBufCol);
+  gl.enableVertexAttribArray(glAttrs.col);
+  gl.vertexAttribPointer(glAttrs.col, 3, gl.UNSIGNED_BYTE, true, 0, 0);
+  gl.drawArrays(gl.TRIANGLES, 0, glVertexCount);
 }
 
 var TERRAIN_STROKE = 'rgba(0,0,0,.25)';
@@ -1052,163 +1218,6 @@ function buildTerrainPrimitives(list, sideFacing) {
   }
 }
 
-// --- BEGIN pure greedy mesher (extracted verbatim by test/smoke.mjs for a
-// headless sanity run; keep this block self-contained: no DOM access, no
-// outer-scope variables) ---
-
-// Cap on any one merged box edge, in blocks. Depth sorting is still the
-// original painter's algorithm keyed on each quad's average projected
-// corner depth (see pushQuad()) - exact for 1-block cubes, increasingly
-// approximate as quads grow. 16 keeps the error no worse than the coarse
-// heightmap fallback's step-sized cubes and the place bounds boxes already
-// sorted the same way, while still collapsing the vast bulk of terrain.
-var MESH_MAX_SPAN = 16;
-
-// Merges axis-aligned items that are identical except along one axis:
-// keyFn() buckets items that agree on every OTHER dimension + material,
-// then adjacent items along 'axis' (next starts exactly where prev ends)
-// grow prev's 'dAxis' extent instead of surviving as separate boxes.
-function mergeAlongAxis(items, axis, dAxis, keyFn) {
-  var groups = {};
-  for (var i = 0; i < items.length; i++) {
-    var k = keyFn(items[i]);
-    (groups[k] || (groups[k] = [])).push(items[i]);
-  }
-  var out = [];
-  Object.keys(groups).forEach(function (k) {
-    var arr = groups[k].sort(function (a, b) { return a[axis] - b[axis]; });
-    var cur = null;
-    for (var i = 0; i < arr.length; i++) {
-      var it = arr[i];
-      if (cur && it[axis] === cur[axis] + cur[dAxis] && cur[dAxis] + it[dAxis] <= MESH_MAX_SPAN) {
-        cur[dAxis] += it[dAxis];
-      } else {
-        cur = it;
-        out.push(cur);
-      }
-    }
-  });
-  return out;
-}
-
-// True iff at least one 1-block cell of the [x0,x1)x[y0,y1)x[z0,z1) slab is
-// NOT a returned voxel - i.e. a box face backed by that slab is (partially)
-// exposed and must be drawn. Used at mesh time to precompute per-box face
-// visibility, so draw() never touches the voxel set at all.
-function faceOpen(set, x0, x1, y0, y1, z0, z1) {
-  for (var x = x0; x < x1; x++) {
-    for (var y = y0; y < y1; y++) {
-      for (var z = z0; z < z1; z++) {
-        if (!set.has(x + ',' + y + ',' + z)) return true;
-      }
-    }
-  }
-  return false;
-}
-
-// Greedy mesher: collapses the deduped per-voxel list into axis-aligned
-// boxes of uniform material - the standard runs -> strips -> slabs pass:
-//   1. regroup voxels into vertical runs per column (1 x dy x 1),
-//   2. merge runs along X into strips (same z/y/dy/material, adjacent x),
-//   3. merge strips along Z into slabs (same x/dx/y/dy/material, adjacent z),
-// then precompute each box's five potentially-visible face-open flags
-// (top + both X sides + both Z sides; the bottom is never drawn) against
-// the per-voxel set. Materials NEVER merge across palette indices, and
-// isRamp[m] materials (no colorForMaterial() entry, so their colour is the
-// per-voxel-Y height ramp) never merge vertically either - each box keeps a
-// single y for the ramp, so per-face colours match the old cube-per-voxel
-// renderer exactly. Total volume is conserved: every voxel lands in exactly
-// one box (sum of dx*dy*dz === list.length).
-function greedyMeshVoxels(list, set, isRamp) {
-  var cols = {};
-  for (var i = 0; i < list.length; i++) {
-    var v = list[i];
-    var ck = v.x + ',' + v.z;
-    (cols[ck] || (cols[ck] = [])).push(v);
-  }
-  var runs = [];
-  Object.keys(cols).forEach(function (ck) {
-    var arr = cols[ck].sort(function (a, b) { return a.y - b.y; });
-    var run = null;
-    for (var i = 0; i < arr.length; i++) {
-      var v = arr[i];
-      if (run && v.y === run.y + run.dy && v.m === run.m && run.dy < MESH_MAX_SPAN && v.m >= 0 && !isRamp[v.m]) {
-        run.dy += 1;
-      } else {
-        run = { x: v.x, y: v.y, z: v.z, dx: 1, dy: 1, dz: 1, m: v.m };
-        runs.push(run);
-      }
-    }
-  });
-  var strips = mergeAlongAxis(runs, 'x', 'dx', function (r) { return r.z + '|' + r.y + '|' + r.dy + '|' + r.m; });
-  var boxes = mergeAlongAxis(strips, 'z', 'dz', function (r) { return r.x + '|' + r.dx + '|' + r.y + '|' + r.dy + '|' + r.m; });
-  for (var i = 0; i < boxes.length; i++) {
-    var b = boxes[i];
-    b.topOpen = faceOpen(set, b.x, b.x + b.dx, b.y + b.dy, b.y + b.dy + 1, b.z, b.z + b.dz);
-    b.xOpen1 = faceOpen(set, b.x - 1, b.x, b.y, b.y + b.dy, b.z, b.z + b.dz);
-    b.xOpen2 = faceOpen(set, b.x + b.dx, b.x + b.dx + 1, b.y, b.y + b.dy, b.z, b.z + b.dz);
-    b.zOpen1 = faceOpen(set, b.x, b.x + b.dx, b.y, b.y + b.dy, b.z - 1, b.z);
-    b.zOpen2 = faceOpen(set, b.x, b.x + b.dx, b.y, b.y + b.dy, b.z + b.dz, b.z + b.dz + 1);
-  }
-  return boxes;
-}
-// --- END pure greedy mesher ---
-
-// True cubic-voxel terrain: one box primitive per greedy-meshed box (see
-// greedyMeshVoxels() above - same-material voxels merged into larger
-// axis-aligned boxes at fetch time), with face culling at box granularity:
-// a face is only drawn when its precomputed open flag says some part of it
-// is not covered by neighboring returned voxels (top: the y+dy slab; sides:
-// the camera-facing x/z slab from computeSideFacing()). Interiors,
-// overhangs, and caves still read correctly, and the primitive count drops
-// by an order of magnitude versus one cube per voxel. Colours come from the
-// same MATERIAL_COLORS/colorForMaterial() lookup as the heightmap renderer;
-// unknown materials fall back to the height ramp (such boxes are never
-// merged vertically, so the per-face ramp colour is unchanged).
-function buildVoxelPrimitives(list, sideFacing, fast) {
-  var vb = { minY: voxels.minY, maxY: voxels.maxY };
-  if (fast) {
-    // In motion, cheapest wins: the coarse heightmap grid (~1k quads) when
-    // the world model carries one, else the greedy-meshed boxes. Either way
-    // the settled frame below is exact, so motion-only coarseness is free.
-    if (worldmodel && worldmodel.terrain && worldmodel.terrain.heights && worldmodel.terrain.heights.length) {
-      buildTerrainPrimitives(list, sideFacing);
-      return;
-    }
-    // Greedy-meshed boxes: far fewer quads than per-voxel; large merged
-    // faces can mis-sort under the scalar painter key, which is acceptable
-    // only while the camera is in motion (the settled frame is exact below).
-    var boxes = voxels.boxes;
-    for (var i = 0; i < boxes.length; i++) {
-      var b = boxes[i];
-      var xOpen = sideFacing.x === 'x2' ? b.xOpen2 : b.xOpen1;
-      var zOpen = sideFacing.z === 'z2' ? b.zOpen2 : b.zOpen1;
-      if (!b.topOpen && !xOpen && !zOpen) continue; // fully hidden from this camera
-      var rgb = colorForMaterial(voxels.mats[b.m]) || heightRampColor(b.y, vb);
-      pushCubeFaces(list, b.x, b.x + b.dx, b.y, b.y + b.dy, b.z, b.z + b.dz, rgb, sideFacing,
-        { top: b.topOpen, sideX: xOpen, sideZ: zOpen }, TERRAIN_STROKE, 1);
-    }
-    return;
-  }
-  // Exact: one cube per voxel with per-cell face culling - unit quads sort
-  // reliably under the scalar painter key (verified pixel-identical to the
-  // original per-voxel renderer).
-  var set = voxels.set;
-  var arr = voxels.list;
-  for (var j = 0; j < arr.length; j++) {
-    var v = arr[j];
-    var top = !set.has(v.x + ',' + (v.y + 1) + ',' + v.z);
-    var xn = sideFacing.x === 'x2' ? (v.x + 1) : (v.x - 1);
-    var zn = sideFacing.z === 'z2' ? (v.z + 1) : (v.z - 1);
-    var sx = !set.has(xn + ',' + v.y + ',' + v.z);
-    var sz = !set.has(v.x + ',' + v.y + ',' + zn);
-    if (!top && !sx && !sz) continue;
-    var rgb2 = colorForMaterial(voxels.mats[v.m]) || heightRampColor(v.y, vb);
-    pushCubeFaces(list, v.x, v.x + 1, v.y, v.y + 1, v.z, v.z + 1, rgb2, sideFacing,
-      { top: top, sideX: sx, sideZ: sz }, TERRAIN_STROKE, 1);
-  }
-}
-
 // Fetches the whole voxel shell, tiled by cursor (GET /voxels?cursor=N ->
 // {palette, chunks:[{cx,cz,runs:[[lx,lz,yStart,len,pi],...]}], nextCursor}),
 // merging each page's palette into one materials list. Gated to at most one
@@ -1254,16 +1263,16 @@ async function fetchVoxels() {
     }
     if (page >= VOXEL_MAX_PAGES) partial = true;
     if (list.length) {
-      // Mesh once here, at fetch time, so draw() (which runs on every
-      // interaction frame) only walks the far smaller box list. Ramp-
-      // fallback materials are flagged so the mesher never merges them
-      // vertically (their colour depends on the voxel's own y).
-      var isRamp = mats.map(function (name) { return !colorForMaterial(name); });
-      var boxes = greedyMeshVoxels(list, set, isRamp);
+      // Build the GPU geometry once, here at fetch time - draw() afterwards
+      // is a single drawArrays call per frame. The per-voxel list and set
+      // are discarded once the vertex buffers are uploaded.
+      var matColors = mats.map(function (name) { return colorForMaterial(name); });
+      var lo = isFinite(minY) ? minY : 0, hi = isFinite(maxY) ? maxY : 0;
+      var geo = buildVoxelGeometry(list, matColors, lo, hi);
+      var uploaded = uploadVoxelGeometry(geo);
       voxels = {
-        mats: mats, set: set, list: list, boxes: boxes, boxCount: boxes.length,
-        minY: isFinite(minY) ? minY : 0, maxY: isFinite(maxY) ? maxY : 0,
-        count: list.length, partial: partial,
+        mats: mats, count: list.length, faceCount: geo.faceCount,
+        minY: lo, maxY: hi, partial: partial, gpu: uploaded,
       };
       voxelFetchedAt = Date.now();
       updateCounts();
@@ -1447,20 +1456,21 @@ function hexToRgba(hex, alpha) {
 // on data refresh only; there is no continuous requestAnimationFrame loop.
 // =========================================================================
 function draw() {
+  // Terrain lives on the WebGL canvas beneath (also paints the background);
+  // everything else - entities, places, labels, compass - draws on this
+  // transparent 2D overlay. Entities are few and always-visible on top,
+  // which beats strict occlusion on a monitoring map.
+  drawGL();
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = '#0f1114';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   if (!worldmodel) return;
 
   hitTargets = [];
   var sideFacing = computeSideFacing();
-  // Terrain renders into a cached offscreen layer (see drawTerrainLayer):
-  // merged boxes while the camera is moving, exact per-voxel cubes once it
-  // settles. Entities/places/markers draw on top every frame - they are few,
-  // and always-visible entities beat strict occlusion on a monitoring map.
-  drawTerrainLayer(sideFacing);
   var primitives = [];
+  // Coarse heightmap cubes remain only as the fallback while /voxels hasn't
+  // produced GPU geometry yet (or WebGL is unavailable).
+  if (!(voxels && voxels.gpu && glVertexCount)) buildTerrainPrimitives(primitives, sideFacing);
   buildPlacePrimitives(primitives);
   buildNpcPrimitives(primitives, sideFacing);
   buildSpawnPrimitives(primitives, sideFacing);
@@ -1578,7 +1588,6 @@ canvas.addEventListener('mousedown', function (e) {
   var mode = (e.button === 2 || e.shiftKey) ? 'pan' : 'orbit';
   dragState = { mode: mode, lastX: e.clientX, lastY: e.clientY };
   canvas.classList.add('dragging');
-  noteInteraction();
 });
 
 window.addEventListener('mouseup', function () {
@@ -1601,7 +1610,6 @@ window.addEventListener('mousemove', function (e) {
       camera.target.y -= (ru.right.y * dx - ru.up.y * dy) * f;
       camera.target.z -= (ru.right.z * dx - ru.up.z * dy) * f;
     }
-    noteInteraction();
     scheduleDraw();
   }
 });
@@ -1634,7 +1642,6 @@ canvas.addEventListener('wheel', function (e) {
   e.preventDefault();
   var factor = e.deltaY > 0 ? 0.9 : 1.1;
   camera.scale = clamp(camera.scale * factor, 0.3, 60);
-  noteInteraction();
   scheduleDraw();
 }, { passive: false });
 
@@ -1700,7 +1707,7 @@ function updateCounts() {
     html += ' (' + worldmodel.loadedChunks + ' loaded chunks)';
   }
   if (voxels && voxels.count) {
-    html += ' &middot; voxels: <b>' + voxels.count + '</b> (' + voxels.boxCount + ' boxes)' + (voxels.partial ? ' (partial)' : '');
+    html += ' &middot; voxels: <b>' + voxels.count + '</b> (' + voxels.faceCount + ' faces)' + (voxels.partial ? ' (partial)' : '');
   }
   html += ' &middot; generated ' + escapeHtml(worldmodel.generatedAt || '?');
   el.innerHTML = html;
@@ -1717,6 +1724,7 @@ function resizeCanvas() {
   var wrap = document.getElementById('canvas-wrap');
   canvas.width = wrap.clientWidth;
   canvas.height = wrap.clientHeight;
+  // The WebGL canvas mirrors these dimensions inside drawGL().
   draw();
 }
 
