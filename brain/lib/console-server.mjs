@@ -664,7 +664,11 @@ var voxelFetchedAt = 0;
 var voxelFetching = false;
 var VOXEL_REFRESH_MS = 10000;
 var VOXEL_MAX_PAGES = 200;    // tiling safety cap (pages per refresh)
-var VOXEL_MAX_TOTAL = 600000; // aggregate voxel cap (GPU-rendered, so generous)
+var VOXEL_MAX_TOTAL = 2000000; // aggregate voxel cap (GPU-rendered, so generous).
+                               // The inhabited world already needs ~770k once every
+                               // NPC cluster is chunk-ticketed; below that the tiler
+                               // stops mid-world and the furthest domains render as
+                               // bare labels with no ground under them.
 
 var canvas = document.getElementById('c');
 var ctx = canvas.getContext('2d');
