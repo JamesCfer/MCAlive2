@@ -282,7 +282,7 @@ public class WorldScan implements GadgetContract {
                     if (sel == null) continue; // unloaded neighbor / diagonal corner: no air known
                     int base = (px * H) * W + pz;
                     for (int y = 0; y < H; y++) {
-                        if (sel.getBlockType(sx, yLo + y, sz).isAir()) air[base + y * W] = true;
+                        if (airLike(sel.getBlockType(sx, yLo + y, sz))) air[base + y * W] = true;
                     }
                 }
             }
@@ -338,7 +338,7 @@ public class WorldScan implements GadgetContract {
                         int pi = -1;
                         if (tmp[(px * H + (y - yLo)) * W + pz]) {
                             Material m = snap.getBlockType(lx, y, lz);
-                            if (!m.isAir()) {
+                            if (!airLike(m)) {
                                 String key = m.getKey().getKey();
                                 Integer id = paletteIdx.get(key);
                                 if (id == null) { id = palette.size(); palette.add(key); paletteIdx.put(key, id); }
@@ -373,6 +373,16 @@ public class WorldScan implements GadgetContract {
         out.addProperty("chunkTotal", chunks.size());
         out.addProperty("loadedChunks", loaded.length);
         return out;
+    }
+
+    /** Voxel-mode "air": true air plus non-solid decorations (short grass,
+     *  flowers, leaf litter, vines, torches...) which would otherwise render
+     *  as opaque cubes speckled over the real surface. Water and lava stay
+     *  visible - they are the only non-solid blocks worth drawing. */
+    private static boolean airLike(Material m) {
+        if (m.isAir()) return true;
+        if (m == Material.WATER || m == Material.LAVA) return false;
+        return !m.isSolid();
     }
 
     private static JsonArray runJson(int lx, int lz, int yStart, int len, int pi) {
