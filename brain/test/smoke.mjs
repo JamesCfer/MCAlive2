@@ -40,6 +40,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 import { namespacedTool, MCP_SERVER_NAME, ALL_TOOLS, ACTOR_TOOLS, actorDisallowedTools, DIRECTOR_WAKE_EVENTS, loadConfig } from "../lib/config.mjs";
 import { parseActorReport } from "../lib/actor-report.mjs";
@@ -633,9 +634,43 @@ async function main() {
     assert(/function fetchVoxels\(/.test(consoleServerSrc), "map page defines fetchVoxels()");
     assert(/'\/voxels\?cursor=' \+ cursor/.test(consoleServerSrc), "map page tiles /voxels requests by cursor");
     assert(/VOXEL_REFRESH_MS = 10000/.test(consoleServerSrc), "static voxels are re-fetched at most every ~10s");
-    assert(/set\.has\(v\.x \+ ',' \+ \(v\.y \+ 1\) \+ ',' \+ v\.z\)/.test(consoleServerSrc), "voxel renderer culls faces hidden behind adjacent returned voxels");
+    assert(/function greedyMeshVoxels\(/.test(consoleServerSrc), "map page defines greedyMeshVoxels() - same-material voxels merge into larger boxes at fetch time");
+    assert(/function mergeAlongAxis\(/.test(consoleServerSrc), "map page defines mergeAlongAxis() - the runs -> strips -> slabs merge helper");
+    assert(/greedyMeshVoxels\(list, set, isRamp\)/.test(consoleServerSrc), "fetchVoxels() meshes at fetch time (draw() only walks the box list)");
+    assert(/function faceOpen\(set,/.test(consoleServerSrc) && /b\.topOpen = faceOpen\(/.test(consoleServerSrc), "voxel renderer culls box faces fully covered by neighboring returned voxels, precomputed at mesh time against the per-voxel set");
+    assert(/!isRamp\[v\.m\]/.test(consoleServerSrc), "ramp-fallback (unknown-colour) materials never merge vertically, keeping per-face height-ramp colours exact");
+    assert(/voxels\.boxCount \+ ' boxes\)'/.test(consoleServerSrc), "the map status strip shows the merged box count next to the voxel count");
     assert(/if \(voxels && voxels\.count\) buildVoxelPrimitives/.test(consoleServerSrc), "draw() prefers voxel terrain and keeps buildTerrainPrimitives as the fallback");
     assert(/function buildTerrainPrimitives\(/.test(consoleServerSrc), "the heightmap terrain renderer is still present as the fallback");
+    // --- headless sanity run of the mesher itself (the block between the
+    // BEGIN/END markers is pure by contract - extract and evaluate it) ---
+    {
+      const meshMatch = consoleServerSrc.match(/\/\/ --- BEGIN pure greedy mesher[\s\S]*?\/\/ --- END pure greedy mesher ---/);
+      assert(!!meshMatch, "the greedy mesher lives between its BEGIN/END extraction markers");
+      const meshCtx = vm.createContext({});
+      vm.runInContext(meshMatch[0], meshCtx);
+      // Synthetic world: a 4x4x4 cube of material 0 plus one voxel of odd
+      // material 1 flush against its +X face at (4,0,0).
+      const list = [];
+      const set = new Set();
+      const addV = (x, y, z, m) => { list.push({ x, y, z, m }); set.add(x + "," + y + "," + z); };
+      for (let x = 0; x < 4; x++) for (let y = 0; y < 4; y++) for (let z = 0; z < 4; z++) addV(x, y, z, 0);
+      addV(4, 0, 0, 1);
+      const boxes = vm.runInContext("greedyMeshVoxels", meshCtx)(list, set, [false, false]);
+      assert(boxes.length === 2, `4x4x4 same-material cube + 1 odd-material voxel meshes to exactly 2 boxes (got ${boxes.length}) - a ${((1 - boxes.length / list.length) * 100).toFixed(0)}% primitive reduction`);
+      const volume = boxes.reduce((s, b) => s + b.dx * b.dy * b.dz, 0);
+      assert(volume === list.length, `meshed volume is conserved: sum(dx*dy*dz)=${volume} === ${list.length} voxels (nothing lost or duplicated)`);
+      const big = boxes.find((b) => b.dx * b.dy * b.dz === 64);
+      const odd = boxes.find((b) => b.m === 1);
+      assert(big && big.m === 0 && odd && odd.dx === 1 && odd.dy === 1 && odd.dz === 1, "different palette indices never merge (the odd-material voxel stays its own 1x1x1 box)");
+      assert(big.topOpen === true && big.xOpen2 === true && odd.xOpen1 === false, "precomputed face flags: the cube's top/+X faces are (partially) exposed, the odd voxel's -X face is fully covered and culled");
+      // Ramp-fallback materials (isRamp true) must not merge vertically -
+      // their colour is the per-voxel-Y height ramp.
+      const rampList = [{ x: 9, y: 0, z: 9, m: 0 }, { x: 9, y: 1, z: 9, m: 0 }, { x: 9, y: 2, z: 9, m: 0 }];
+      const rampSet = new Set(rampList.map((v) => v.x + "," + v.y + "," + v.z));
+      const rampBoxes = vm.runInContext("greedyMeshVoxels", meshCtx)(rampList, rampSet, [true]);
+      assert(rampBoxes.length === 3 && rampBoxes.every((b) => b.dy === 1), "ramp-coloured materials stay one box per Y level (height-ramp per-face colours unchanged)");
+    }
     // --- the director's world-model path is untouched by voxels (token cost) ---
     const worldmodelSrc = fs.readFileSync(path.join(BRAIN_DIR, "lib", "worldmodel.mjs"), "utf8");
     assert(!/voxels\s*:\s*true/.test(worldmodelSrc), "lib/worldmodel.mjs (director world_overview path) never invokes the gadget's voxel mode");
@@ -1670,6 +1705,8 @@ async function main() {
   console.log("\n5c². GET /voxels: token-authed, proxies gadget:world-scan's voxel mode through the bridge, and the map page consumes it");
   assert(mapHtml.includes("/voxels?cursor="), "GET /map page's inline script tiles fetches of /voxels by cursor");
   assert(/function buildVoxelPrimitives\(/.test(mapHtml), "GET /map page defines buildVoxelPrimitives() - the true-voxel renderer");
+  assert(/function greedyMeshVoxels\(/.test(mapHtml), "GET /map page defines greedyMeshVoxels() - voxels merge into boxes before drawing");
+  assert(mapHtml.includes("voxels.boxCount + ' boxes)'"), "GET /map status strip reports the merged box count");
   const voxelsUnauthed = await fetch(`${base}/voxels`);
   assert(voxelsUnauthed.status === 401, `GET /voxels with no token is rejected (got ${voxelsUnauthed.status})`);
   const voxelsRes = await fetch(`${base}/voxels?cursor=0&token=${consoleToken}`);

@@ -650,9 +650,12 @@ var hoveredKey = null;       // "place:<id>" / "npc:<id>" of the currently hover
 // building interiors, overhangs, and near-surface caves render as real
 // cubes). Tiled by cursor until nextCursor is null; static, so re-fetched
 // at most every VOXEL_REFRESH_MS (entities keep their own live cadence).
-// Shape: { mats:[name], set:Set('x,y,z'), list:[{x,y,z,m}], minY, maxY,
+// Shape: { mats:[name], set:Set('x,y,z'), list:[{x,y,z,m}], boxes:[{x,y,z,
+// dx,dy,dz,m,topOpen,xOpen1,xOpen2,zOpen1,zOpen2}], boxCount, minY, maxY,
 // count, partial } - null until the first successful fetch, in which case
-// draw() falls back to the pre-existing heightmap terrain cubes.
+// draw() falls back to the pre-existing heightmap terrain cubes. boxes is
+// the greedy-meshed form of list (see greedyMeshVoxels()) that the renderer
+// actually draws; list and set stay intact for coverage checks/diagnostics.
 var voxels = null;
 var voxelFetchedAt = 0;
 var voxelFetching = false;
@@ -996,28 +999,130 @@ function buildTerrainPrimitives(list, sideFacing) {
   }
 }
 
-// True cubic-voxel terrain: one 1x1x1 cube per returned voxel, with face
-// culling against the voxel set - a face is only drawn when no returned
-// voxel sits on its far side (top: y+1; sides: the camera-facing x/z
-// neighbor from computeSideFacing()), so interiors, overhangs, and caves
-// read correctly and the primitive count stays tractable. Colours come from
-// the same MATERIAL_COLORS/colorForMaterial() lookup as the heightmap
-// renderer, falling back to the height ramp for unknown materials.
+// --- BEGIN pure greedy mesher (extracted verbatim by test/smoke.mjs for a
+// headless sanity run; keep this block self-contained: no DOM access, no
+// outer-scope variables) ---
+
+// Cap on any one merged box edge, in blocks. Depth sorting is still the
+// original painter's algorithm keyed on each quad's average projected
+// corner depth (see pushQuad()) - exact for 1-block cubes, increasingly
+// approximate as quads grow. 16 keeps the error no worse than the coarse
+// heightmap fallback's step-sized cubes and the place bounds boxes already
+// sorted the same way, while still collapsing the vast bulk of terrain.
+var MESH_MAX_SPAN = 16;
+
+// Merges axis-aligned items that are identical except along one axis:
+// keyFn() buckets items that agree on every OTHER dimension + material,
+// then adjacent items along 'axis' (next starts exactly where prev ends)
+// grow prev's 'dAxis' extent instead of surviving as separate boxes.
+function mergeAlongAxis(items, axis, dAxis, keyFn) {
+  var groups = {};
+  for (var i = 0; i < items.length; i++) {
+    var k = keyFn(items[i]);
+    (groups[k] || (groups[k] = [])).push(items[i]);
+  }
+  var out = [];
+  Object.keys(groups).forEach(function (k) {
+    var arr = groups[k].sort(function (a, b) { return a[axis] - b[axis]; });
+    var cur = null;
+    for (var i = 0; i < arr.length; i++) {
+      var it = arr[i];
+      if (cur && it[axis] === cur[axis] + cur[dAxis] && cur[dAxis] + it[dAxis] <= MESH_MAX_SPAN) {
+        cur[dAxis] += it[dAxis];
+      } else {
+        cur = it;
+        out.push(cur);
+      }
+    }
+  });
+  return out;
+}
+
+// True iff at least one 1-block cell of the [x0,x1)x[y0,y1)x[z0,z1) slab is
+// NOT a returned voxel - i.e. a box face backed by that slab is (partially)
+// exposed and must be drawn. Used at mesh time to precompute per-box face
+// visibility, so draw() never touches the voxel set at all.
+function faceOpen(set, x0, x1, y0, y1, z0, z1) {
+  for (var x = x0; x < x1; x++) {
+    for (var y = y0; y < y1; y++) {
+      for (var z = z0; z < z1; z++) {
+        if (!set.has(x + ',' + y + ',' + z)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Greedy mesher: collapses the deduped per-voxel list into axis-aligned
+// boxes of uniform material - the standard runs -> strips -> slabs pass:
+//   1. regroup voxels into vertical runs per column (1 x dy x 1),
+//   2. merge runs along X into strips (same z/y/dy/material, adjacent x),
+//   3. merge strips along Z into slabs (same x/dx/y/dy/material, adjacent z),
+// then precompute each box's five potentially-visible face-open flags
+// (top + both X sides + both Z sides; the bottom is never drawn) against
+// the per-voxel set. Materials NEVER merge across palette indices, and
+// isRamp[m] materials (no colorForMaterial() entry, so their colour is the
+// per-voxel-Y height ramp) never merge vertically either - each box keeps a
+// single y for the ramp, so per-face colours match the old cube-per-voxel
+// renderer exactly. Total volume is conserved: every voxel lands in exactly
+// one box (sum of dx*dy*dz === list.length).
+function greedyMeshVoxels(list, set, isRamp) {
+  var cols = {};
+  for (var i = 0; i < list.length; i++) {
+    var v = list[i];
+    var ck = v.x + ',' + v.z;
+    (cols[ck] || (cols[ck] = [])).push(v);
+  }
+  var runs = [];
+  Object.keys(cols).forEach(function (ck) {
+    var arr = cols[ck].sort(function (a, b) { return a.y - b.y; });
+    var run = null;
+    for (var i = 0; i < arr.length; i++) {
+      var v = arr[i];
+      if (run && v.y === run.y + run.dy && v.m === run.m && run.dy < MESH_MAX_SPAN && v.m >= 0 && !isRamp[v.m]) {
+        run.dy += 1;
+      } else {
+        run = { x: v.x, y: v.y, z: v.z, dx: 1, dy: 1, dz: 1, m: v.m };
+        runs.push(run);
+      }
+    }
+  });
+  var strips = mergeAlongAxis(runs, 'x', 'dx', function (r) { return r.z + '|' + r.y + '|' + r.dy + '|' + r.m; });
+  var boxes = mergeAlongAxis(strips, 'z', 'dz', function (r) { return r.x + '|' + r.dx + '|' + r.y + '|' + r.dy + '|' + r.m; });
+  for (var i = 0; i < boxes.length; i++) {
+    var b = boxes[i];
+    b.topOpen = faceOpen(set, b.x, b.x + b.dx, b.y + b.dy, b.y + b.dy + 1, b.z, b.z + b.dz);
+    b.xOpen1 = faceOpen(set, b.x - 1, b.x, b.y, b.y + b.dy, b.z, b.z + b.dz);
+    b.xOpen2 = faceOpen(set, b.x + b.dx, b.x + b.dx + 1, b.y, b.y + b.dy, b.z, b.z + b.dz);
+    b.zOpen1 = faceOpen(set, b.x, b.x + b.dx, b.y, b.y + b.dy, b.z - 1, b.z);
+    b.zOpen2 = faceOpen(set, b.x, b.x + b.dx, b.y, b.y + b.dy, b.z + b.dz, b.z + b.dz + 1);
+  }
+  return boxes;
+}
+// --- END pure greedy mesher ---
+
+// True cubic-voxel terrain: one box primitive per greedy-meshed box (see
+// greedyMeshVoxels() above - same-material voxels merged into larger
+// axis-aligned boxes at fetch time), with face culling at box granularity:
+// a face is only drawn when its precomputed open flag says some part of it
+// is not covered by neighboring returned voxels (top: the y+dy slab; sides:
+// the camera-facing x/z slab from computeSideFacing()). Interiors,
+// overhangs, and caves still read correctly, and the primitive count drops
+// by an order of magnitude versus one cube per voxel. Colours come from the
+// same MATERIAL_COLORS/colorForMaterial() lookup as the heightmap renderer;
+// unknown materials fall back to the height ramp (such boxes are never
+// merged vertically, so the per-face ramp colour is unchanged).
 function buildVoxelPrimitives(list, sideFacing) {
   var vb = { minY: voxels.minY, maxY: voxels.maxY };
-  var set = voxels.set;
-  var dx = sideFacing.x === 'x2' ? 1 : -1;
-  var dz = sideFacing.z === 'z2' ? 1 : -1;
-  var arr = voxels.list;
-  for (var i = 0; i < arr.length; i++) {
-    var v = arr[i];
-    var topOpen = !set.has(v.x + ',' + (v.y + 1) + ',' + v.z);
-    var xOpen = !set.has((v.x + dx) + ',' + v.y + ',' + v.z);
-    var zOpen = !set.has(v.x + ',' + v.y + ',' + (v.z + dz));
-    if (!topOpen && !xOpen && !zOpen) continue; // fully hidden from this camera
-    var rgb = colorForMaterial(voxels.mats[v.m]) || heightRampColor(v.y, vb);
-    pushCubeFaces(list, v.x, v.x + 1, v.y, v.y + 1, v.z, v.z + 1, rgb, sideFacing,
-      { top: topOpen, sideX: xOpen, sideZ: zOpen }, TERRAIN_STROKE, 1);
+  var boxes = voxels.boxes;
+  for (var i = 0; i < boxes.length; i++) {
+    var b = boxes[i];
+    var xOpen = sideFacing.x === 'x2' ? b.xOpen2 : b.xOpen1;
+    var zOpen = sideFacing.z === 'z2' ? b.zOpen2 : b.zOpen1;
+    if (!b.topOpen && !xOpen && !zOpen) continue; // fully hidden from this camera
+    var rgb = colorForMaterial(voxels.mats[b.m]) || heightRampColor(b.y, vb);
+    pushCubeFaces(list, b.x, b.x + b.dx, b.y, b.y + b.dy, b.z, b.z + b.dz, rgb, sideFacing,
+      { top: b.topOpen, sideX: xOpen, sideZ: zOpen }, TERRAIN_STROKE, 1);
   }
 }
 
@@ -1066,8 +1171,14 @@ async function fetchVoxels() {
     }
     if (page >= VOXEL_MAX_PAGES) partial = true;
     if (list.length) {
+      // Mesh once here, at fetch time, so draw() (which runs on every
+      // interaction frame) only walks the far smaller box list. Ramp-
+      // fallback materials are flagged so the mesher never merges them
+      // vertically (their colour depends on the voxel's own y).
+      var isRamp = mats.map(function (name) { return !colorForMaterial(name); });
+      var boxes = greedyMeshVoxels(list, set, isRamp);
       voxels = {
-        mats: mats, set: set, list: list,
+        mats: mats, set: set, list: list, boxes: boxes, boxCount: boxes.length,
         minY: isFinite(minY) ? minY : 0, maxY: isFinite(maxY) ? maxY : 0,
         count: list.length, partial: partial,
       };
@@ -1502,7 +1613,7 @@ function updateCounts() {
     html += ' (' + worldmodel.loadedChunks + ' loaded chunks)';
   }
   if (voxels && voxels.count) {
-    html += ' &middot; voxels: <b>' + voxels.count + '</b>' + (voxels.partial ? ' (partial)' : '');
+    html += ' &middot; voxels: <b>' + voxels.count + '</b> (' + voxels.boxCount + ' boxes)' + (voxels.partial ? ' (partial)' : '');
   }
   html += ' &middot; generated ' + escapeHtml(worldmodel.generatedAt || '?');
   el.innerHTML = html;
