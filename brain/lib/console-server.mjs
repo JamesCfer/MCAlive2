@@ -972,6 +972,15 @@ function noteInteraction() {
   settleTimer = setTimeout(function () { renderFast = false; draw(); }, 180);
 }
 
+// Coalesce bursts of input events (mousemove fires far faster than the
+// display refreshes) into at most one draw() per animation frame.
+var drawQueued = false;
+function scheduleDraw() {
+  if (drawQueued) return;
+  drawQueued = true;
+  requestAnimationFrame(function () { drawQueued = false; draw(); });
+}
+
 function drawTerrainLayer(sideFacing) {
   if (!canvas.width || !canvas.height) return;
   var key = [camera.yaw.toFixed(4), camera.pitch.toFixed(4), camera.scale.toFixed(4),
@@ -1159,7 +1168,14 @@ function greedyMeshVoxels(list, set, isRamp) {
 function buildVoxelPrimitives(list, sideFacing, fast) {
   var vb = { minY: voxels.minY, maxY: voxels.maxY };
   if (fast) {
-    // Greedy-meshed boxes: ~10x fewer quads for smooth drags; large merged
+    // In motion, cheapest wins: the coarse heightmap grid (~1k quads) when
+    // the world model carries one, else the greedy-meshed boxes. Either way
+    // the settled frame below is exact, so motion-only coarseness is free.
+    if (worldmodel && worldmodel.terrain && worldmodel.terrain.heights && worldmodel.terrain.heights.length) {
+      buildTerrainPrimitives(list, sideFacing);
+      return;
+    }
+    // Greedy-meshed boxes: far fewer quads than per-voxel; large merged
     // faces can mis-sort under the scalar painter key, which is acceptable
     // only while the camera is in motion (the settled frame is exact below).
     var boxes = voxels.boxes;
@@ -1586,11 +1602,12 @@ window.addEventListener('mousemove', function (e) {
       camera.target.z -= (ru.right.z * dx - ru.up.z * dy) * f;
     }
     noteInteraction();
-    draw();
+    scheduleDraw();
   }
 });
 
 canvas.addEventListener('mousemove', function (e) {
+  if (dragState) return; // no hover hit-testing mid-drag - it fights the orbit redraws
   var rect = canvas.getBoundingClientRect();
   var px = e.clientX - rect.left, py = e.clientY - rect.top;
   lastMouse = { x: px, y: py };
@@ -1618,7 +1635,7 @@ canvas.addEventListener('wheel', function (e) {
   var factor = e.deltaY > 0 ? 0.9 : 1.1;
   camera.scale = clamp(camera.scale * factor, 0.3, 60);
   noteInteraction();
-  draw();
+  scheduleDraw();
 }, { passive: false });
 
 // =========================================================================
