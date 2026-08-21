@@ -873,7 +873,7 @@ function computeSideFacing() {
 // order) onto the given list, projecting them once and capturing only what
 // draw() needs (no extra per-vertex allocation beyond the projected points
 // themselves, which draw() requires anyway).
-function pushQuad(list, corners, fillCss, strokeCss, lineWidth) {
+function pushQuad(list, corners, fillCss, strokeCss, lineWidth, bounds) {
   var pr = [project(corners[0].x, corners[0].y, corners[0].z),
     project(corners[1].x, corners[1].y, corners[1].z),
     project(corners[2].x, corners[2].y, corners[2].z),
@@ -881,6 +881,7 @@ function pushQuad(list, corners, fillCss, strokeCss, lineWidth) {
   var depth = (pr[0].depth + pr[1].depth + pr[2].depth + pr[3].depth) / 4;
   list.push({
     depth: depth,
+    bounds: bounds || null,
     draw: function (pr, fillCss, strokeCss, lineWidth) {
       return function (ctx) {
         ctx.beginPath();
@@ -920,35 +921,57 @@ function pushCubeFaces(list, x1, x2, yBottom, yTop, z1, z2, topRgb, sideFacing, 
   var sideXRgb = shadeColor(topRgb, 0.72);
   var sideZRgb = shadeColor(topRgb, 0.5);
   var topCss = rgbCss(topRgb), sideXCss = rgbCss(sideXRgb), sideZCss = rgbCss(sideZRgb);
+  // Every face of this cube/box carries the box's world bounds so draw() can
+  // order whole boxes back-to-front with a separating-axis test - a scalar
+  // avg depth per quad mis-sorts badly once faces span many blocks.
+  var bounds = { x1: x1, y1: yBottom, z1: z1, x2: x2, y2: yTop, z2: z2 };
 
   if (faces.top) pushQuad(list, [
     { x: x1, y: yTop, z: z1 }, { x: x2, y: yTop, z: z1 },
     { x: x2, y: yTop, z: z2 }, { x: x1, y: yTop, z: z2 },
-  ], topCss, strokeCss, lineWidth);
+  ], topCss, strokeCss, lineWidth, bounds);
 
   if (!faces.sideX) { /* culled */ } else if (sideFacing.x === 'x2') {
     pushQuad(list, [
       { x: x2, y: yBottom, z: z1 }, { x: x2, y: yBottom, z: z2 },
       { x: x2, y: yTop, z: z2 }, { x: x2, y: yTop, z: z1 },
-    ], sideXCss, strokeCss, lineWidth);
+    ], sideXCss, strokeCss, lineWidth, bounds);
   } else {
     pushQuad(list, [
       { x: x1, y: yBottom, z: z1 }, { x: x1, y: yTop, z: z1 },
       { x: x1, y: yTop, z: z2 }, { x: x1, y: yBottom, z: z2 },
-    ], sideXCss, strokeCss, lineWidth);
+    ], sideXCss, strokeCss, lineWidth, bounds);
   }
 
   if (!faces.sideZ) { /* culled */ } else if (sideFacing.z === 'z2') {
     pushQuad(list, [
       { x: x1, y: yBottom, z: z2 }, { x: x2, y: yBottom, z: z2 },
       { x: x2, y: yTop, z: z2 }, { x: x1, y: yTop, z: z2 },
-    ], sideZCss, strokeCss, lineWidth);
+    ], sideZCss, strokeCss, lineWidth, bounds);
   } else {
     pushQuad(list, [
       { x: x1, y: yBottom, z: z1 }, { x: x2, y: yBottom, z: z1 },
       { x: x2, y: yTop, z: z1 }, { x: x1, y: yTop, z: z1 },
-    ], sideZCss, strokeCss, lineWidth);
+    ], sideZCss, strokeCss, lineWidth, bounds);
   }
+}
+
+// Painter's ordering for two axis-aligned boxes: disjoint (or merely
+// touching) boxes are always separable along x, y or z, and along that axis
+// the camera's view direction says which is behind. Returns <0 to draw a
+// first (a is farther), >0 for b first, 0 when the bounds genuinely overlap
+// (same box's own faces) - caller falls back to scalar depth.
+function compareBoxDepth(a, b, sideFacing, pitchDown) {
+  var sx = sideFacing.x === 'x2' ? 1 : -1; // +1: larger x is nearer
+  var sz = sideFacing.z === 'z2' ? 1 : -1;
+  var sy = pitchDown ? 1 : -1;             // camera above: larger y is nearer
+  if (a.x2 <= b.x1) return sx > 0 ? -1 : 1;
+  if (b.x2 <= a.x1) return sx > 0 ? 1 : -1;
+  if (a.z2 <= b.z1) return sz > 0 ? -1 : 1;
+  if (b.z2 <= a.z1) return sz > 0 ? 1 : -1;
+  if (a.y2 <= b.y1) return sy > 0 ? -1 : 1;
+  if (b.y2 <= a.y1) return sy > 0 ? 1 : -1;
+  return 0;
 }
 
 var TERRAIN_STROKE = 'rgba(0,0,0,.25)';
@@ -1382,7 +1405,17 @@ function draw() {
   buildNpcPrimitives(primitives, sideFacing);
   buildSpawnPrimitives(primitives, sideFacing);
   buildPlayerPrimitives(primitives, sideFacing);
-  primitives.sort(function (a, b) { return b.depth - a.depth; }); // farthest first
+  // Farthest first. Boxed primitives (terrain boxes, entity cubes) order by
+  // a separating-axis test - avg scalar depth mis-sorts once merged faces
+  // span many blocks. Unboxed primitives (labels, outlines) keep scalar depth.
+  var pitchDown = camera.pitch >= 0;
+  primitives.sort(function (a, b) {
+    if (a.bounds && b.bounds) {
+      var c = compareBoxDepth(a.bounds, b.bounds, sideFacing, pitchDown);
+      if (c !== 0) return c;
+    }
+    return b.depth - a.depth;
+  });
   primitives.forEach(function (p) { p.draw(ctx); });
 
   if (focusPoint && Date.now() < focusPoint.until) {
