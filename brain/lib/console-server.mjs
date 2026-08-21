@@ -873,7 +873,7 @@ function computeSideFacing() {
 // order) onto the given list, projecting them once and capturing only what
 // draw() needs (no extra per-vertex allocation beyond the projected points
 // themselves, which draw() requires anyway).
-function pushQuad(list, corners, fillCss, strokeCss, lineWidth, bounds) {
+function pushQuad(list, corners, fillCss, strokeCss, lineWidth) {
   var pr = [project(corners[0].x, corners[0].y, corners[0].z),
     project(corners[1].x, corners[1].y, corners[1].z),
     project(corners[2].x, corners[2].y, corners[2].z),
@@ -881,7 +881,6 @@ function pushQuad(list, corners, fillCss, strokeCss, lineWidth, bounds) {
   var depth = (pr[0].depth + pr[1].depth + pr[2].depth + pr[3].depth) / 4;
   list.push({
     depth: depth,
-    bounds: bounds || null,
     draw: function (pr, fillCss, strokeCss, lineWidth) {
       return function (ctx) {
         ctx.beginPath();
@@ -921,57 +920,79 @@ function pushCubeFaces(list, x1, x2, yBottom, yTop, z1, z2, topRgb, sideFacing, 
   var sideXRgb = shadeColor(topRgb, 0.72);
   var sideZRgb = shadeColor(topRgb, 0.5);
   var topCss = rgbCss(topRgb), sideXCss = rgbCss(sideXRgb), sideZCss = rgbCss(sideZRgb);
-  // Every face of this cube/box carries the box's world bounds so draw() can
-  // order whole boxes back-to-front with a separating-axis test - a scalar
-  // avg depth per quad mis-sorts badly once faces span many blocks.
-  var bounds = { x1: x1, y1: yBottom, z1: z1, x2: x2, y2: yTop, z2: z2 };
 
   if (faces.top) pushQuad(list, [
     { x: x1, y: yTop, z: z1 }, { x: x2, y: yTop, z: z1 },
     { x: x2, y: yTop, z: z2 }, { x: x1, y: yTop, z: z2 },
-  ], topCss, strokeCss, lineWidth, bounds);
+  ], topCss, strokeCss, lineWidth);
 
   if (!faces.sideX) { /* culled */ } else if (sideFacing.x === 'x2') {
     pushQuad(list, [
       { x: x2, y: yBottom, z: z1 }, { x: x2, y: yBottom, z: z2 },
       { x: x2, y: yTop, z: z2 }, { x: x2, y: yTop, z: z1 },
-    ], sideXCss, strokeCss, lineWidth, bounds);
+    ], sideXCss, strokeCss, lineWidth);
   } else {
     pushQuad(list, [
       { x: x1, y: yBottom, z: z1 }, { x: x1, y: yTop, z: z1 },
       { x: x1, y: yTop, z: z2 }, { x: x1, y: yBottom, z: z2 },
-    ], sideXCss, strokeCss, lineWidth, bounds);
+    ], sideXCss, strokeCss, lineWidth);
   }
 
   if (!faces.sideZ) { /* culled */ } else if (sideFacing.z === 'z2') {
     pushQuad(list, [
       { x: x1, y: yBottom, z: z2 }, { x: x2, y: yBottom, z: z2 },
       { x: x2, y: yTop, z: z2 }, { x: x1, y: yTop, z: z2 },
-    ], sideZCss, strokeCss, lineWidth, bounds);
+    ], sideZCss, strokeCss, lineWidth);
   } else {
     pushQuad(list, [
       { x: x1, y: yBottom, z: z1 }, { x: x2, y: yBottom, z: z1 },
       { x: x2, y: yTop, z: z1 }, { x: x1, y: yTop, z: z1 },
-    ], sideZCss, strokeCss, lineWidth, bounds);
+    ], sideZCss, strokeCss, lineWidth);
   }
 }
 
-// Painter's ordering for two axis-aligned boxes: disjoint (or merely
-// touching) boxes are always separable along x, y or z, and along that axis
-// the camera's view direction says which is behind. Returns <0 to draw a
-// first (a is farther), >0 for b first, 0 when the bounds genuinely overlap
-// (same box's own faces) - caller falls back to scalar depth.
-function compareBoxDepth(a, b, sideFacing, pitchDown) {
-  var sx = sideFacing.x === 'x2' ? 1 : -1; // +1: larger x is nearer
-  var sz = sideFacing.z === 'z2' ? 1 : -1;
-  var sy = pitchDown ? 1 : -1;             // camera above: larger y is nearer
-  if (a.x2 <= b.x1) return sx > 0 ? -1 : 1;
-  if (b.x2 <= a.x1) return sx > 0 ? 1 : -1;
-  if (a.z2 <= b.z1) return sz > 0 ? -1 : 1;
-  if (b.z2 <= a.z1) return sz > 0 ? 1 : -1;
-  if (a.y2 <= b.y1) return sy > 0 ? -1 : 1;
-  if (b.y2 <= a.y1) return sy > 0 ? 1 : -1;
-  return 0;
+// =========================================================================
+// SECTION: terrain layer cache. The terrain is by far the most expensive
+// part of a frame, and it only changes when the camera or the voxel data
+// does - so it renders into an offscreen canvas keyed by both, and draw()
+// blits it. While the camera is moving (renderFast) the layer uses the
+// greedy-meshed boxes - an order of magnitude fewer quads, with occasional
+// painter's-algorithm artifacts that are invisible in motion. 180ms after
+// the last interaction it re-renders exact per-voxel cubes (verified
+// pixel-identical to the pre-mesh renderer).
+// =========================================================================
+var terrainLayer = document.createElement('canvas');
+var terrainKey = '';
+var renderFast = false;
+var settleTimer = null;
+
+function noteInteraction() {
+  renderFast = true;
+  if (settleTimer) clearTimeout(settleTimer);
+  settleTimer = setTimeout(function () { renderFast = false; draw(); }, 180);
+}
+
+function drawTerrainLayer(sideFacing) {
+  if (!canvas.width || !canvas.height) return;
+  var key = [camera.yaw.toFixed(4), camera.pitch.toFixed(4), camera.scale.toFixed(4),
+    camera.target.x.toFixed(2), camera.target.y.toFixed(2), camera.target.z.toFixed(2),
+    canvas.width, canvas.height, renderFast ? 'fast' : 'exact',
+    voxels ? voxels.count : 'heightmap', voxelFetchedAt].join('|');
+  if (key !== terrainKey) {
+    terrainLayer.width = canvas.width;
+    terrainLayer.height = canvas.height;
+    var tctx = terrainLayer.getContext('2d');
+    tctx.clearRect(0, 0, terrainLayer.width, terrainLayer.height);
+    var prims = [];
+    // Prefer the true cubic-voxel terrain; the coarse heightmap cubes remain
+    // only as the fallback while /voxels hasn't returned anything yet.
+    if (voxels && voxels.count) buildVoxelPrimitives(prims, sideFacing, renderFast);
+    else buildTerrainPrimitives(prims, sideFacing);
+    prims.sort(function (a, b) { return b.depth - a.depth; }); // farthest first
+    prims.forEach(function (p) { p.draw(tctx); });
+    terrainKey = key;
+  }
+  ctx.drawImage(terrainLayer, 0, 0);
 }
 
 var TERRAIN_STROKE = 'rgba(0,0,0,.25)';
@@ -1135,17 +1156,40 @@ function greedyMeshVoxels(list, set, isRamp) {
 // same MATERIAL_COLORS/colorForMaterial() lookup as the heightmap renderer;
 // unknown materials fall back to the height ramp (such boxes are never
 // merged vertically, so the per-face ramp colour is unchanged).
-function buildVoxelPrimitives(list, sideFacing) {
+function buildVoxelPrimitives(list, sideFacing, fast) {
   var vb = { minY: voxels.minY, maxY: voxels.maxY };
-  var boxes = voxels.boxes;
-  for (var i = 0; i < boxes.length; i++) {
-    var b = boxes[i];
-    var xOpen = sideFacing.x === 'x2' ? b.xOpen2 : b.xOpen1;
-    var zOpen = sideFacing.z === 'z2' ? b.zOpen2 : b.zOpen1;
-    if (!b.topOpen && !xOpen && !zOpen) continue; // fully hidden from this camera
-    var rgb = colorForMaterial(voxels.mats[b.m]) || heightRampColor(b.y, vb);
-    pushCubeFaces(list, b.x, b.x + b.dx, b.y, b.y + b.dy, b.z, b.z + b.dz, rgb, sideFacing,
-      { top: b.topOpen, sideX: xOpen, sideZ: zOpen }, TERRAIN_STROKE, 1);
+  if (fast) {
+    // Greedy-meshed boxes: ~10x fewer quads for smooth drags; large merged
+    // faces can mis-sort under the scalar painter key, which is acceptable
+    // only while the camera is in motion (the settled frame is exact below).
+    var boxes = voxels.boxes;
+    for (var i = 0; i < boxes.length; i++) {
+      var b = boxes[i];
+      var xOpen = sideFacing.x === 'x2' ? b.xOpen2 : b.xOpen1;
+      var zOpen = sideFacing.z === 'z2' ? b.zOpen2 : b.zOpen1;
+      if (!b.topOpen && !xOpen && !zOpen) continue; // fully hidden from this camera
+      var rgb = colorForMaterial(voxels.mats[b.m]) || heightRampColor(b.y, vb);
+      pushCubeFaces(list, b.x, b.x + b.dx, b.y, b.y + b.dy, b.z, b.z + b.dz, rgb, sideFacing,
+        { top: b.topOpen, sideX: xOpen, sideZ: zOpen }, TERRAIN_STROKE, 1);
+    }
+    return;
+  }
+  // Exact: one cube per voxel with per-cell face culling - unit quads sort
+  // reliably under the scalar painter key (verified pixel-identical to the
+  // original per-voxel renderer).
+  var set = voxels.set;
+  var arr = voxels.list;
+  for (var j = 0; j < arr.length; j++) {
+    var v = arr[j];
+    var top = !set.has(v.x + ',' + (v.y + 1) + ',' + v.z);
+    var xn = sideFacing.x === 'x2' ? (v.x + 1) : (v.x - 1);
+    var zn = sideFacing.z === 'z2' ? (v.z + 1) : (v.z - 1);
+    var sx = !set.has(xn + ',' + v.y + ',' + v.z);
+    var sz = !set.has(v.x + ',' + v.y + ',' + zn);
+    if (!top && !sx && !sz) continue;
+    var rgb2 = colorForMaterial(voxels.mats[v.m]) || heightRampColor(v.y, vb);
+    pushCubeFaces(list, v.x, v.x + 1, v.y, v.y + 1, v.z, v.z + 1, rgb2, sideFacing,
+      { top: top, sideX: sx, sideZ: sz }, TERRAIN_STROKE, 1);
   }
 }
 
@@ -1394,28 +1438,18 @@ function draw() {
   if (!worldmodel) return;
 
   hitTargets = [];
-  var primitives = [];
   var sideFacing = computeSideFacing();
-  // Prefer the true cubic-voxel terrain; the coarse heightmap cubes remain
-  // only as the fallback while /voxels hasn't returned anything yet (older
-  // server without the gadget's voxel mode, fetch still in flight, error).
-  if (voxels && voxels.count) buildVoxelPrimitives(primitives, sideFacing);
-  else buildTerrainPrimitives(primitives, sideFacing);
+  // Terrain renders into a cached offscreen layer (see drawTerrainLayer):
+  // merged boxes while the camera is moving, exact per-voxel cubes once it
+  // settles. Entities/places/markers draw on top every frame - they are few,
+  // and always-visible entities beat strict occlusion on a monitoring map.
+  drawTerrainLayer(sideFacing);
+  var primitives = [];
   buildPlacePrimitives(primitives);
   buildNpcPrimitives(primitives, sideFacing);
   buildSpawnPrimitives(primitives, sideFacing);
   buildPlayerPrimitives(primitives, sideFacing);
-  // Farthest first. Boxed primitives (terrain boxes, entity cubes) order by
-  // a separating-axis test - avg scalar depth mis-sorts once merged faces
-  // span many blocks. Unboxed primitives (labels, outlines) keep scalar depth.
-  var pitchDown = camera.pitch >= 0;
-  primitives.sort(function (a, b) {
-    if (a.bounds && b.bounds) {
-      var c = compareBoxDepth(a.bounds, b.bounds, sideFacing, pitchDown);
-      if (c !== 0) return c;
-    }
-    return b.depth - a.depth;
-  });
+  primitives.sort(function (a, b) { return b.depth - a.depth; }); // farthest first
   primitives.forEach(function (p) { p.draw(ctx); });
 
   if (focusPoint && Date.now() < focusPoint.until) {
@@ -1528,6 +1562,7 @@ canvas.addEventListener('mousedown', function (e) {
   var mode = (e.button === 2 || e.shiftKey) ? 'pan' : 'orbit';
   dragState = { mode: mode, lastX: e.clientX, lastY: e.clientY };
   canvas.classList.add('dragging');
+  noteInteraction();
 });
 
 window.addEventListener('mouseup', function () {
@@ -1550,6 +1585,7 @@ window.addEventListener('mousemove', function (e) {
       camera.target.y -= (ru.right.y * dx - ru.up.y * dy) * f;
       camera.target.z -= (ru.right.z * dx - ru.up.z * dy) * f;
     }
+    noteInteraction();
     draw();
   }
 });
@@ -1581,6 +1617,7 @@ canvas.addEventListener('wheel', function (e) {
   e.preventDefault();
   var factor = e.deltaY > 0 ? 0.9 : 1.1;
   camera.scale = clamp(camera.scale * factor, 0.3, 60);
+  noteInteraction();
   draw();
 }, { passive: false });
 
