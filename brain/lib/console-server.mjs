@@ -997,12 +997,12 @@ function initGL() {
     '  gl_Position = vec4(x1 * uView.x / uView.y, y2 * uView.x / uView.z, z2 / uDepthRange, 1.0);',
     '  vCol = aCol;',
     '}',
-  ].join('\n');
+  ].join('\\n');
   var fsSrc = [
     'precision mediump float;',
     'varying vec3 vCol;',
     'void main() { gl_FragColor = vec4(vCol, 1.0); }',
-  ].join('\n');
+  ].join('\\n');
   function compile(type, src) {
     var s = gl.createShader(type);
     gl.shaderSource(s, src);

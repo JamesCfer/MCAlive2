@@ -1688,6 +1688,18 @@ async function main() {
   assert(mapHtml.includes('id="problem-list"') && mapHtml.includes("Problems (worst first)"), "GET /map page has the problems panel markup");
   assert(pageWithOrderHtml.includes('href="/map"'), "GET / page links to /map");
   assert(mapHtml.includes('href="/"'), "GET /map page links back to the Lore Console (/)");
+  // The page is authored inside a template literal, so a stray backtick or
+  // string escape (a literal \n inside a '...' string, say) only breaks the
+  // RENDERED output, never the .mjs source - syntax-check the served script.
+  {
+    const servedScripts = mapHtml.match(/<script>([\s\S]*?)<\/script>/g) || [];
+    assert(servedScripts.length > 0, "GET /map page has an inline script");
+    let parseErr = null;
+    try {
+      new Function(servedScripts[servedScripts.length - 1].replace(/<\/?script>/g, ""));
+    } catch (e) { parseErr = e; }
+    assert(!parseErr, `the SERVED /map inline script parses as valid JavaScript (template-literal escaping regression): ${parseErr}`);
+  }
 
   console.log("\n5c¹. 3D map page: terrain renders as cubes/voxels, coloured by block type via a material lookup");
   assert(/function pushCube\(/.test(mapHtml), "GET /map page defines pushCube() - the shared cube-face builder");
