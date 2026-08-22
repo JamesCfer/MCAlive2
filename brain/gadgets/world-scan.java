@@ -24,7 +24,7 @@
 //
 // args (VOXEL mode - {voxels:true}): returns the TRUE cubic-voxel shell of the
 // loaded world for the human /map viewer (console-server.mjs) - every solid
-// block within Chebyshev distance 3 of at least one air block, so building
+// block within Chebyshev distance 1 of at least one air block, so building
 // interiors, overhangs, and near-surface caves render as real cubes instead
 // of a top-surface heightmap. NEVER fed to the director (token cost).
 // {
@@ -63,7 +63,12 @@ public class WorldScan implements GadgetContract {
     private static final int SURFACE_DETAIL_MAX_CELLS = 2500;
     // Voxel mode: shell thickness (Chebyshev distance from air) and the cap on
     // how tall a single chunk's scanned band may be (bounds per-chunk work).
-    private static final int SHELL = 3;
+    // A block can only ever show a face if it TOUCHES air. Anything deeper is enclosed
+    // by solid neighbours on all six sides, so every one of its faces is culled by the
+    // renderer and it is transferred, parsed and processed to draw precisely nothing.
+    // Depth 1 still carries cave walls, building interiors and the undersides of
+    // overhangs - those touch air too - while cutting the payload by about two thirds.
+    private static final int SHELL = 1;
     private static final int MAX_BAND_HEIGHT = 128;
     // How far below a chunk's lowest surface the scan band starts - deep enough
     // to catch near-surface caves and basements without walking to bedrock.
