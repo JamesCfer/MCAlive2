@@ -242,10 +242,24 @@ public class WorldScan implements GadgetContract {
         // pathfinder reading blocks ahead, a memorial being looked up - and each one used
         // to be surveyed and drawn as a stray island of terrain nobody lives on.
         Chunk[] loaded = w.getLoadedChunks();
+        // The map covers the 3x3 of chunks around anybody standing in the world: the
+        // ground they are on plus one chunk of elbow room, so a settlement reads as a
+        // place rather than a single square, without dragging in the whole landscape
+        // that merely happened to be loaded as somebody walked through it.
+        java.util.HashSet<Long> lived = new java.util.HashSet<>();
+        for (Chunk c : loaded) {
+            if (occupied(c)) lived.add((((long) c.getX()) << 32) ^ (c.getZ() & 0xFFFFFFFFL));
+        }
         java.util.ArrayList<Chunk> chunks = new java.util.ArrayList<>();
         for (Chunk c : loaded) {
             if (hasArea && (c.getX() < acx1 || c.getX() > acx2 || c.getZ() < acz1 || c.getZ() > acz2)) continue;
-            if (!occupied(c)) continue;
+            boolean near = false;
+            for (int dx = -1; dx <= 1 && !near; dx++) {
+                for (int dz = -1; dz <= 1 && !near; dz++) {
+                    if (lived.contains(((((long) (c.getX() + dx)) << 32) ^ ((c.getZ() + dz) & 0xFFFFFFFFL)))) near = true;
+                }
+            }
+            if (!near) continue;
             chunks.add(c);
         }
         // Deterministic order so cursor paging is stable across calls.
