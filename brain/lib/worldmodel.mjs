@@ -225,11 +225,41 @@ function clampScanFootprint(minX, minZ, maxX, maxZ) {
  * {material,blockData} reply - a coarse heuristic (no "passable" flag is
  * returned by the bridge), good enough for a diagnostic digest rather than
  * precise physics. */
+// Blocks an NPC stands INSIDE quite happily. get_block reports only a material
+// name, so passability has to be recognised here - and treating every non-air
+// block as solid made every NPC stood in a grass tuft or a flower look like it
+// was buried in terrain, which drowned the real faults in false alarms.
+const PASSABLE_BLOCKS = new Set([
+  "short_grass", "grass", "tall_grass", "fern", "large_fern", "dead_bush", "bush",
+  "seagrass", "tall_seagrass", "kelp", "kelp_plant", "vine", "glow_lichen",
+  "sugar_cane", "bamboo", "bamboo_sapling", "sweet_berry_bush", "cobweb", "snow",
+  "torch", "wall_torch", "soul_torch", "soul_wall_torch", "redstone_torch",
+  "redstone_wall_torch", "lily_pad", "wheat", "carrots", "potatoes", "beetroots",
+  "nether_wart", "sea_pickle", "lever", "tripwire", "tripwire_hook", "ladder",
+  "scaffolding", "fire", "soul_fire", "wildflowers", "pink_petals", "spore_blossom",
+  "hanging_roots", "small_dripleaf", "big_dripleaf", "crimson_roots", "warped_roots",
+  "nether_sprouts", "crimson_fungus", "warped_fungus", "azalea", "flowering_azalea",
+  "cave_vines", "cave_vines_plant", "twisting_vines", "weeping_vines", "moss_carpet",
+  "pale_hanging_moss", "cactus_flower", "firefly_bush", "leaf_litter",
+  "dandelion", "poppy", "blue_orchid", "allium", "azure_bluet", "oxeye_daisy",
+  "cornflower", "lily_of_the_valley", "wither_rose", "torchflower", "pitcher_plant",
+  "red_tulip", "orange_tulip", "white_tulip", "pink_tulip", "sunflower", "lilac",
+  "rose_bush", "peony", "closed_eyeblossom", "open_eyeblossom",
+]);
+
+const PASSABLE_SUFFIXES = [
+  "_sapling", "_carpet", "_button", "_pressure_plate", "_rail", "_sign", "_banner",
+  "_candle", "_torch", "_fungus", "_roots", "_sprouts",
+];
+
 function looksSolid(getBlockResult) {
   const mat = String((getBlockResult && getBlockResult.material) || "").toLowerCase();
   if (!mat) return null; // unknown - probe failed or returned nothing usable
   if (mat.includes("air")) return false;
   if (mat === "water" || mat === "lava") return false;
+  if (PASSABLE_BLOCKS.has(mat)) return false;
+  if (mat === "rail") return false;
+  for (const suffix of PASSABLE_SUFFIXES) if (mat.endsWith(suffix)) return false;
   return true;
 }
 
@@ -354,6 +384,12 @@ export async function buildWorldModel(call, opts = {}) {
       role: r.role || r.faction || "unknown",
       pos,
       alive: r.alive !== false,
+      // what this NPC is doing right now, and how fed it is - written into the
+      // ledger by the world itself, so clicking a marker answers "what is this
+      // one up to?" instead of only "who is it?"
+      activity: r.activity || null,
+      hunger: isFiniteNum(r.hunger) ? r.hunger : null,
+      faction: r.faction || null,
       flags,
     };
   });

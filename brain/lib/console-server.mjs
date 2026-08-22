@@ -1571,6 +1571,16 @@ function renderInfo(target) {
     html += '<b>' + escapeHtml(obj.name || obj.id) + '</b><br>';
     html += 'role: ' + escapeHtml(obj.role || '(unknown)') + '<br>';
     html += 'status: ' + (obj.alive ? 'alive' : 'dead') + '<br>';
+    if (obj.faction) html += 'line: ' + escapeHtml(obj.faction) + '<br>';
+    html += 'doing: ' + (obj.activity
+      ? '<b>' + escapeHtml(obj.activity) + '</b>'
+      : '<span class="empty">unknown</span>') + '<br>';
+    if (obj.hunger != null) {
+      var h = Math.max(0, Math.min(20, obj.hunger));
+      var mood = h <= 4 ? '#ff6a3d' : (h <= 10 ? '#e0a33e' : '#6fbf6f');
+      html += 'fed: <span style="color:' + mood + '">' + h + '/20'
+        + (h <= 4 ? ' (starving)' : (h <= 10 ? ' (hungry)' : '')) + '</span><br>';
+    }
   }
   var flags = obj.flags || [];
   html += flags.length
