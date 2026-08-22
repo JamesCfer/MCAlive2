@@ -205,6 +205,19 @@ public class WorldScan implements GadgetContract {
     // shared material palette. Budgeted by maxChunks + maxBlocks with a
     // cursor so one call never stalls the main thread; callers page.
     // ------------------------------------------------------------------
+    /** True when a living NPC or a player is standing in this chunk. NPC bodies carry an
+     *  "npc_id" tag in their persistent data, which identifies them without needing a
+     *  handle on the plugin. */
+    private static boolean occupied(Chunk c) {
+        for (org.bukkit.entity.Entity e : c.getEntities()) {
+            if (e instanceof org.bukkit.entity.Player) return true;
+            for (org.bukkit.NamespacedKey k : e.getPersistentDataContainer().getKeys()) {
+                if ("npc_id".equals(k.getKey())) return true;
+            }
+        }
+        return false;
+    }
+
     private JsonObject voxelScan(JsonObject args, World w) {
         int maxBlocks = (int) num(args, "maxBlocks", 20000, 1000, 60000);
         int maxChunks = (int) num(args, "maxChunks", 12, 1, 64);
@@ -224,30 +237,15 @@ public class WorldScan implements GadgetContract {
             hasArea = true;
         }
 
-        // Only ground that somebody is standing on is part of the world as far as the
-        // map is concerned. Chunks get loaded transiently all the time - a forager
-        // walking, a pathfinder reading blocks, a memorial being looked up - and every
-        // one of those used to appear as a stray island of terrain nobody lives on.
-        java.util.HashSet<Long> inhabited = new java.util.HashSet<>();
-        for (dev.celestia.mcalive2.npc.NpcData d : ctx.plugin().npcManager().all()) {
-            if (d.dead) continue;
-            org.bukkit.Location at = null;
-            org.bukkit.entity.Entity e = ctx.plugin().npcManager().resolveEntity(d);
-            if (e != null) at = e.getLocation();
-            else if (d.lastLocation != null) at = d.lastLocation;
-            if (at == null || at.getWorld() == null || !at.getWorld().equals(w)) continue;
-            inhabited.add((((long) (at.getBlockX() >> 4)) << 32) ^ (at.getBlockZ() >> 4 & 0xFFFFFFFFL));
-        }
-        for (org.bukkit.entity.Player p : w.getPlayers()) {
-            inhabited.add((((long) (p.getLocation().getBlockX() >> 4)) << 32)
-                    ^ (p.getLocation().getBlockZ() >> 4 & 0xFFFFFFFFL));
-        }
-
+        // Only ground somebody is standing on is part of the world as far as the map is
+        // concerned. Chunks load transiently all the time - a forager walking, the
+        // pathfinder reading blocks ahead, a memorial being looked up - and each one used
+        // to be surveyed and drawn as a stray island of terrain nobody lives on.
         Chunk[] loaded = w.getLoadedChunks();
         java.util.ArrayList<Chunk> chunks = new java.util.ArrayList<>();
         for (Chunk c : loaded) {
             if (hasArea && (c.getX() < acx1 || c.getX() > acx2 || c.getZ() < acz1 || c.getZ() > acz2)) continue;
-            if (!inhabited.contains((((long) c.getX()) << 32) ^ (c.getZ() & 0xFFFFFFFFL))) continue;
+            if (!occupied(c)) continue;
             chunks.add(c);
         }
         // Deterministic order so cursor paging is stable across calls.
