@@ -1575,7 +1575,24 @@ function renderInfo(target) {
     html += 'doing: ' + (obj.activity
       ? '<b>' + escapeHtml(obj.activity) + '</b>'
       : '<span class="empty">unknown</span>') + '<br>';
-    if (obj.hunger != null) {
+    if (obj.needs) {
+      var order = ['hunger','fatigue','safety','shelter','belonging','purpose','curiosity','wealth'];
+      html += '<div style="margin-top:.4rem">';
+      for (var ni = 0; ni < order.length; ni++) {
+        var nk = order[ni];
+        if (obj.needs[nk] == null) continue;
+        var nv = Math.max(0, Math.min(20, obj.needs[nk]));
+        var pct = Math.round(nv / 20 * 100);
+        var hue = nv <= 4 ? '#ff6a3d' : (nv <= 10 ? '#e0a33e' : '#6fbf6f');
+        html += '<div style="display:flex;align-items:center;gap:6px;font-size:11px;line-height:1.5">'
+          + '<span style="width:62px;color:#8a938c">' + nk + '</span>'
+          + '<span style="flex:1;height:5px;background:#2a302c;border-radius:3px;overflow:hidden">'
+          + '<span style="display:block;height:100%;width:' + pct + '%;background:' + hue + '"></span></span>'
+          + '<span style="width:18px;text-align:right;color:#8a938c">' + nv + '</span></div>';
+      }
+      html += '</div>';
+    }
+    if (obj.needs == null && obj.hunger != null) {
       var h = Math.max(0, Math.min(20, obj.hunger));
       var mood = h <= 4 ? '#ff6a3d' : (h <= 10 ? '#e0a33e' : '#6fbf6f');
       html += 'fed: <span style="color:' + mood + '">' + h + '/20'

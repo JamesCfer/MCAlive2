@@ -389,6 +389,8 @@ export async function buildWorldModel(call, opts = {}) {
       // one up to?" instead of only "who is it?"
       activity: r.activity || null,
       hunger: isFiniteNum(r.hunger) ? r.hunger : null,
+      // the eight drives, so the panel can show what is actually pulling on them
+      needs: r.needs && typeof r.needs === "object" ? r.needs : null,
       faction: r.faction || null,
       flags,
     };
