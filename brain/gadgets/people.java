@@ -89,8 +89,8 @@ public class People implements GadgetContract {
     private static final int MAX_STACKS = 36;
 
     // hunger, in the units a player would recognise
-    private static final double EXHAUST_IDLE = 1.0 / 90.0;     // a point every 90 s standing
-    private static final double EXHAUST_WORK = 1.0 / 40.0;     // a point every 40 s working
+    private static final double EXHAUST_IDLE = 1.0 / 120.0;    // a point every two minutes standing
+    private static final double EXHAUST_WORK = 1.0 / 60.0;     // a point a minute working
     private static final int EAT_AT = 13;
 
     private static Integer TASK_ID = null;
@@ -980,11 +980,26 @@ public class People implements GadgetContract {
         }
         // stalk
         if (phase.equals("loot")) {
-            // walk over the drops; the pickup in tickOne pockets them
-            int t = travel(ctx, e, id, job, 1.5, false);
+            // Walk onto each thing the kill dropped until nothing is left lying there.
+            // Drops scatter a few blocks from where the animal stood, and the first
+            // version of this finished the moment the hunter was "near enough" to that
+            // spot - so nobody ever actually picked up the meat, and everyone starved.
             int stay = geti(job, "stay", 0) + 1;
             job.addProperty("stay", stay);
-            if (t != 0 || stay > 15) { finishJob(rec, e, gets(job, "kill", "killed something")); return true; }
+            org.bukkit.entity.Item drop = null;
+            double best = 8.0;
+            for (Entity n : e.getNearbyEntities(8, 4, 8)) {
+                if (!(n instanceof org.bukkit.entity.Item)) continue;
+                double d = n.getLocation().distance(e.getLocation());
+                if (d < best) { best = d; drop = (org.bukkit.entity.Item) n; }
+            }
+            if (drop == null || stay > 40 || isFull(rec)) { finishJob(rec, e, gets(job, "kill", "killed something")); return true; }
+            Location l = drop.getLocation();
+            JsonObject t = obj(job, "target");
+            if (Math.abs(geti(t, "x", 0) - l.getBlockX()) > 0 || Math.abs(geti(t, "z", 0) - l.getBlockZ()) > 0) {
+                setTarget(job, l.getBlockX(), l.getBlockY(), l.getBlockZ());
+            }
+            travel(ctx, e, id, job, 0.8, false);
             return false;
         }
         Entity preyE = null;
@@ -993,14 +1008,21 @@ public class People implements GadgetContract {
         LivingEntity prey = (LivingEntity) preyE;
         Location pl = prey.getLocation();
         double d = pl.distance(e.getLocation());
+        int chase = geti(job, "chase", 0) + 1;
+        job.addProperty("chase", chase);
+        if (chase > 90) { finishJob(rec, e, "lost it"); return true; }      // a minute and a half is enough
         if (d > 3.0) {
             // re-aim only when it has really moved off, and only between legs, or the
             // walk is restarted every second and the hunter stutters after its prey
             JsonObject t = obj(job, "target");
-            boolean moved = Math.abs(geti(t, "x", 0) - pl.getBlockX()) > 4 || Math.abs(geti(t, "z", 0) - pl.getBlockZ()) > 4;
+            boolean moved = Math.abs(geti(t, "x", 0) - pl.getBlockX()) > 1 || Math.abs(geti(t, "z", 0) - pl.getBlockZ()) > 1;
             if (moved && !walking(ctx, id)) setTarget(job, pl.getBlockX(), pl.getBlockY(), pl.getBlockZ());
-            int tr = travel(ctx, e, id, job, 2.5, false);
+            int tr = travel(ctx, e, id, job, 2.0, false);
             if (tr < 0) { finishJob(rec, e, "lost it"); return true; }
+            if (tr > 0 && !walking(ctx, id)) {
+                // standing where it was, and it is not here: close the last gap directly
+                walk(ctx, e, id, pl.getBlockX(), pl.getBlockY(), pl.getBlockZ(), false);
+            }
             return false;
         }
         // in reach: one swing a second, like a charged hit. Attributed to the hunter so
@@ -1590,6 +1612,79 @@ public class People implements GadgetContract {
         return true;
     }
 
+    // ------------------------------------------------------------------ arrivals
+
+    private static final String[] NAMES = {
+        "Ada", "Bram", "Cass", "Dorn", "Edda", "Finn", "Greta", "Hal", "Ilse", "Jory", "Kit", "Lena",
+        "Mott", "Nell", "Osk", "Pim", "Quill", "Rue", "Sten", "Tova", "Ulf", "Vey", "Wil", "Yara", "Zed",
+        "Arno", "Bea", "Cole", "Dale", "Eryn", "Fay", "Gus", "Hoyt", "Ida", "Jem", "Kai", "Liv", "Mab",
+        "Ned", "Orla", "Pell", "Rook", "Sol", "Tam", "Una", "Vik", "Wyn", "Yve", "Ash", "Bel"
+    };
+    private static final String[] NEED_KINDS = { "explore", "social", "wealth", "craft" };
+
+    /** Two dice, centred: most people are ordinary, a few are remarkable either way. */
+    private static int rollAbility() {
+        int v = rand(4) + rand(4) - 3;      // -3..3, peaked at 0
+        return Math.max(-3, Math.min(3, v));
+    }
+
+    private static boolean nameTaken(List<JsonObject> everyone, String name) {
+        for (JsonObject o : everyone) if (name.equalsIgnoreCase(gets(o, "name", ""))) return true;
+        return false;
+    }
+
+    /** Make up a person and spawn them at world spawn. */
+    private JsonObject arrive(GadgetContext ctx, List<JsonObject> everyone) throws Exception {
+        String name = null;
+        for (int i = 0; i < 40 && name == null; i++) {
+            String n = NAMES[rand(NAMES.length)];
+            if (!nameTaken(everyone, n)) name = n;
+        }
+        if (name == null) name = NAMES[rand(NAMES.length)] + (rand(90) + 10);
+        String id = name.toLowerCase();
+        for (JsonObject o : everyone) if (id.equals(gets(o, "id", ""))) id = id + (rand(900) + 100);
+
+        JsonObject args = new JsonObject();
+        args.addProperty("action", "spawn");
+        args.addProperty("id", id);
+        args.addProperty("name", name);
+        JsonObject ab = new JsonObject();
+        for (String s : new String[]{ "str", "dex", "con", "wis", "int", "cha" }) ab.addProperty(s, rollAbility());
+        args.add("abilities", ab);
+        args.addProperty("skill", SKILLS[rand(SKILLS.length)]);
+        JsonObject need = new JsonObject();
+        need.addProperty("kind", NEED_KINDS[rand(NEED_KINDS.length)]);
+        need.addProperty("value", 10);
+        args.add("need", need);
+        JsonObject rec = run(args, ctx);
+        JsonObject ev = new JsonObject();
+        ev.addProperty("npcId", id);
+        ev.addProperty("name", name);
+        ctx.plugin().bridge().broadcastEvent("npc_arrived", ev);
+        return rec;
+    }
+
+    /** At five in the morning, up to five strangers walk in from the edge of the world. */
+    private void dawn(GadgetContext ctx, List<JsonObject> everyone) {
+        try {
+            World w = ctx.world(null);
+            long t = w.getTime();
+            long day = w.getFullTime() / 24000L;
+            org.bukkit.persistence.PersistentDataContainer pdc = w.getPersistentDataContainer();
+            org.bukkit.NamespacedKey k = ctx.key("people-last-dawn");
+            Long last = pdc.get(k, org.bukkit.persistence.PersistentDataType.LONG);
+            if (t < 23000 || (last != null && last.longValue() == day)) return;
+            pdc.set(k, org.bukkit.persistence.PersistentDataType.LONG, Long.valueOf(day));
+            int alive = 0;
+            for (JsonObject o : everyone) if (o.has("alive") && o.get("alive").getAsBoolean()) alive++;
+            int n = rand(6);                                   // 0..5
+            n = Math.min(n, Math.max(0, populationCap - alive));
+            for (int i = 0; i < n; i++) arrive(ctx, everyone);
+        } catch (Throwable ignored) { }
+    }
+
+    private static int populationCap = 40;
+
     // ------------------------------------------------------------------ the beat
 
     private void tickOne(GadgetContext ctx, JsonObject rec, List<JsonObject> everyone) throws Exception {
@@ -1684,9 +1779,27 @@ public class People implements GadgetContract {
         }
 
         // --- things on the ground come along, as they would for a player walking over them
-        for (Entity n : e.getNearbyEntities(1.5, 1.5, 1.5)) {
+        for (Entity n : e.getNearbyEntities(2.5, 2.0, 2.5)) {
             if (!(n instanceof org.bukkit.entity.Item)) continue;
             ItemStack s = ((org.bukkit.entity.Item) n).getItemStack();
+            // a person's head keeps who it was, so it can be carried and given back
+            if (s.getType() == Material.PLAYER_HEAD && s.getItemMeta() != null) {
+                String who = s.getItemMeta().getPersistentDataContainer()
+                        .get(npcs.key(), org.bukkit.persistence.PersistentDataType.STRING);
+                if (who != null && !isFull(rec)) {
+                    JsonObject head = new JsonObject();
+                    head.addProperty("item", "PLAYER_HEAD");
+                    head.addProperty("count", 1);
+                    head.addProperty("npcId", who);
+                    arr(rec, "inventory").add(head);
+                    n.remove();
+                    JsonObject ev = new JsonObject();
+                    ev.addProperty("npcId", id);
+                    ev.addProperty("head", who);
+                    ctx.plugin().bridge().broadcastEvent("npc_head_carried", ev);
+                    continue;
+                }
+            }
             int left = give(rec, s.getType(), s.getAmount());
             if (left == 0) {
                 n.remove();
@@ -1782,6 +1895,27 @@ public class People implements GadgetContract {
         save(ctx, rec);
     }
 
+    /**
+     * Heads. The plugin drops one when a person dies, stamped with who it was. Vanilla
+     * would sweep it up with the rest of the litter after five minutes; a person's head
+     * is not litter, so every one lying in the world is kept fresh each beat.
+     */
+    private void keepHeads(GadgetContext ctx) {
+        org.bukkit.NamespacedKey key = ctx.plugin().npcManager().key();
+        for (World w : ctx.server().getWorlds()) {
+            for (org.bukkit.entity.Item it : w.getEntitiesByClass(org.bukkit.entity.Item.class)) {
+                ItemStack s = it.getItemStack();
+                if (s.getType() != Material.PLAYER_HEAD) continue;
+                ItemMeta meta = s.getItemMeta();
+                if (meta == null) continue;
+                String who = meta.getPersistentDataContainer().get(key, org.bukkit.persistence.PersistentDataType.STRING);
+                if (who == null) continue;
+                it.setTicksLived(1);
+                it.setUnlimitedLifetime(true);
+            }
+        }
+    }
+
     private void beat(GadgetContext ctx) {
         beats++;
         try {
@@ -1795,6 +1929,8 @@ public class People implements GadgetContract {
                     try { save(ctx, rec); } catch (Throwable ignored) { }
                 }
             }
+            if (beats % 5 == 0) dawn(ctx, everyone);
+            if (beats % 60 == 0) keepHeads(ctx);
         } catch (Throwable ignored) { }
     }
 
@@ -1883,6 +2019,11 @@ public class People implements GadgetContract {
             return rec;
         }
 
+        if (action.equals("arrive")) {
+            // a stranger walks in now, as one would at dawn
+            return arrive(ctx, roster(ctx));
+        }
+
         if (action.equals("stop")) {
             generation(ctx, true);
             int killed = reap(ctx);
@@ -1896,6 +2037,7 @@ public class People implements GadgetContract {
         final int myGen = generation(ctx, true);
         int killed = reap(ctx);
         if (TASK_ID != null) { ctx.cancelTask(TASK_ID.intValue()); TASK_ID = null; }
+        populationCap = args.has("populationCap") ? args.get("populationCap").getAsInt() : 40;
         TASK_ID = Integer.valueOf(ctx.runTimer(BEAT_TICKS, new Runnable() {
             public void run() {
                 try {

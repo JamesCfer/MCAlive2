@@ -102,8 +102,10 @@ async function startWorld() {
   out.presence = await cmd("gadget:presence", { radius: 1, periodTicks: 100 });
   // frees anyone who ends up inside a block - by walking or digging, never lifting
   out.groundskeeper = await cmd("gadget:groundskeeper", { periodTicks: 300 });
-  // the people themselves
-  out.people = await cmd("gadget:people", {});
+  // the people themselves; up to five strangers arrive at 5am each day until the cap
+  out.people = await cmd("gadget:people", { populationCap: 40 });
+  // and they show in the tab list
+  out.tablist = await cmd("gadget:tablist", {});
   return out;
 }
 
