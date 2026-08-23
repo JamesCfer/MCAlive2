@@ -205,7 +205,7 @@ public class Villages implements GadgetContract {
         v.addProperty("id", "village-" + name.toLowerCase().replaceAll("[^a-z0-9]", ""));
         v.addProperty("name", name);
         v.addProperty("kind", "village");
-        int y = at.getWorld().getHighestBlockYAt(at.getBlockX(), at.getBlockZ(), HeightMap.OCEAN_FLOOR);
+        int y = at.getWorld().getHighestBlockYAt(at.getBlockX(), at.getBlockZ(), HeightMap.MOTION_BLOCKING_NO_LEAVES);
         v.add("origin", xyz(at.getBlockX(), y, at.getBlockZ()));
         v.addProperty("founder", founder);
         JsonArray members = new JsonArray();
@@ -353,7 +353,8 @@ public class Villages implements GadgetContract {
                 if (village != null && hasMember(village, id) && !village.has("inn")) {
                     int timber = countEnding(rec, "_LOG") * 4 + countEnding(rec, "_PLANKS");
                     boolean builder = skill(rec, "building") >= 1 || timber >= 60;
-                    if (builder && timber >= 40 && !rec.has("asked")) {
+                    long noBuildUntil = rec.has("noBuildUntil") && !rec.get("noBuildUntil").isJsonNull() ? rec.get("noBuildUntil").getAsLong() : 0L;
+                    if (builder && timber >= 85 && !rec.has("asked") && System.currentTimeMillis() > noBuildUntil) {
                         JsonObject ask = new JsonObject();
                         ask.addProperty("kind", "build_inn");
                         ask.addProperty("village", gets(village, "id", ""));

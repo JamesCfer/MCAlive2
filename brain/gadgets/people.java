@@ -511,7 +511,7 @@ public class People implements GadgetContract {
         if (dist > 48) {
             tx = (int) Math.round(at.getX() + dx / dist * 48);
             tz = (int) Math.round(at.getZ() + dz / dist * 48);
-            ty = e.getWorld().getHighestBlockYAt(tx, tz, HeightMap.OCEAN_FLOOR) + 1;
+            ty = e.getWorld().getHighestBlockYAt(tx, tz, HeightMap.MOTION_BLOCKING_NO_LEAVES) + 1;
         }
         JsonObject a = new JsonObject();
         a.addProperty("npcId", id);
@@ -847,7 +847,7 @@ public class People implements GadgetContract {
     private static boolean possible(JsonObject rec, String job, List<JsonObject> everyone) {
         if (isFull(rec) && (job.equals("hunt") || job.equals("chop") || job.equals("mine") || job.equals("fish"))) return false;
         if (job.equals("fish")) return bestTool(rec, "ROD") != null;
-        if (job.equals("build")) return rec.has("asked");
+        if (job.equals("build")) return rec.has("asked") && System.currentTimeMillis() > (long) getd(rec, "noBuildUntil", 0);
         if (job.equals("market")) {
             long until = (long) getd(rec, "noMarketUntil", 0);
             return System.currentTimeMillis() > until && rec.has("village");
@@ -1005,7 +1005,7 @@ public class People implements GadgetContract {
                 double th = rand(360) * Math.PI / 180;
                 int x = e.getLocation().getBlockX() + (int) (Math.cos(th) * 40);
                 int z = e.getLocation().getBlockZ() + (int) (Math.sin(th) * 40);
-                setTarget(job, x, e.getWorld().getHighestBlockYAt(x, z, HeightMap.OCEAN_FLOOR) + 1, z);
+                setTarget(job, x, e.getWorld().getHighestBlockYAt(x, z, HeightMap.MOTION_BLOCKING_NO_LEAVES) + 1, z);
                 job.addProperty("phase", "search");
                 rec.addProperty("activity", "looking for game");
                 return false;
@@ -1117,7 +1117,7 @@ public class People implements GadgetContract {
                 double th = rand(360) * Math.PI / 180;
                 int x = e.getLocation().getBlockX() + (int) (Math.cos(th) * 40);
                 int z = e.getLocation().getBlockZ() + (int) (Math.sin(th) * 40);
-                setTarget(job, x, e.getWorld().getHighestBlockYAt(x, z, HeightMap.OCEAN_FLOOR) + 1, z);
+                setTarget(job, x, e.getWorld().getHighestBlockYAt(x, z, HeightMap.MOTION_BLOCKING_NO_LEAVES) + 1, z);
                 job.addProperty("phase", "search");
                 rec.addProperty("activity", "looking for trees");
                 return false;
@@ -1286,6 +1286,19 @@ public class People implements GadgetContract {
         return nearestBlock(e, r, 6, 4, new BlockTest() { public boolean ok(Block x) { return x.getType() == Material.FARMLAND; } });
     }
 
+    /** Ripe wheat on a field this person knows, wherever they are standing now. */
+    private static Block ripeAtField(World w, JsonObject rec) {
+        if (!rec.has("field") || !rec.get("field").isJsonObject()) return null;
+        JsonObject f = rec.getAsJsonObject("field");
+        int fx = geti(f, "x", 0), fy = geti(f, "y", 64), fz = geti(f, "z", 0);
+        if (!w.isChunkLoaded(fx >> 4, fz >> 4)) return null;
+        for (int dx = -5; dx <= 5; dx++) for (int dz = -5; dz <= 5; dz++) for (int dy = -2; dy <= 3; dy++) {
+            Block b = w.getBlockAt(fx + dx, fy + dy, fz + dz);
+            if (b.getType() == Material.WHEAT && b.getBlockData() instanceof Ageable && ((Ageable) b.getBlockData()).getAge() >= 7) return b;
+        }
+        return null;
+    }
+
     private static Block ripeNear(Entity e, int r) {
         return nearestBlock(e, r, 6, 4, new BlockTest() {
             public boolean ok(Block x) {
@@ -1304,6 +1317,7 @@ public class People implements GadgetContract {
             // Ripe wheat anywhere near is food on the stalk. Take it, whoever planted it -
             // the farmland at spawn was standing ready while people walked past it to hunt.
             Block ripe = ripeNear(e, 48);
+            if (ripe == null) ripe = ripeAtField(w, rec);
             if (ripe != null) { setTarget(job, ripe.getX(), ripe.getY(), ripe.getZ()); job.addProperty("phase", "reap"); rec.addProperty("activity", "going to harvest"); return false; }
 
             // The field: farmland already near (yours or anyone's) beats breaking new ground.
@@ -1321,7 +1335,7 @@ public class People implements GadgetContract {
                 if (water == null) { finishJob(rec, e, "no water for a field"); return true; }
                 field = new JsonObject();
                 field.addProperty("x", water.getX() + 2);
-                field.addProperty("y", w.getHighestBlockYAt(water.getX() + 2, water.getZ(), HeightMap.OCEAN_FLOOR));
+                field.addProperty("y", w.getHighestBlockYAt(water.getX() + 2, water.getZ(), HeightMap.MOTION_BLOCKING_NO_LEAVES));
                 field.addProperty("z", water.getZ());
                 rec.add("field", field);
             }
@@ -1370,7 +1384,7 @@ public class People implements GadgetContract {
                 // Planted and growing. Stay with it a while - a crop only ripens in a loaded
                 // chunk and a farmer who walks off to hunt comes back to seedlings.
                 job.addProperty("phase", "tend");
-                job.addProperty("tended", 0);
+                if (!job.has("tended")) job.addProperty("tended", 0);
                 rec.addProperty("activity", "tending the field (" + growing + " growing)");
                 return false;
             }
@@ -1462,7 +1476,7 @@ public class People implements GadgetContract {
                 bx = x; bz = z;
                 if (!hasSeen(ex, x >> 4, z >> 4)) found = true;
             }
-            setTarget(job, bx, e.getWorld().getHighestBlockYAt(bx, bz, HeightMap.OCEAN_FLOOR) + 1, bz);
+            setTarget(job, bx, e.getWorld().getHighestBlockYAt(bx, bz, HeightMap.MOTION_BLOCKING_NO_LEAVES) + 1, bz);
             job.addProperty("phase", "go");
             rec.addProperty("activity", "exploring");
             return false;
@@ -1669,13 +1683,51 @@ public class People implements GadgetContract {
         return null;
     }
 
+    /** Is this 7x7 (the inn plus a border) open, dry, level ground? */
+    private static boolean plotOk(World w, int x, int z) {
+        int min = Integer.MAX_VALUE, max = Integer.MIN_VALUE;
+        for (int dx = -1; dx <= INN_W; dx++) for (int dz = -1; dz <= INN_D; dz++) {
+            int y = w.getHighestBlockYAt(x + dx, z + dz, HeightMap.MOTION_BLOCKING_NO_LEAVES);
+            Material m = w.getBlockAt(x + dx, y, z + dz).getType();
+            if (m == Material.WATER || m == Material.LAVA || isLog(m) || m == Material.FARMLAND
+                    || m == Material.CRAFTING_TABLE || m == Material.CHEST || m == Material.PLAYER_HEAD) return false;
+            if (y < min) min = y;
+            if (y > max) max = y;
+        }
+        return max - min <= 1;
+    }
+
+    /** Nearest usable plot to the village centre, searching outward; null if none within 24. */
+    private static int[] findPlot(World w, int cx, int cz) {
+        for (int r = 4; r <= 24; r += 2) {
+            for (int dx = -r; dx <= r; dx += 2) for (int dz = -r; dz <= r; dz += 2) {
+                if (Math.abs(dx) != r && Math.abs(dz) != r) continue;
+                if (plotOk(w, cx + dx, cz + dz)) return new int[]{ cx + dx, cz + dz };
+            }
+        }
+        return null;
+    }
+
     private static boolean jobBuild(GadgetContext ctx, JsonObject rec, Entity e, String id, JsonObject job) {
         JsonObject ask = rec.has("asked") && rec.get("asked").isJsonObject() ? rec.getAsJsonObject("asked") : null;
         if (ask == null) { finishJob(rec, e, "nothing to build"); return true; }
-        JsonObject at = ask.getAsJsonObject("at");
         World w = e.getWorld();
+        JsonObject at = ask.getAsJsonObject("at");
+        if (!ask.has("plotOk")) {
+            // the village named a spot; the builder chooses the actual ground, like anyone would
+            int[] plot = findPlot(w, geti(at, "x", 0), geti(at, "z", 0));
+            if (plot == null) {
+                rec.remove("asked");
+                rec.addProperty("noBuildUntil", System.currentTimeMillis() + 600000);
+                finishJob(rec, e, "no clear ground for an inn");
+                return true;
+            }
+            at.addProperty("x", plot[0]);
+            at.addProperty("z", plot[1]);
+            ask.addProperty("plotOk", true);
+        }
         int ox = geti(at, "x", 0), oz = geti(at, "z", 0);
-        int oy = w.getHighestBlockYAt(ox + 2, oz + 2, HeightMap.OCEAN_FLOOR);   // the plot's level
+        int oy = w.getHighestBlockYAt(ox + 2, oz + 2, HeightMap.MOTION_BLOCKING_NO_LEAVES);   // the plot's level
         int i = geti(job, "i", 0);
         int[] b = innBlock(i);
         if (b == null) {
@@ -1713,10 +1765,21 @@ public class People implements GadgetContract {
         JsonObject t = obj(job, "target");
         if (Math.abs(geti(t, "x", 0) - bx) > 3 || Math.abs(geti(t, "z", 0) - bz) > 3) {
             int sx = bx + (b[0] < INN_W / 2 ? -2 : 2), sz = bz + (b[2] < INN_D / 2 ? -2 : 2);
-            setTarget(job, sx, w.getHighestBlockYAt(sx, sz, HeightMap.OCEAN_FLOOR) + 1, sz);
+            setTarget(job, sx, w.getHighestBlockYAt(sx, sz, HeightMap.MOTION_BLOCKING_NO_LEAVES) + 1, sz);
         }
         int tr = travel(ctx, e, id, job, 4.5, false);
-        if (tr < 0) { finishJob(rec, e, "could not reach the plot"); return true; }
+        if (tr < 0) {
+            int fails = geti(ask, "fails", 0) + 1;
+            ask.addProperty("fails", fails);
+            if (fails >= 3) {
+                rec.remove("asked");
+                rec.addProperty("noBuildUntil", System.currentTimeMillis() + 600000);
+                finishJob(rec, e, "gave up on the inn plot for now");
+            } else {
+                finishJob(rec, e, "could not reach the plot");
+            }
+            return true;
+        }
         if (tr == 0) return false;
         int need = pace(rec, "building", 2);
         int wt = geti(job, "wait", 0) + 1;
@@ -2240,7 +2303,7 @@ public class People implements GadgetContract {
         }
         rec.addProperty("exhaustion", ex);
 
-        rec.addProperty("ripeNear", ripeNear(e, 48) != null);
+        rec.addProperty("ripeNear", ripeNear(e, 48) != null || ripeAtField(e.getWorld(), rec) != null);
         // Wheat is not food. Three of it is a loaf, at a bench.
         if (hunger <= EAT_AT && foodInBag(rec) == 0 && count(rec, Material.WHEAT) >= 3) {
             Block bench = nearestBlock(e, 4, 2, 2, new BlockTest() { public boolean ok(Block b) { return b.getType() == Material.CRAFTING_TABLE; } });
@@ -2366,6 +2429,19 @@ public class People implements GadgetContract {
         }
         // A starving person does not stop to chat. They say so and keep moving.
         if (near != null && hunger <= 7) near = null;
+        // ...but not all day. A minute of your time, then back to work for a while.
+        if (near != null && geti(rec, "attendUntil", 0) > beats) {
+            if (!rec.has("attendSince")) rec.addProperty("attendSince", beats);
+            if (beats - geti(rec, "attendSince", beats) > 60) {
+                rec.addProperty("attendUntil", 0);
+                rec.addProperty("attendPauseUntil", beats + 120);
+                rec.remove("attendSince");
+                near = null;
+            }
+        } else if (near == null) {
+            rec.remove("attendSince");
+        }
+        if (near != null && geti(rec, "attendPauseUntil", 0) > beats) near = null;
         if (near != null) {
             rec.addProperty("attendUntil", beats + 20);
             Location look = e.getLocation();
@@ -2714,7 +2790,7 @@ public class People implements GadgetContract {
             Location sp = w.getSpawnLocation();
             int ox = rand(7) - 3, oz = rand(7) - 3;
             int x = sp.getBlockX() + ox, z = sp.getBlockZ() + oz;
-            int y = w.getHighestBlockYAt(x, z, HeightMap.OCEAN_FLOOR) + 1;
+            int y = w.getHighestBlockYAt(x, z, HeightMap.MOTION_BLOCKING_NO_LEAVES) + 1;
 
             JsonObject spawn = new JsonObject();
             spawn.addProperty("id", id);
