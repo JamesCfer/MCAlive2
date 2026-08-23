@@ -514,7 +514,17 @@ public class People implements GadgetContract {
         JsonObject t = obj(job, "target");
         int x = geti(t, "x", 0), y = geti(t, "y", 64), z = geti(t, "z", 0);
         if (flatDist(e, x, z) <= reach && Math.abs(e.getLocation().getY() - y) <= 3) return 1;
-        if (walking(ctx, id)) return 0;
+        // Still walking? Hand over the next leg BEFORE this one runs out, so a long
+        // journey is one continuous walk instead of a march of 48-block stops.
+        try {
+            JsonObject st = walkStatus(ctx, id);
+            if (st.get("walking").getAsBoolean()) {
+                int left = geti(st, "legsLeft", 99);
+                if (left > 3 || flatDist(e, x, z) <= 48) return 0;
+                walk(ctx, e, id, x, y, z, underground);
+                return 0;
+            }
+        } catch (Throwable ignored) { }
         int tries = geti(job, "legs", 0);
         if (tries >= 12) return -1;
         job.addProperty("legs", tries + 1);
@@ -587,6 +597,62 @@ public class People implements GadgetContract {
     }
 
     private interface BlockTest { boolean ok(Block b); }
+
+    /** The most worthwhile dropped item nearby, or null. Food only when hungry. */
+    private static org.bukkit.entity.Item nearestDrop(JsonObject rec, Entity e, double r, boolean hungry) {
+        org.bukkit.entity.Item best = null;
+        double bestScore = 0;
+        for (Entity n : e.getNearbyEntities(r, 6, r)) {
+            if (!(n instanceof org.bukkit.entity.Item)) continue;
+            ItemStack s = ((org.bukkit.entity.Item) n).getItemStack();
+            Material m = s.getType();
+            double v = valueTo(rec, m) * s.getAmount();
+            if (nutrition(m) > 0 && !hungry) v *= 0.3;
+            if (v < 3) continue;
+            double score = v / (1 + n.getLocation().distance(e.getLocation()) / 8.0);
+            if (score > bestScore) { bestScore = score; best = (org.bukkit.entity.Item) n; }
+        }
+        return best;
+    }
+
+    // Where each person has been, kept in its own collection so the character sheet the
+    // actor reads is not buried under four hundred chunk keys.
+    private static JsonObject explored(GadgetContext ctx, String id) {
+        try {
+            JsonObject q = new JsonObject();
+            q.addProperty("collection", "explored");
+            q.addProperty("id", id);
+            return ctx.invoke("ledger_get", q);
+        } catch (Throwable t) {
+            JsonObject o = new JsonObject();
+            o.addProperty("id", id);
+            o.add("chunks", new JsonArray());
+            return o;
+        }
+    }
+
+    private static boolean hasSeen(JsonObject ex, int cx, int cz) {
+        String key = cx + "," + cz;
+        for (JsonElement s : arr(ex, "chunks")) if (key.equals(s.getAsString())) return true;
+        return false;
+    }
+
+    /** Note the chunk under this location. Returns true if it was new. */
+    private static boolean markSeen(GadgetContext ctx, String id, Location at) {
+        JsonObject ex = explored(ctx, id);
+        int cx = at.getBlockX() >> 4, cz = at.getBlockZ() >> 4;
+        if (hasSeen(ex, cx, cz)) return false;
+        JsonArray chunks = arr(ex, "chunks");
+        chunks.add(cx + "," + cz);
+        while (chunks.size() > 600) chunks.remove(0);
+        try {
+            JsonObject p = new JsonObject();
+            p.addProperty("collection", "explored");
+            p.add("record", ex);
+            ctx.invoke("ledger_put", p);
+        } catch (Throwable ignored) { }
+        return true;
+    }
 
     /** Break a block the way a player with this tool would, and pocket the drops. */
     private static void breakBlock(JsonObject rec, Block b, JsonObject tool) {
@@ -913,6 +979,14 @@ public class People implements GadgetContract {
             return false;
         }
         // stalk
+        if (phase.equals("loot")) {
+            // walk over the drops; the pickup in tickOne pockets them
+            int t = travel(ctx, e, id, job, 1.5, false);
+            int stay = geti(job, "stay", 0) + 1;
+            job.addProperty("stay", stay);
+            if (t != 0 || stay > 15) { finishJob(rec, e, gets(job, "kill", "killed something")); return true; }
+            return false;
+        }
         Entity preyE = null;
         try { preyE = Bukkit.getEntity(java.util.UUID.fromString(gets(job, "prey", ""))); } catch (Throwable ignored) { }
         if (!(preyE instanceof LivingEntity) || preyE.isDead()) { job.addProperty("phase", "start"); return false; }
@@ -920,16 +994,17 @@ public class People implements GadgetContract {
         Location pl = prey.getLocation();
         double d = pl.distance(e.getLocation());
         if (d > 3.0) {
-            // re-aim at where it is now every few beats; animals wander
+            // re-aim only when it has really moved off, and only between legs, or the
+            // walk is restarted every second and the hunter stutters after its prey
             JsonObject t = obj(job, "target");
-            if (Math.abs(geti(t, "x", 0) - pl.getBlockX()) > 3 || Math.abs(geti(t, "z", 0) - pl.getBlockZ()) > 3) {
-                setTarget(job, pl.getBlockX(), pl.getBlockY(), pl.getBlockZ());
-            }
+            boolean moved = Math.abs(geti(t, "x", 0) - pl.getBlockX()) > 4 || Math.abs(geti(t, "z", 0) - pl.getBlockZ()) > 4;
+            if (moved && !walking(ctx, id)) setTarget(job, pl.getBlockX(), pl.getBlockY(), pl.getBlockZ());
             int tr = travel(ctx, e, id, job, 2.5, false);
             if (tr < 0) { finishJob(rec, e, "lost it"); return true; }
             return false;
         }
-        // in reach: swing
+        // in reach: one swing a second, like a charged hit. Attributed to the hunter so
+        // the animal flinches, is knocked back, and drops what it really drops.
         JsonObject weapon = bestTool(rec, "SWORD");
         if (weapon == null) weapon = bestTool(rec, "AXE");
         double dmg = 1.0;
@@ -938,19 +1013,24 @@ public class People implements GadgetContract {
             dmg = n.endsWith("_SWORD") ? (n.startsWith("WOODEN") ? 4 : n.startsWith("STONE") ? 5 : 6)
                     : (n.startsWith("WOODEN") ? 7 : n.startsWith("STONE") ? 9 : 9);
         }
-        prey.damage(dmg);
+        if (e instanceof LivingEntity) {
+            ((LivingEntity) e).swingMainHand();
+            Location look = e.getLocation();
+            look.setDirection(pl.toVector().subtract(look.toVector()));
+            e.setRotation(look.getYaw(), look.getPitch());
+            prey.damage(dmg, e);
+        } else {
+            prey.damage(dmg);
+        }
         wear(rec, weapon);
         if (prey.isDead() || prey.getHealth() <= 0) {
-            Material meat = meatOf(prey.getType());
-            int n = 1 + rand(prey.getType() == EntityType.CHICKEN || prey.getType() == EntityType.RABBIT ? 1 : 3);
-            give(rec, meat, n);
-            if (prey.getType() == EntityType.COW) give(rec, Material.LEATHER, 1);
-            if (prey.getType() == EntityType.SHEEP) give(rec, Material.WHITE_WOOL, 1);
-            if (prey.getType() == EntityType.CHICKEN) give(rec, Material.FEATHER, 1);
-            // the world's own drops would double up with ours
-            for (Entity it : prey.getNearbyEntities(2, 2, 2)) if (it instanceof org.bukkit.entity.Item) it.remove();
-            finishJob(rec, e, "killed a " + prey.getType().name().toLowerCase());
-            return true;
+            practise(rec, "hunting", 0.5);
+            job.addProperty("kill", "killed a " + prey.getType().name().toLowerCase());
+            setTarget(job, pl.getBlockX(), pl.getBlockY(), pl.getBlockZ());
+            job.addProperty("phase", "loot");
+            job.addProperty("stay", 0);
+            rec.addProperty("activity", "gathering the kill");
+            return false;
         }
         return false;
     }
@@ -1240,7 +1320,7 @@ public class People implements GadgetContract {
         String phase = gets(job, "phase", "start");
         if (phase.equals("start")) {
             int reach = 32 + 8 * Math.max(0, aptitude(rec, "exploring"));
-            JsonArray seen = arr(rec, "seenChunks");
+            JsonObject ex = explored(ctx, id);
             // try a few bearings, prefer one whose far end is an unseen chunk
             int bx = 0, bz = 0;
             boolean found = false;
@@ -1248,11 +1328,8 @@ public class People implements GadgetContract {
                 double th = rand(360) * Math.PI / 180;
                 int x = e.getLocation().getBlockX() + (int) (Math.cos(th) * reach);
                 int z = e.getLocation().getBlockZ() + (int) (Math.sin(th) * reach);
-                String key = (x >> 4) + "," + (z >> 4);
-                boolean was = false;
-                for (JsonElement s : seen) if (key.equals(s.getAsString())) { was = true; break; }
                 bx = x; bz = z;
-                if (!was) found = true;
+                if (!hasSeen(ex, x >> 4, z >> 4)) found = true;
             }
             setTarget(job, bx, e.getWorld().getHighestBlockYAt(bx, bz, HeightMap.OCEAN_FLOOR) + 1, bz);
             job.addProperty("phase", "go");
@@ -1499,6 +1576,9 @@ public class People implements GadgetContract {
         practise(other, "trading", 1.0);
         feedNeed(rec, "social", 3);
         feedNeed(other, "social", 3);
+        // a deal done is a deal done; nobody haggles with the same neighbour all afternoon
+        rec.addProperty("noTradeUntil", System.currentTimeMillis() + 300000);
+        other.addProperty("noTradeUntil", System.currentTimeMillis() + 300000);
         try { save(ctx, other); } catch (Throwable ignored) { }
         JsonObject ev = new JsonObject();
         ev.addProperty("from", gets(rec, "id", ""));
@@ -1527,7 +1607,25 @@ public class People implements GadgetContract {
             return;
         }
         Entity e = npcs.resolveEntity(d);
-        if (e == null) return;
+        if (e == null) {
+            // The registry has lost the body but it may well still be standing in the
+            // world - this happened to Wren, next to Mara, in full view. Find it by its
+            // tag and hand it back, rather than leave a living person untickable.
+            org.bukkit.NamespacedKey key = npcs.key();
+            for (World w : ctx.server().getWorlds()) {
+                for (Entity cand : w.getEntities()) {
+                    if (!cand.isValid()) continue;
+                    String tag = cand.getPersistentDataContainer().get(key, org.bukkit.persistence.PersistentDataType.STRING);
+                    if (id.equals(tag)) { e = cand; break; }
+                }
+                if (e != null) break;
+            }
+            if (e == null) { rec.addProperty("activity", "missing"); save(ctx, rec); return; }
+            d.entityUuid = e.getUniqueId();
+            d.lastLocation = e.getLocation().clone();
+            npcs.save();
+            rec.addProperty("activity", "found again");
+        }
         normalise(rec);
 
         // --- the body
@@ -1578,26 +1676,69 @@ public class People implements GadgetContract {
             need.addProperty("value", Math.max(0, getd(need, "value", 10) - 1));
         }
         if (kind.equals("explore")) {
-            String key = (e.getLocation().getBlockX() >> 4) + "," + (e.getLocation().getBlockZ() >> 4);
-            JsonArray seen = arr(rec, "seenChunks");
-            boolean was = false;
-            for (JsonElement s : seen) if (key.equals(s.getAsString())) { was = true; break; }
-            if (!was) {
-                seen.add(key);
-                while (seen.size() > 400) seen.remove(0);
-                feedNeed(rec, "explore", 4);
-            }
+            if (markSeen(ctx, id, e.getLocation())) feedNeed(rec, "explore", 4);
         }
         if (kind.equals("social") && beats % 30 == 0) {
             JsonObject o = nearestOther(rec, e, everyone, npcs, 8);
             if (o != null) feedNeed(rec, "social", 1);
         }
 
+        // --- things on the ground come along, as they would for a player walking over them
+        for (Entity n : e.getNearbyEntities(1.5, 1.5, 1.5)) {
+            if (!(n instanceof org.bukkit.entity.Item)) continue;
+            ItemStack s = ((org.bukkit.entity.Item) n).getItemStack();
+            int left = give(rec, s.getType(), s.getAmount());
+            if (left == 0) {
+                n.remove();
+                e.getWorld().playSound(e.getLocation(), org.bukkit.Sound.ENTITY_ITEM_PICKUP, 0.3f, 1.2f);
+            } else if (left < s.getAmount()) {
+                s.setAmount(left);
+                ((org.bukkit.entity.Item) n).setItemStack(s);
+            }
+        }
+
+        // --- somebody walked up to you. Stop, turn to them, give them a moment. This is
+        // what makes talking possible: chat only reaches an NPC within a few blocks, and
+        // nobody can hold a conversation with someone marching off to a tree.
+        org.bukkit.entity.Player near = null;
+        for (Entity n : e.getNearbyEntities(4, 3, 4)) {
+            if (n instanceof org.bukkit.entity.Player) { near = (org.bukkit.entity.Player) n; break; }
+        }
+        if (near != null) {
+            rec.addProperty("attendUntil", beats + 20);
+            Location look = e.getLocation();
+            look.setDirection(near.getLocation().toVector().subtract(look.toVector()));
+            e.setRotation(look.getYaw(), look.getPitch());
+        }
+        if (geti(rec, "attendUntil", 0) > beats) {
+            if (walking(ctx, id)) {
+                JsonObject a = new JsonObject();
+                a.addProperty("action", "stop");
+                a.addProperty("npcId", id);
+                try { ctx.invoke("gadget:navigate", a); } catch (Throwable ignored) { }
+            }
+            rec.addProperty("activity", near != null ? "talking with " + near.getName() : "waiting");
+            rec.addProperty("hp", hp(e));
+            rec.addProperty("hunger", hunger);
+            save(ctx, rec);
+            return;
+        }
+
         // --- the work
         if (job == null) {
-            String next = choose(rec, e, everyone);
-            job = startJob(rec, next);
-            if (next.equals("rest")) rec.addProperty("activity", "resting");
+            // something worth having lying nearby? food when hungry, tools any time
+            String next = null;
+            org.bukkit.entity.Item want = nearestDrop(rec, e, hunger < 16 ? 24 : 12, hunger < 16);
+            if (want != null) {
+                job = startJob(rec, "pickup");
+                Location l = want.getLocation();
+                setTarget(job, l.getBlockX(), l.getBlockY(), l.getBlockZ());
+                rec.addProperty("activity", "picking up " + want.getItemStack().getType().name().toLowerCase().replace('_', ' '));
+            } else {
+                next = choose(rec, e, everyone);
+                job = startJob(rec, next);
+                if (next.equals("rest")) rec.addProperty("activity", "resting");
+            }
         }
         String jk = gets(job, "kind", "rest");
         job.addProperty("beats", geti(job, "beats", 0) + 1);
@@ -1614,6 +1755,11 @@ public class People implements GadgetContract {
         else if (jk.equals("craft")) done = jobCraft(ctx, rec, e, id, job);
         else if (jk.equals("visit")) done = jobVisit(ctx, rec, e, id, job, everyone);
         else if (jk.equals("trade")) done = jobTrade(ctx, rec, e, id, job, everyone);
+        else if (jk.equals("pickup")) {
+            int t = travel(ctx, e, id, job, 1.2, false);
+            done = t != 0 || geti(job, "beats", 0) > 60;
+            if (done) finishJob(rec, e, t > 0 ? "picked something up" : "could not reach it");
+        }
         else {
             // rest: stand still; hp comes back by itself on a full stomach
             done = geti(job, "beats", 0) >= 20 || hp(e) >= 20;
