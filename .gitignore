@@ -3,3 +3,4 @@ node_modules/
 state/
 DISABLED
 *.log
+brain/chronicle/
