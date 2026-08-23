@@ -89,9 +89,16 @@ public class People implements GadgetContract {
     private static final int MAX_STACKS = 36;
 
     // hunger, in the units a player would recognise
-    private static final double EXHAUST_IDLE = 1.0 / 120.0;    // a point every two minutes standing
-    private static final double EXHAUST_WORK = 1.0 / 60.0;     // a point a minute working
-    private static final int EAT_AT = 13;
+    // Vanilla hunger, 1:1. Walking costs nothing. Exhaustion comes from doing things,
+    // at the game's own prices; 4 exhaustion takes a point of saturation, or of hunger
+    // once saturation is gone. Healing costs 6 per hp. (Minecraft wiki, Hunger.)
+    private static final double EX_JUMP = 0.05;          // per block climbed
+    private static final double EX_SWIM = 0.01;          // per metre swum
+    private static final double EX_BREAK = 0.005;        // per block broken
+    private static final double EX_ATTACK = 0.1;         // per swing
+    private static final double EX_HURT = 0.1;           // per hit taken
+    private static final double EX_REGEN = 6.0;          // per hp healed
+    private static final int EAT_AT = 14;                // a sensible player eats around here
 
     private static Integer TASK_ID = null;
     private static int beats = 0;
@@ -195,6 +202,7 @@ public class People implements GadgetContract {
             if (!s.has("points")) s.addProperty("points", pointsFor(getd(s, "minutes", 0)));
         }
         if (!rec.has("hunger")) rec.addProperty("hunger", 20);
+        if (!rec.has("saturation")) rec.addProperty("saturation", 5.0);
         if (!rec.has("exhaustion")) rec.addProperty("exhaustion", 0.0);
         JsonObject need = obj(rec, "need");
         if (!need.has("kind")) need.addProperty("kind", "explore");
@@ -355,19 +363,40 @@ public class People implements GadgetContract {
 
     // ------------------------------------------------------------------ food and value
 
+    /** Vanilla food points. */
     private static int nutrition(Material m) {
         switch (m) {
             case COOKED_BEEF: case COOKED_PORKCHOP: return 8;
-            case COOKED_MUTTON: case COOKED_SALMON: return 6;
-            case COOKED_CHICKEN: case COOKED_COD: case COOKED_RABBIT: return 6;
-            case BREAD: case BAKED_POTATO: return 5;
-            case APPLE: case CARROT: case MELON_SLICE: return 4;
-            case BEEF: case PORKCHOP: case MUTTON: return 3;
-            case CHICKEN: case RABBIT: case COD: case SALMON: return 2;
-            case SWEET_BERRIES: case BEETROOT: case DRIED_KELP: return 2;
-            case POTATO: return 1;
+            case COOKED_MUTTON: case COOKED_SALMON: case COOKED_CHICKEN: return 6;
+            case COOKED_COD: case COOKED_RABBIT: case BREAD: case BAKED_POTATO: return 5;
+            case APPLE: return 4;
+            case BEEF: case PORKCHOP: case RABBIT: case CARROT: return 3;
+            case MUTTON: case CHICKEN: case COD: case SALMON: case SWEET_BERRIES: case MELON_SLICE: return 2;
+            case POTATO: case BEETROOT: case DRIED_KELP: return 1;
             default: return 0;
         }
+    }
+
+    /** Vanilla saturation restored. */
+    private static double saturationOf(Material m) {
+        switch (m) {
+            case COOKED_BEEF: case COOKED_PORKCHOP: return 12.8;
+            case COOKED_MUTTON: case COOKED_SALMON: return 9.6;
+            case COOKED_CHICKEN: return 7.2;
+            case COOKED_COD: case COOKED_RABBIT: case BREAD: case BAKED_POTATO: return 6.0;
+            case CARROT: return 3.6;
+            case APPLE: return 2.4;
+            case BEEF: case PORKCHOP: case RABBIT: return 1.8;
+            case MUTTON: case CHICKEN: case MELON_SLICE: case BEETROOT: return 1.2;
+            case POTATO: case DRIED_KELP: return 0.6;
+            case COD: case SALMON: case SWEET_BERRIES: return 0.4;
+            default: return 0;
+        }
+    }
+
+    /** Spend exhaustion the way the game does. */
+    private static void exhaust(JsonObject rec, double amount) {
+        rec.addProperty("exhaustion", getd(rec, "exhaustion", 0) + amount);
     }
 
     private static int foodInBag(JsonObject rec) {
@@ -662,6 +691,7 @@ public class People implements GadgetContract {
         b.getWorld().playSound(b.getLocation(), org.bukkit.Sound.BLOCK_WOOD_BREAK, 0.6f, 1.0f);
         b.setType(Material.AIR);
         wear(rec, tool);
+        exhaust(rec, EX_BREAK);
     }
 
     // ------------------------------------------------------------------ crafting
@@ -1061,6 +1091,7 @@ public class People implements GadgetContract {
             prey.damage(dmg);
         }
         wear(rec, weapon);
+        exhaust(rec, EX_ATTACK);
         if (prey.isDead() || prey.getHealth() <= 0) {
             practise(rec, "hunting", 0.5);
             job.addProperty("kill", "killed a " + prey.getType().name().toLowerCase());
@@ -2176,12 +2207,37 @@ public class People implements GadgetContract {
             }
         }
 
-        // --- the body
+        // --- the body, by the game's own rules
         JsonObject job = rec.has("job") && rec.get("job").isJsonObject() ? rec.getAsJsonObject("job") : null;
-        boolean working = job != null && !gets(job, "kind", "").equals("rest");
-        double ex = getd(rec, "exhaustion", 0) + (working ? EXHAUST_WORK : EXHAUST_IDLE);
         int hunger = geti(rec, "hunger", 20);
-        if (ex >= 1.0) { ex -= 1.0; hunger = Math.max(0, hunger - 1); }
+        double sat = getd(rec, "saturation", 5.0);
+        Location now = e.getLocation();
+        // movement costs: climbing and swimming, measured from where they were last beat
+        if (rec.has("lastPos") && rec.get("lastPos").isJsonObject()) {
+            JsonObject lp = rec.getAsJsonObject("lastPos");
+            double dy = now.getY() - getd(lp, "y", now.getY());
+            double dxz = Math.sqrt(Math.pow(now.getX() - getd(lp, "x", now.getX()), 2) + Math.pow(now.getZ() - getd(lp, "z", now.getZ()), 2));
+            if (dxz < 12) {                                   // a sane step, not a respawn
+                if (dy > 0.5) exhaust(rec, EX_JUMP * Math.round(dy));
+                if (e instanceof LivingEntity && ((LivingEntity) e).isInWater()) exhaust(rec, EX_SWIM * dxz);
+            }
+        }
+        JsonObject lp = new JsonObject();
+        lp.addProperty("x", now.getX()); lp.addProperty("y", now.getY()); lp.addProperty("z", now.getZ());
+        rec.add("lastPos", lp);
+        // hits taken since last beat
+        if (e instanceof LivingEntity) {
+            double hpNow = ((LivingEntity) e).getHealth();
+            double hpWas = getd(rec, "hp", hpNow);
+            if (hpNow < hpWas - 0.01) exhaust(rec, EX_HURT);
+        }
+        // settle exhaustion into saturation, then hunger
+        double ex = getd(rec, "exhaustion", 0);
+        while (ex >= 4.0) {
+            ex -= 4.0;
+            if (sat > 0) sat = Math.max(0, sat - 1.0);
+            else hunger = Math.max(0, hunger - 1);
+        }
         rec.addProperty("exhaustion", ex);
 
         rec.addProperty("ripeNear", ripeNear(e, 48) != null);
@@ -2195,8 +2251,9 @@ public class People implements GadgetContract {
                 job.addProperty("want", "BREAD");
             }
         }
-        if (hunger <= EAT_AT) {
-            // eat the least wasteful thing in the bag
+        // eat: when hungry, or when hurt and food would start the healing
+        boolean hurt = e instanceof LivingEntity && ((LivingEntity) e).getHealth() < 20;
+        if (hunger <= EAT_AT || (hurt && hunger < 18)) {
             Material meal = null;
             int bestWaste = Integer.MAX_VALUE;
             for (JsonElement el : arr(rec, "inventory")) {
@@ -2209,24 +2266,50 @@ public class People implements GadgetContract {
             }
             if (meal != null && take(rec, meal, 1)) {
                 hunger = Math.min(20, hunger + nutrition(meal));
+                sat = Math.min(hunger, sat + saturationOf(meal));
                 rec.addProperty("lastMeal", meal.name());
             }
         }
-        rec.addProperty("hunger", hunger);
 
         if (e instanceof LivingEntity) {
             LivingEntity le = (LivingEntity) e;
+            // natural regeneration, at the game's prices
+            if (le.getHealth() < 20) {
+                if (hunger >= 20 && sat > 0) {
+                    // every 10 ticks, 1 hp for 6 exhaustion: two per beat
+                    for (int k = 0; k < 2 && le.getHealth() < 20 && sat > 0; k++) {
+                        le.setHealth(Math.min(20, le.getHealth() + 1));
+                        exhaust(rec, EX_REGEN);
+                        double ex2 = getd(rec, "exhaustion", 0);
+                        while (ex2 >= 4.0) { ex2 -= 4.0; if (sat > 0) sat = Math.max(0, sat - 1.0); else hunger = Math.max(0, hunger - 1); }
+                        rec.addProperty("exhaustion", ex2);
+                    }
+                } else if (hunger >= 18 && beats % 4 == 0) {
+                    le.setHealth(Math.min(20, le.getHealth() + 1));
+                    exhaust(rec, EX_REGEN);
+                }
+            }
+            // starvation: a point every four seconds, and how far it goes is the difficulty's call
             if (hunger <= 0 && beats % 4 == 0) {
-                le.damage(1.0);
-                JsonObject ev = new JsonObject();
-                ev.addProperty("npcId", id);
-                ev.addProperty("name", d.name);
-                ctx.plugin().bridge().broadcastEvent("npc_starving", ev);
-            } else if (hunger >= 18 && beats % 4 == 0 && le.getHealth() < 20) {
-                le.setHealth(Math.min(20, le.getHealth() + 1));
+                double floor;
+                switch (e.getWorld().getDifficulty()) {
+                    case PEACEFUL: floor = 20; break;
+                    case EASY: floor = 10; break;
+                    case NORMAL: floor = 1; break;
+                    default: floor = 0; break;
+                }
+                if (le.getHealth() > floor) {
+                    le.damage(1.0);
+                    JsonObject ev = new JsonObject();
+                    ev.addProperty("npcId", id);
+                    ev.addProperty("name", d.name);
+                    ctx.plugin().bridge().broadcastEvent("npc_starving", ev);
+                }
             }
             if (le.isInWater()) practise(rec, "swimming", BEAT_MIN);
         }
+        rec.addProperty("hunger", hunger);
+        rec.addProperty("saturation", Math.round(sat * 10.0) / 10.0);
 
         // --- the third need drifts, and is fed by arriving somewhere new
         JsonObject need = obj(rec, "need");

@@ -23,9 +23,10 @@ These came from James directly and override convenience. Breaking one is a bug, 
 4. **Every NPC is a player.** They start at world spawn with nothing, gather like a player,
    craft like a player, die like a player. Nothing is placed for them, stocked for them or
    picked for them. If the ground is bad they walk. If they cannot feed themselves they die.
-5. **Food has no grace period.** Hunger is lethal. Do not soften it when someone struggles.
-   Softening it is what produced a world of 47 permanently starving people who could never
-   die and never grew.
+5. **Hunger is vanilla, 1:1.** (James, 2026-08-23: "It should match players 1:1.") Saturation,
+   exhaustion at the game's prices (walking free; jump 0.05, swim 0.01/m, break 0.005, swing
+   0.1, hit 0.1, heal 6/hp), the vanilla food table, regeneration at hunger ≥ 18, starvation
+   damage every 4 s down to the difficulty's floor (normal: 1 hp). Do not invent a drain rate.
 
 ---
 
@@ -92,7 +93,7 @@ lines, lineage and migration are gone. `gadget:people` is the NPC.
 
 - **Start** at world spawn with nothing. `scripts/people.mjs` spawns `scripts/people.json`; after
   that 0–5 strangers arrive at 5am each Minecraft day (rolled sheets) until `populationCap` (40).
-- **Body**: 20 hp (the real entity), 20 hunger draining a point a minute working / two idle,
+- **Body**: 20 hp (the real entity), vanilla hunger and saturation (see rule 5),
   a 36-stack inventory in the ledger record (a mannequin cannot carry a real one), tools with
   real durability, vanilla recipes (`Bukkit.getRecipesFor`) and vanilla drops
   (`Block.getDrops(tool)`), the tool held in hand. Gravity applies when they stand still; the
