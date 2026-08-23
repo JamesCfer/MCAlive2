@@ -17,6 +17,20 @@ the version before wiping anything).
 - Stop the server (the restart loop's sentinel means: stop the loop first,
   or the server just comes back).
 - Delete (or archive) `world`, `world_nether`, `world_the_end`.
+- **Also clear the plugin's own state.** It does *not* live in the world
+  folders, so it survives the wipe and then collides with founding —
+  `npc_spawn` refuses an id that already exists:
+
+  ```
+  plugins/MCAlive2/ledger/          <- delete the whole folder
+  plugins/MCAlive2/npcs.json        <- delete
+  plugins/MCAlive2/behaviors.json   <- delete
+  plugins/MCAlive2/blueprints.json  <- delete
+  ```
+
+- **Keep `plugins/MCAlive2/gadgets.json`** — that is the compiled capability
+  set. Losing it is survivable now that every source is committed under
+  `brain/gadgets/`, but there is no reason to.
 - `server.properties`:
   - `generate-structures=true` — empty ruins are lore; the purge strips
     their inhabitants.
@@ -63,24 +77,40 @@ world-turn-minutes: 90
 - Locate a generated village: buildings present, **zero** villagers.
 - Have the brain `spawn_entity` a zombie: it appears (lore monsters work).
 
-## 6. Found the world (operator order via the console)
+## 6. Found the world
 
-Paste as an order:
+**Not an operator order any more.** Routine life must not run on behavior
+programs — `behavior_blocked` is a director wake event, and 43 blocking
+circuits once burned a 5M token budget in 79 minutes. Founding is a script:
 
-> Found the world: choose a good valley within ~300 blocks of spawn. Create
-> a founding band of 4–6 NPCs — copper-age wanderers with names, wants, and
-> frictions — ledger them with a faction. Register a first-camp blueprint
-> and issue behavior programs: gather wood, then raise the first shelter,
-> log by log. Open the chronicle: write the world-bible's first page and
-> today's session entry. Then stand back and let them work.
+```
+node scripts/found.mjs --survey    # survey only, changes nothing
+node scripts/found.mjs             # survey, found, start every timer
+```
+
+It surveys a 520-block ring for eight sites whose central 9x9 is level and
+dry, stands up the eight Ancients from `scripts/founders.json` (the verbatim
+character sheets), gives each an empty chest, a crafting table and a furnace,
+records the domain and store in `places`, installs `lineage`/`pursuits`/`farm`
+and starts every gadget timer with hunger **lethal**.
+
+Each founder starts **alone with an empty store**. They earn their five
+generation-1 followers by banking food — see "How a line grows" in
+`project.md`.
 
 ## 7. Watch
 
-- The crew should visibly chop trees and place blueprint blocks over the
-  next hours, with the director silent in between (check the decisions
-  journal: scenes only on `behavior_done` / `behavior_blocked` /
-  `world_turn` / player events).
+- Every founder should set off foraging within a minute or two — with an
+  empty larder and a 40-minute clock, `forage_far` is the only thing the
+  arithmetic can choose.
+- `gadget:lineage {action:"why"}` prints the full decision for all eight
+  lines: food banked vs food needed, pressure vs restraint, and which role
+  the next follower would fill. This is the thing to watch on day one.
+- The first follower appears once a line banks 40 nutrition. If nothing has
+  been called after an hour, read `why` before changing anything — the
+  answer is almost always `cannot feed another mouth`.
+- Expect deaths. Starvation is lethal and permanent by design; a line that
+  cannot feed itself is meant to end. `npc_death` wakes the director, so the
+  losses get narrated.
 - Attack an NPC: it fights back (or flees) instantly, plugin-side; the
   director may weave consequences afterwards.
-- `behavior_status` in a scene (or via the console map) shows crew progress
-  like `37/220 placed`.

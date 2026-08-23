@@ -1,0 +1,447 @@
+[
+  {
+    "id": "vecna",
+    "name": "Vecna",
+    "alignment": "neutral evil",
+    "appearance": "A gaunt figure in tattered layers, one eye and one hand wrapped in bandages, fingers stained with ink.",
+    "ethos": "Knowledge is power, and power shared is power lost.",
+    "personality": {
+      "drive": 3,
+      "warmth": -3,
+      "boldness": 0,
+      "composure": 3
+    },
+    "wants": [
+      {
+        "horizon": "long",
+        "text": "Find every source of magic in the world and learn its secrets."
+      },
+      {
+        "horizon": "short",
+        "text": "Locate anyone who has touched magic and get them talking without revealing why."
+      }
+    ],
+    "faction": "line-vecna",
+    "schedule": [
+      {
+        "start": 0,
+        "action": "wander",
+        "radius": 14
+      },
+      {
+        "start": 5000,
+        "action": "goto_home"
+      },
+      {
+        "start": 9000,
+        "action": "wander",
+        "radius": 14
+      },
+      {
+        "start": 13500,
+        "action": "wander",
+        "radius": 14
+      },
+      {
+        "start": 20000,
+        "action": "goto_home"
+      }
+    ],
+    "domain": "The Hollow Reach",
+    "kinNames": [
+      "Ashkar",
+      "Nevil",
+      "Sildra",
+      "Corvane",
+      "Ythra"
+    ]
+  },
+  {
+    "id": "bane",
+    "name": "Bane",
+    "alignment": "lawful evil",
+    "appearance": "Broad-shouldered, armoured in black iron, a gauntleted fist always resting on a weapon.",
+    "ethos": "Order is forged in war. The strong rule because they are willing to.",
+    "personality": {
+      "drive": 3,
+      "warmth": -2,
+      "boldness": 3,
+      "composure": 2
+    },
+    "wants": [
+      {
+        "horizon": "long",
+        "text": "Set the world at war."
+      },
+      {
+        "horizon": "short",
+        "text": "Raise an army - recruit, arm, and drill anyone who can fight."
+      }
+    ],
+    "faction": "line-bane",
+    "schedule": [
+      {
+        "start": 0,
+        "action": "goto_home"
+      },
+      {
+        "start": 1000,
+        "action": "wander",
+        "radius": 16
+      },
+      {
+        "start": 6000,
+        "action": "wander",
+        "radius": 16
+      },
+      {
+        "start": 12000,
+        "action": "goto_home"
+      },
+      {
+        "start": 13500,
+        "action": "idle"
+      }
+    ],
+    "domain": "The Iron Camp",
+    "kinNames": [
+      "Dregan",
+      "Halkor",
+      "Marn",
+      "Vosk",
+      "Ilzeth"
+    ]
+  },
+  {
+    "id": "lliira",
+    "name": "Lliira",
+    "alignment": "chaotic good",
+    "appearance": "Bright layered silks, bare feet, always mid-motion as if hearing music no one else does.",
+    "ethos": "A life without joy is a life half-lived. Grief passes; dancing helps it pass faster.",
+    "personality": {
+      "drive": 2,
+      "warmth": 3,
+      "boldness": 2,
+      "composure": -1
+    },
+    "wants": [
+      {
+        "horizon": "long",
+        "text": "Bring joy to the world."
+      },
+      {
+        "horizon": "short",
+        "text": "Throw a festival, and drag the gloomiest person present into it."
+      }
+    ],
+    "faction": "line-lliira",
+    "schedule": [
+      {
+        "start": 0,
+        "action": "goto_home"
+      },
+      {
+        "start": 1000,
+        "action": "wander",
+        "radius": 20
+      },
+      {
+        "start": 6000,
+        "action": "wander",
+        "radius": 20
+      },
+      {
+        "start": 12000,
+        "action": "goto_home"
+      },
+      {
+        "start": 13500,
+        "action": "idle"
+      }
+    ],
+    "domain": "The Glad Shore",
+    "kinNames": [
+      "Peri",
+      "Tamsin",
+      "Odalie",
+      "Bry",
+      "Fennick"
+    ]
+  },
+  {
+    "id": "mystra",
+    "name": "Mystra",
+    "alignment": "neutral good",
+    "appearance": "Robes shot through with faint starlight, eyes that catch light wrong, chalk dust on her hands.",
+    "ethos": "Magic belongs to everyone. A secret spell is a wasted one.",
+    "personality": {
+      "drive": 3,
+      "warmth": 2,
+      "boldness": 1,
+      "composure": 3
+    },
+    "wants": [
+      {
+        "horizon": "long",
+        "text": "Bring magic to the world and teach it openly to any who will learn."
+      },
+      {
+        "horizon": "short",
+        "text": "Find a first student."
+      }
+    ],
+    "faction": "line-mystra",
+    "schedule": [
+      {
+        "start": 0,
+        "action": "goto_home"
+      },
+      {
+        "start": 1000,
+        "action": "wander",
+        "radius": 14
+      },
+      {
+        "start": 6000,
+        "action": "wander",
+        "radius": 14
+      },
+      {
+        "start": 12000,
+        "action": "goto_home"
+      },
+      {
+        "start": 13500,
+        "action": "idle"
+      }
+    ],
+    "domain": "The Open Field",
+    "kinNames": [
+      "Wren",
+      "Calla",
+      "Osric",
+      "Ilya",
+      "Semra"
+    ]
+  },
+  {
+    "id": "tiamat",
+    "name": "Tiamat",
+    "alignment": "chaotic evil",
+    "appearance": "Scaled cloak of five clashing colours, crowned, moving with a slow reptilian patience.",
+    "ethos": "The age of small creatures is over. Dragons will inherit this world.",
+    "personality": {
+      "drive": 3,
+      "warmth": -3,
+      "boldness": 3,
+      "composure": 1
+    },
+    "wants": [
+      {
+        "horizon": "long",
+        "text": "Fill the world with dragons."
+      },
+      {
+        "horizon": "short",
+        "text": "Find eggs, hoards, and high places worth nesting in - and demand tribute from those below."
+      }
+    ],
+    "faction": "line-tiamat",
+    "schedule": [
+      {
+        "start": 0,
+        "action": "goto_home"
+      },
+      {
+        "start": 1000,
+        "action": "wander",
+        "radius": 12
+      },
+      {
+        "start": 6000,
+        "action": "wander",
+        "radius": 12
+      },
+      {
+        "start": 12000,
+        "action": "goto_home"
+      },
+      {
+        "start": 13500,
+        "action": "idle"
+      }
+    ],
+    "domain": "The Five-Scaled Height",
+    "kinNames": [
+      "Vashka",
+      "Kroth",
+      "Nerissa",
+      "Zaldrik",
+      "Ophis"
+    ]
+  },
+  {
+    "id": "moradin",
+    "name": "Moradin",
+    "alignment": "lawful good",
+    "appearance": "Soot-streaked, thick-armed, leather apron, a hammer worn smooth by use.",
+    "ethos": "Anything made can be made better. Give a people a new idea and you change them forever.",
+    "personality": {
+      "drive": 3,
+      "warmth": 2,
+      "boldness": 1,
+      "composure": 3
+    },
+    "wants": [
+      {
+        "horizon": "long",
+        "text": "Bring new ideas to the world - tools, craft, invention."
+      },
+      {
+        "horizon": "short",
+        "text": "Build a forge and make something no one here has seen before."
+      }
+    ],
+    "faction": "line-moradin",
+    "schedule": [
+      {
+        "start": 0,
+        "action": "goto_home"
+      },
+      {
+        "start": 1000,
+        "action": "wander",
+        "radius": 10
+      },
+      {
+        "start": 6000,
+        "action": "wander",
+        "radius": 10
+      },
+      {
+        "start": 12000,
+        "action": "goto_home"
+      },
+      {
+        "start": 13500,
+        "action": "idle"
+      }
+    ],
+    "domain": "Firstforge",
+    "kinNames": [
+      "Durn",
+      "Halla",
+      "Brok",
+      "Sigrun",
+      "Torvald"
+    ]
+  },
+  {
+    "id": "pelor",
+    "name": "Pelor",
+    "alignment": "neutral good",
+    "appearance": "Sun-bleached robes, weathered kind face, carries a lantern that never seems to gutter.",
+    "ethos": "Light every dark place. Heal every hurt thing. Ask nothing back.",
+    "personality": {
+      "drive": 2,
+      "warmth": 3,
+      "boldness": 1,
+      "composure": 3
+    },
+    "wants": [
+      {
+        "horizon": "long",
+        "text": "Bring light and healing to the world."
+      },
+      {
+        "horizon": "short",
+        "text": "Find the wounded and the frightened, and set lights where the dark is worst."
+      }
+    ],
+    "faction": "line-pelor",
+    "schedule": [
+      {
+        "start": 0,
+        "action": "goto_home"
+      },
+      {
+        "start": 1000,
+        "action": "wander",
+        "radius": 16
+      },
+      {
+        "start": 6000,
+        "action": "wander",
+        "radius": 16
+      },
+      {
+        "start": 12000,
+        "action": "goto_home"
+      },
+      {
+        "start": 13500,
+        "action": "idle"
+      }
+    ],
+    "domain": "The Lantern Rise",
+    "kinNames": [
+      "Aurel",
+      "Mira",
+      "Casta",
+      "Elion",
+      "Rhosyn"
+    ]
+  },
+  {
+    "id": "orcus",
+    "name": "Orcus",
+    "alignment": "chaotic evil",
+    "appearance": "Hunched under a heavy hide cloak, ram-skull mask, smells of wet earth and rot.",
+    "ethos": "The world is too tame. It needs teeth again.",
+    "personality": {
+      "drive": 3,
+      "warmth": -3,
+      "boldness": 2,
+      "composure": 0
+    },
+    "wants": [
+      {
+        "horizon": "long",
+        "text": "Fill the world with monsters."
+      },
+      {
+        "horizon": "short",
+        "text": "Find caves, ruins and dark woods where things can be bred unseen."
+      }
+    ],
+    "faction": "line-orcus",
+    "schedule": [
+      {
+        "start": 0,
+        "action": "idle"
+      },
+      {
+        "start": 1000,
+        "action": "goto_home"
+      },
+      {
+        "start": 12500,
+        "action": "wander",
+        "radius": 14
+      },
+      {
+        "start": 22000,
+        "action": "wander",
+        "radius": 14
+      }
+    ],
+    "domain": "The Rot Fen",
+    "kinNames": [
+      "Gralt",
+      "Hesk",
+      "Umber",
+      "Vretch",
+      "Sallow"
+    ]
+  }
+]
