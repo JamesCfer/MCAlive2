@@ -2532,6 +2532,75 @@ public class People implements GadgetContract {
     }
 
     /**
+     * Break the head on a grave and you get what they were carrying, and the head
+     * itself - the real one, stamped with who it was - not the blank skull vanilla
+     * would hand you. The bag is cleared so the loot exists exactly once.
+     */
+    private void watchGraves(GadgetContext ctx, List<JsonObject> everyone) {
+        List<JsonObject> places = places(ctx);
+        NpcManager npcs = ctx.plugin().npcManager();
+        for (JsonObject p : places) {
+            if (!"grave".equals(gets(p, "kind", "")) || (p.has("looted") && p.get("looted").getAsBoolean())) continue;
+            JsonObject o = p.getAsJsonObject("origin");
+            World w = ctx.world(null);
+            int x = geti(o, "x", 0), y = geti(o, "y", 64), z = geti(o, "z", 0);
+            Block skull = w.getBlockAt(x, y + 1, z);
+            if (!skull.getChunk().isLoaded()) continue;
+            if (skull.getType() == Material.PLAYER_HEAD) continue;
+            // the head is gone: somebody broke it
+            String who = gets(p, "npcId", "");
+            JsonObject rec = null;
+            for (JsonObject r : everyone) if (who.equals(gets(r, "id", ""))) rec = r;
+            NpcData d = npcs.get(who);
+            Location at = new Location(w, x + 0.5, y + 1.2, z + 0.5);
+            // vanilla dropped a nameless skull; take it back
+            for (Entity n : w.getNearbyEntities(at, 2.5, 2.5, 2.5)) {
+                if (!(n instanceof org.bukkit.entity.Item)) continue;
+                ItemStack s = ((org.bukkit.entity.Item) n).getItemStack();
+                if (s.getType() != Material.PLAYER_HEAD) continue;
+                ItemMeta meta = s.getItemMeta();
+                String tag = meta == null ? null : meta.getPersistentDataContainer().get(npcs.key(), org.bukkit.persistence.PersistentDataType.STRING);
+                if (tag == null) n.remove();
+            }
+            int dropped = 0;
+            if (d != null) { w.dropItemNaturally(at, npcs.headOf(d)); dropped++; }
+            if (rec != null) {
+                for (JsonElement el : arr(rec, "inventory")) {
+                    JsonObject s = el.getAsJsonObject();
+                    Material m = Material.matchMaterial(gets(s, "item", ""));
+                    if (m == null) continue;
+                    if (m == Material.PLAYER_HEAD && s.has("npcId")) {
+                        NpcData other = npcs.get(gets(s, "npcId", ""));
+                        if (other != null) { w.dropItemNaturally(at, npcs.headOf(other)); dropped++; }
+                        continue;
+                    }
+                    ItemStack it = stackOf(s);
+                    if (it == null) continue;
+                    it.setAmount(Math.max(1, geti(s, "count", 1)));
+                    w.dropItemNaturally(at, it);
+                    dropped++;
+                }
+                rec.add("inventory", new JsonArray());
+                rec.addProperty("looted", true);
+                try { save(ctx, rec); } catch (Throwable ignored) { }
+            }
+            p.addProperty("looted", true);
+            p.addProperty("description", gets(p, "description", "") + " The grave has been opened.");
+            try {
+                JsonObject put = new JsonObject();
+                put.addProperty("collection", "places");
+                put.add("record", p);
+                ctx.invoke("ledger_put", put);
+            } catch (Throwable ignored) { }
+            JsonObject ev = new JsonObject();
+            ev.addProperty("npcId", who);
+            ev.addProperty("drops", dropped);
+            ev.addProperty("x", x); ev.addProperty("y", y); ev.addProperty("z", z);
+            ctx.plugin().bridge().broadcastEvent("grave_opened", ev);
+        }
+    }
+
+    /**
      * Heads. The plugin drops one when a person dies, stamped with who it was. Vanilla
      * would sweep it up with the rest of the litter after five minutes; a person's head
      * is not litter, so every one lying in the world is kept fresh each beat.
@@ -2599,6 +2668,7 @@ public class People implements GadgetContract {
             if (beats % 5 == 0) dawn(ctx, everyone);
             if (beats % 60 == 0) keepHeads(ctx);
             if (beats % 30 == 0) keepFields(ctx, everyone);
+            watchGraves(ctx, everyone);
         } catch (Throwable ignored) { }
     }
 
