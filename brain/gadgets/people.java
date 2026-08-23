@@ -2204,13 +2204,15 @@ public class People implements GadgetContract {
         for (Entity n : e.getNearbyEntities(4, 3, 4)) {
             if (n instanceof org.bukkit.entity.Player) { near = (org.bukkit.entity.Player) n; break; }
         }
+        // A starving person does not stop to chat. They say so and keep moving.
+        if (near != null && hunger <= 7) near = null;
         if (near != null) {
             rec.addProperty("attendUntil", beats + 20);
             Location look = e.getLocation();
             look.setDirection(near.getLocation().toVector().subtract(look.toVector()));
             e.setRotation(look.getYaw(), look.getPitch());
         }
-        if (geti(rec, "attendUntil", 0) > beats) {
+        if (geti(rec, "attendUntil", 0) > beats && hunger > 7) {
             if (walking(ctx, id)) {
                 JsonObject a = new JsonObject();
                 a.addProperty("action", "stop");

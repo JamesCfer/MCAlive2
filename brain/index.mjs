@@ -58,6 +58,7 @@ import { runActorTurn } from "./lib/actor-turn.mjs";
 import { parseActorReport } from "./lib/actor-report.mjs";
 import { SelfUpdater } from "./lib/self-update.mjs";
 import { Developer } from "./lib/developer.mjs";
+import { resetIfNewEpoch } from "./lib/chronicle.mjs";
 
 export async function main(env = process.env) {
   const config = loadConfig(env);
@@ -75,6 +76,12 @@ export async function main(env = process.env) {
   });
 
   const usage = await new UsageTracker(config.stateDir, config.dailyTokenBudget).load();
+  try {
+    const ep = resetIfNewEpoch();
+    if (ep.reset) log.info("chronicle_reset", { epoch: ep.epoch, reason: "world premise changed; old chronicle archived" });
+  } catch (e) {
+    log.warn("chronicle_epoch_check_failed", { error: String(e && e.message || e) });
+  }
   const rateLimiter = new RateLimiter(config.maxTurnsPerMin, 60000);
   const actorMemory = new ActorMemory(config.actorHistoryTurns, {
     statePath: path.join(config.stateDir, "conversations.json"),
@@ -372,7 +379,28 @@ export async function main(env = process.env) {
     // {npc, facts} - the plugin filters facts to knownBy includes
     // [npcId | npcId's faction | "all"] before ever handing them back.
     const data = await bridge.call("npc_context", { npcId }, config.npcContextTimeoutMs);
-    return { npc: data.npc, facts: data.facts || [] };
+    // The world as it actually is: who is alive, what villages exist. This is the
+    // whole universe of names an actor may use; anything else is invention.
+    const world = { people: [], villages: [], ruins: 0 };
+    try {
+      const npcs = await bridge.call("ledger_query", { collection: "npcs" }, config.npcContextTimeoutMs);
+      for (const r of npcs.records || []) {
+        if (r.alive === false) continue;
+        world.people.push(r.village ? `${r.name} (of ${r.village.replace(/^village-/, "")})` : r.name);
+      }
+      const places = await bridge.call("ledger_query", { collection: "places" }, config.npcContextTimeoutMs);
+      for (const p of places.records || []) {
+        if (p.kind === "village") world.villages.push(`${p.name} at ${p.origin.x},${p.origin.z} (${(p.members || []).length} members${p.inn ? ", has an inn" : ""})`);
+        if (p.kind === "ruin") world.ruins += 1;
+      }
+    } catch (e) {
+      log.warn("actor_world_fetch_failed", { error: String(e && e.message || e) });
+    }
+    // The sheet the actor reads: strip the bulky mechanical state it has no use for.
+    const npc = { ...(data.npc || {}) };
+    delete npc.job; delete npc.exhaustion; delete npc.seenChunks; delete npc.attendUntil; delete npc.lastDist;
+    if (Array.isArray(npc.inventory)) npc.inventory = npc.inventory.map((s) => `${s.count} ${String(s.item).toLowerCase().replace(/_/g, " ")}`);
+    return { npc, facts: data.facts || [], world };
   }
 
   async function runActor({ npcId, player, trigger, message }) {
@@ -409,6 +437,7 @@ export async function main(env = process.env) {
     const result = await runActorTurn({
       npc: ctx.npc,
       facts: ctx.facts,
+      world: ctx.world,
       player,
       trigger,
       message,

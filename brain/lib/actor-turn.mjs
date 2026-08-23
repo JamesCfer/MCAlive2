@@ -16,10 +16,16 @@ import { MCP_SERVER_NAME, ACTOR_TOOLS, actorDisallowedTools, namespaceAll, strip
 import { journalActor } from "./decisions-journal.mjs";
 import { consumeWithTimeout } from "./timed-query.mjs";
 
-const STANDING_REMINDER = `You are voicing ONE character in the fantasy world of MCAlive2: an NPC actor,
-not the director. You know only what is in your character sheet and the
-"Facts you know" list below - nothing else. Never invent or claim knowledge
-outside that list, and never break character. Chat is dialogue-only: reply
+const STANDING_REMINDER = `You are voicing ONE character in MCAlive2: an NPC actor, not the director.
+You are a person who walked into this world at spawn with nothing, like
+everyone else here. There is no history, no gods, no old peoples, no camps or
+bands or founders - nothing happened before the people in "The world" below
+arrived, and nothing has happened since except what is in "Facts you know".
+You know only your character sheet, the world list, and those facts. If you
+are asked about anything else - who built the empty villages, what a place is
+called, what happened long ago - the true answer is that you do not know, and
+you say so in your own voice. NEVER invent a name for a place, a person, a god,
+a people, or an event. Never break character. Chat is dialogue-only: reply
 as your character would speak, and use npc_say to actually say it in the
 world (do not just describe speaking - call the tool). You may also use
 npc_look_at and npc_pose for small physical beats. You have no other
@@ -47,12 +53,19 @@ the ledger yourself.`;
  * @param {string} [params.message] - the player's chat message, if any
  * @param {{summary: string, recent: Array}} params.transcript - ActorMemory.transcript()
  */
-export function buildActorPrompt({ npc, facts, player, trigger, message, transcript }) {
+export function buildActorPrompt({ npc, facts, player, trigger, message, transcript, world }) {
   const lines = [];
   lines.push(STANDING_REMINDER);
   lines.push("");
   lines.push("Your character sheet:");
   lines.push(JSON.stringify(npc, null, 1));
+  if (world) {
+    lines.push("");
+    lines.push("The world - every name that exists (there are no others):");
+    lines.push(`People alive: ${world.people.length ? world.people.join(", ") : "only you"}`);
+    lines.push(`Villages: ${world.villages.length ? world.villages.join("; ") : "none yet"}`);
+    lines.push(`Empty generated villages found so far: ${world.ruins} (nobody knows who built them)`);
+  }
   lines.push("");
   lines.push("Facts you know (and ONLY these):");
   lines.push(JSON.stringify(facts, null, 1));
@@ -86,8 +99,8 @@ export function buildActorPrompt({ npc, facts, player, trigger, message, transcr
  *   to the real @anthropic-ai/claude-agent-sdk query().
  * @returns {Promise<{ inputTokens: number, outputTokens: number, totalTokens: number, dryRun: boolean, timedOut: boolean, reportText: string|null }>}
  */
-export async function runActorTurn({ npc, facts, player, trigger, message, transcript, config, queryFn }) {
-  const prompt = buildActorPrompt({ npc, facts, player, trigger, message, transcript });
+export async function runActorTurn({ npc, facts, player, trigger, message, transcript, world, config, queryFn }) {
+  const prompt = buildActorPrompt({ npc, facts, player, trigger, message, transcript, world });
   const allowedTools = namespaceAll(ACTOR_TOOLS, MCP_SERVER_NAME);
   const disallowedTools = actorDisallowedTools(MCP_SERVER_NAME);
 

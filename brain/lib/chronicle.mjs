@@ -35,6 +35,29 @@ function chronicleRoot() {
   return process.env.CHRONICLE_DIR || path.join(BRAIN_ROOT, "chronicle");
 }
 
+// The chronicle is brain-local state, not in git. When the premise of the world
+// changes (it did on 2026-08-23: no gods, no lines, every NPC a player), the old
+// prose would keep feeding the director a world that no longer exists. The repo
+// carries an epoch number in lore/CHRONICLE_EPOCH; when it differs from the one
+// stamped in the chronicle dir, the old chronicle is archived beside it and a
+// fresh one started. Idempotent; runs once at brain boot.
+export function resetIfNewEpoch() {
+  let epoch = "0";
+  try { epoch = fs.readFileSync(path.join(BRAIN_ROOT, "lore", "CHRONICLE_EPOCH"), "utf8").trim(); } catch { return { reset: false, epoch }; }
+  const root = chronicleRoot();
+  const stamp = path.join(root, ".epoch");
+  let have = null;
+  try { have = fs.readFileSync(stamp, "utf8").trim(); } catch { have = null; }
+  if (have === epoch) return { reset: false, epoch };
+  if (fs.existsSync(root)) {
+    const archive = `${root}-archive-epoch${have || "0"}-${Date.now()}`;
+    fs.renameSync(root, archive);
+  }
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(stamp, `${epoch}\n`);
+  return { reset: true, epoch };
+}
+
 function sessionsDir() {
   return path.join(chronicleRoot(), "sessions");
 }
