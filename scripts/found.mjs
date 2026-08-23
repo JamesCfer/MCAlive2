@@ -240,28 +240,47 @@ async function foundOne(f, site) {
 
 // ---------------------------------------------------------------- capability
 
-// Gadgets whose source must be on the server before founding. lineage is new; pursuits
-// and farm carry the two small additions lineage leans on (action:"reserve" and
-// action:"assign") so a newly-called farmer can be handed the field without restarting
-// either of them. Defining is idempotent - gadget_define overwrites the same id.
-const INSTALL = [
-  ["lineage", "An Ancient decides when to call kin into its line, and what that kin is for. Gated on banked food; role chosen by what the line lacks."],
-  ["pursuits", "Needs-and-personality utility chooser; leaves reserved tradespeople to their own work. action:reserve adds/drops reservations live."],
-  ["farm", "A field worked forever by a farmer who stays with it. action:assign hands the field to a named farmer."],
-];
+// Install EVERY gadget source in the repo, not just the changed ones. The whole
+// capability set lives in brain/gadgets/ now, so founding does not depend on the
+// server's gadgets.json having survived the wipe. Defining is idempotent.
+//
+// position-tracker and world-scan are skipped: the brain installs those itself on boot,
+// with its own descriptions and (for the tracker) its own run call.
+const BRAIN_OWNED = new Set(["position-tracker", "world-scan"]);
 
 async function installGadgets() {
   const dir = path.join(HERE, "..", "brain", "gadgets");
-  for (const [id, description] of INSTALL) {
-    const source = fs.readFileSync(path.join(dir, `${id}.java`), "utf8");
-    await cmd("gadget_define", { id, source, description });
-    // A green define is not proof the class is what we think it is - read it back.
-    const got = await cmd("gadget_get", { id });
-    if (got.source.length !== source.length) {
-      throw new Error(`${id}: server copy is ${got.source.length} chars, sent ${source.length}`);
-    }
-    console.log(`  installed ${id.padEnd(10)} ${source.length} chars, verified`);
+  let descriptions = {};
+  try {
+    descriptions = JSON.parse(fs.readFileSync(path.join(dir, "_descriptions.json"), "utf8"));
+  } catch {
+    /* descriptions are cosmetic */
   }
+  const ids = fs
+    .readdirSync(dir)
+    .filter((n) => n.endsWith(".java"))
+    .map((n) => n.replace(/\.java$/, ""))
+    .filter((id) => !BRAIN_OWNED.has(id))
+    .sort();
+
+  let failed = 0;
+  for (const id of ids) {
+    const source = fs.readFileSync(path.join(dir, `${id}.java`), "utf8");
+    try {
+      await cmd("gadget_define", { id, source, description: descriptions[id] || id });
+      // A green define is not proof the class is what we think it is - read it back.
+      const got = await cmd("gadget_get", { id });
+      if (got.source.length !== source.length) {
+        throw new Error(`server copy is ${got.source.length} chars, sent ${source.length}`);
+      }
+      console.log(`  ok   ${id.padEnd(22)} ${String(source.length).padStart(6)} chars`);
+    } catch (e) {
+      failed++;
+      console.log(`  FAIL ${id.padEnd(22)} ${e.message}`);
+    }
+  }
+  if (failed) throw new Error(`${failed} gadget(s) failed to install - fix before founding`);
+  console.log(`  ${ids.length} gadgets installed and verified`);
 }
 
 // ---------------------------------------------------------------- the standing world
