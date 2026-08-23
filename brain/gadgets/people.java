@@ -835,7 +835,10 @@ public class People implements GadgetContract {
         if (need.equals("hunger")) {
             if (job.equals("hunt")) return 1.0;
             if (job.equals("fish")) return 1.0;
-            if (job.equals("farm")) return bestTool(rec, "HOE") != null || count(rec, Material.WHEAT_SEEDS) > 0 ? 0.8 : 0.5;
+            if (job.equals("farm")) {
+                if (rec.has("ripeNear") && rec.get("ripeNear").getAsBoolean()) return 1.0;
+                return bestTool(rec, "HOE") != null || count(rec, Material.WHEAT_SEEDS) > 0 ? 0.8 : 0.5;
+            }
             if (job.equals("trade")) return 0.9;
             if (job.equals("market")) return 0.95;
             return 0;
@@ -1247,12 +1250,41 @@ public class People implements GadgetContract {
 
     // ---- farm: seeds from grass, a hoe, a tilled row by water, wheat in time
 
+    /** Nearest farmland to this person, or null. Anyone's field is a field. */
+    private static Block farmlandNear(Entity e, int r) {
+        return nearestBlock(e, r, 6, 4, new BlockTest() { public boolean ok(Block x) { return x.getType() == Material.FARMLAND; } });
+    }
+
+    private static Block ripeNear(Entity e, int r) {
+        return nearestBlock(e, r, 6, 4, new BlockTest() {
+            public boolean ok(Block x) {
+                return x.getType() == Material.WHEAT && x.getBlockData() instanceof Ageable && ((Ageable) x.getBlockData()).getAge() >= 7;
+            }
+        });
+    }
+
     private static boolean jobFarm(GadgetContext ctx, JsonObject rec, Entity e, String id, JsonObject job) {
         String phase = gets(job, "phase", "start");
         World w = e.getWorld();
         if (phase.equals("start")) {
-            // a field is remembered once made; until then choose ground by water near home
+            boolean haveHoe = bestTool(rec, "HOE") != null;
+            int seeds = count(rec, Material.WHEAT_SEEDS);
+
+            // Ripe wheat anywhere near is food on the stalk. Take it, whoever planted it -
+            // the farmland at spawn was standing ready while people walked past it to hunt.
+            Block ripe = ripeNear(e, 48);
+            if (ripe != null) { setTarget(job, ripe.getX(), ripe.getY(), ripe.getZ()); job.addProperty("phase", "reap"); rec.addProperty("activity", "going to harvest"); return false; }
+
+            // The field: farmland already near (yours or anyone's) beats breaking new ground.
             JsonObject field = rec.has("field") && rec.get("field").isJsonObject() ? rec.getAsJsonObject("field") : null;
+            Block near = farmlandNear(e, 48);
+            if (near != null && (field == null || distTo(field, e) > 96)) {
+                field = new JsonObject();
+                field.addProperty("x", near.getX());
+                field.addProperty("y", near.getY());
+                field.addProperty("z", near.getZ());
+                rec.add("field", field);
+            }
             if (field == null) {
                 Block water = nearestBlock(e, 40, 4, 2, new BlockTest() { public boolean ok(Block x) { return x.getType() == Material.WATER; } });
                 if (water == null) { finishJob(rec, e, "no water for a field"); return true; }
@@ -1262,28 +1294,34 @@ public class People implements GadgetContract {
                 field.addProperty("z", water.getZ());
                 rec.add("field", field);
             }
-            // what does the field need from me right now?
-            boolean haveHoe = bestTool(rec, "HOE") != null;
-            int seeds = count(rec, Material.WHEAT_SEEDS);
-            Block ripe = null, empty = null, untilled = null;
             int fx = geti(field, "x", 0), fy = geti(field, "y", 64), fz = geti(field, "z", 0);
-            for (int dx = -2; dx <= 2; dx++) {
-                for (int dz = -2; dz <= 2; dz++) {
+            // walk to the field first if it is far; everything below is judged from there
+            if (flatDist(e, fx, fz) > 12) {
+                setTarget(job, fx, fy + 1, fz);
+                job.addProperty("phase", "goField");
+                rec.addProperty("activity", "walking to the field");
+                return false;
+            }
+
+            Block empty = null, untilled = null;
+            int growing = 0;
+            for (int dx = -4; dx <= 4; dx++) {
+                for (int dz = -4; dz <= 4; dz++) {
                     Block ground = w.getBlockAt(fx + dx, fy, fz + dz);
                     Block crop = ground.getRelative(0, 1, 0);
                     if (ground.getType() == Material.FARMLAND) {
-                        if (crop.getType() == Material.WHEAT) {
-                            if (crop.getBlockData() instanceof Ageable && ((Ageable) crop.getBlockData()).getAge() >= 7 && ripe == null) ripe = crop;
-                        } else if (crop.getType().isAir() && empty == null) empty = ground;
-                    } else if ((ground.getType() == Material.GRASS_BLOCK || ground.getType() == Material.DIRT) && untilled == null) {
+                        if (crop.getType() == Material.WHEAT) growing++;
+                        else if (crop.getType().isAir() && empty == null) empty = ground;
+                    } else if (Math.abs(dx) <= 2 && Math.abs(dz) <= 2
+                            && (ground.getType() == Material.GRASS_BLOCK || ground.getType() == Material.DIRT) && untilled == null
+                            && ground.getRelative(0, 1, 0).isPassable()) {
                         untilled = ground;
                     }
                 }
             }
-            if (ripe != null) { setTarget(job, ripe.getX(), ripe.getY(), ripe.getZ()); job.addProperty("phase", "reap"); rec.addProperty("activity", "going to harvest"); return false; }
             if (empty != null && seeds > 0) { setTarget(job, empty.getX(), empty.getY() + 1, empty.getZ()); job.addProperty("phase", "sow"); rec.addProperty("activity", "going to sow"); return false; }
             if (untilled != null && haveHoe) { setTarget(job, untilled.getX(), untilled.getY() + 1, untilled.getZ()); job.addProperty("phase", "till"); rec.addProperty("activity", "going to till"); return false; }
-            if (seeds == 0) {
+            if (seeds == 0 && empty != null) {
                 Block grass = nearestBlock(e, 24, 3, 3, new BlockTest() { public boolean ok(Block x) { return x.getType() == Material.SHORT_GRASS || x.getType() == Material.TALL_GRASS; } });
                 if (grass == null) { finishJob(rec, e, "no grass for seed"); return true; }
                 setTarget(job, grass.getX(), grass.getY(), grass.getZ());
@@ -1291,16 +1329,36 @@ public class People implements GadgetContract {
                 rec.addProperty("activity", "beating grass for seed");
                 return false;
             }
-            if (!haveHoe) {
+            if (!haveHoe && untilled != null) {
                 JsonObject j = startJob(rec, "craft");
                 j.addProperty("want", count(rec, Material.COBBLESTONE) >= 2 ? "STONE_HOE" : "WOODEN_HOE");
                 j.addProperty("then", "farm");
                 return false;
             }
-            // planted and growing: nothing to do but let it grow. A crop only ripens in a
-            // loaded chunk, and being here keeps it loaded.
-            finishJob(rec, e, "field is growing");
+            if (growing > 0) {
+                // Planted and growing. Stay with it a while - a crop only ripens in a loaded
+                // chunk and a farmer who walks off to hunt comes back to seedlings.
+                job.addProperty("phase", "tend");
+                job.addProperty("tended", 0);
+                rec.addProperty("activity", "tending the field (" + growing + " growing)");
+                return false;
+            }
+            finishJob(rec, e, "nothing to do at the field");
             return true;
+        }
+        if (phase.equals("goField")) {
+            int t = travel(ctx, e, id, job, 6, false);
+            if (t < 0) { finishJob(rec, e, "could not reach the field"); return true; }
+            if (t > 0) job.addProperty("phase", "start");
+            return false;
+        }
+        if (phase.equals("tend")) {
+            int n = geti(job, "tended", 0) + 1;
+            job.addProperty("tended", n);
+            // check for ripe every few beats; leave after a couple of minutes
+            if (n % 5 == 0) { job.addProperty("phase", "start"); return false; }
+            if (n > 150) { finishJob(rec, e, "field is growing"); return true; }
+            return false;
         }
         int t = travel(ctx, e, id, job, 2.5, false);
         if (t < 0) { finishJob(rec, e, "could not reach the field"); return true; }
@@ -1341,7 +1399,14 @@ public class People implements GadgetContract {
         }
         if (phase.equals("reap")) {
             Block crop = w.getBlockAt(x, y, z);
-            if (crop.getType() == Material.WHEAT) breakBlock(rec, crop, null);
+            if (crop.getType() == Material.WHEAT) {
+                breakBlock(rec, crop, null);
+                practise(rec, "farming", 0.5);
+                // a farmer replants the row as they go
+                if (count(rec, Material.WHEAT_SEEDS) > 0 && crop.getRelative(0, -1, 0).getType() == Material.FARMLAND && take(rec, Material.WHEAT_SEEDS, 1)) {
+                    crop.setType(Material.WHEAT);
+                }
+            }
             job.addProperty("phase", "start");
             return false;
         }
@@ -2053,6 +2118,7 @@ public class People implements GadgetContract {
                 rec.addProperty("alive", false);
                 rec.remove("job");
                 rec.addProperty("activity", "dead");
+                try { grave(ctx, rec, d); } catch (Throwable t) { rec.addProperty("grave", "failed: " + String.valueOf(t.getMessage())); }
                 save(ctx, rec);
             }
             return;
@@ -2118,6 +2184,17 @@ public class People implements GadgetContract {
         if (ex >= 1.0) { ex -= 1.0; hunger = Math.max(0, hunger - 1); }
         rec.addProperty("exhaustion", ex);
 
+        rec.addProperty("ripeNear", ripeNear(e, 48) != null);
+        // Wheat is not food. Three of it is a loaf, at a bench.
+        if (hunger <= EAT_AT && foodInBag(rec) == 0 && count(rec, Material.WHEAT) >= 3) {
+            Block bench = nearestBlock(e, 4, 2, 2, new BlockTest() { public boolean ok(Block b) { return b.getType() == Material.CRAFTING_TABLE; } });
+            if (bench != null || count(rec, Material.CRAFTING_TABLE) > 0) {
+                if (take(rec, Material.WHEAT, 3)) { give(rec, Material.BREAD, 1); practise(rec, "crafting", 0.5); }
+            } else if (job == null) {
+                job = startJob(rec, "craft");
+                job.addProperty("want", "BREAD");
+            }
+        }
         if (hunger <= EAT_AT) {
             // eat the least wasteful thing in the bag
             Material meal = null;
@@ -2291,6 +2368,87 @@ public class People implements GadgetContract {
     }
 
     /**
+     * A grave where they fell: a stone under, their head on top wearing their own face, a
+     * sign with their name. The head the plugin dropped is taken up into the grave - it
+     * is still the one vessel of their return, now stamped on the skull block itself -
+     * and the grave is a place anyone can find.
+     */
+    private static void grave(GadgetContext ctx, JsonObject rec, NpcData d) throws Exception {
+        Location at = d.lastLocation != null ? d.lastLocation : d.home;
+        if (at == null || at.getWorld() == null) return;
+        World w = at.getWorld();
+        org.bukkit.NamespacedKey key = ctx.plugin().npcManager().key();
+        String id = d.id;
+        // the head item the plugin dropped, if it is still lying there
+        for (Entity n : w.getNearbyEntities(at, 10, 6, 10)) {
+            if (!(n instanceof org.bukkit.entity.Item)) continue;
+            ItemStack s = ((org.bukkit.entity.Item) n).getItemStack();
+            if (s.getType() != Material.PLAYER_HEAD || s.getItemMeta() == null) continue;
+            String who = s.getItemMeta().getPersistentDataContainer().get(key, org.bukkit.persistence.PersistentDataType.STRING);
+            if (id.equals(who)) { at = n.getLocation(); n.remove(); break; }
+        }
+        int x = at.getBlockX(), z = at.getBlockZ();
+        int y = w.getHighestBlockYAt(x, z, HeightMap.MOTION_BLOCKING_NO_LEAVES);
+        Block base = w.getBlockAt(x, y, z);
+        if (base.getType() == Material.WATER && d.home != null) {
+            // drowned: the marker goes up at home, where people will see it
+            x = d.home.getBlockX(); z = d.home.getBlockZ();
+            y = w.getHighestBlockYAt(x, z, HeightMap.MOTION_BLOCKING_NO_LEAVES);
+            base = w.getBlockAt(x, y, z);
+        }
+        if (base.getType() == Material.WATER) return;           // the sea keeps its own
+        if (base.isPassable()) base = base.getRelative(0, -1, 0);
+        if (d.lastLocation == null) d.lastLocation = new Location(w, x, y, z);
+        Block stone = base.getRelative(0, 1, 0);
+        Block skull = base.getRelative(0, 2, 0);
+        stone.setType(Material.COBBLESTONE);
+        skull.setType(Material.PLAYER_HEAD);
+        org.bukkit.block.BlockState st = skull.getState();
+        if (st instanceof org.bukkit.block.Skull) {
+            org.bukkit.block.Skull sk = (org.bukkit.block.Skull) st;
+            String skin = gets(rec, "skin", null);
+            if (skin != null) {
+                try { sk.setPlayerProfile(Bukkit.createProfile(skin)); } catch (Throwable ignored) { }
+            }
+            sk.getPersistentDataContainer().set(key, org.bukkit.persistence.PersistentDataType.STRING, id);
+            sk.update(true, false);
+        }
+        // a sign on the side with their name
+        Block signAt = stone.getRelative(0, 0, 1);
+        if (signAt.isPassable()) {
+            signAt.setType(Material.OAK_WALL_SIGN);
+            org.bukkit.block.BlockState ss = signAt.getState();
+            if (ss instanceof org.bukkit.block.Sign) {
+                org.bukkit.block.Sign sign = (org.bukkit.block.Sign) ss;
+                sign.getSide(org.bukkit.block.sign.Side.FRONT).line(0, net.kyori.adventure.text.Component.text("Here lies"));
+                sign.getSide(org.bukkit.block.sign.Side.FRONT).line(1, net.kyori.adventure.text.Component.text(d.name));
+                sign.getSide(org.bukkit.block.sign.Side.FRONT).line(2, net.kyori.adventure.text.Component.text(gets(rec, "village", "").replace("village-", "")));
+                sign.update(true, false);
+            }
+        }
+        JsonObject place = new JsonObject();
+        place.addProperty("id", "grave-" + id);
+        place.addProperty("name", d.name + "'s grave");
+        place.addProperty("kind", "grave");
+        place.add("origin", xyzOf(x, stone.getY(), z));
+        place.addProperty("npcId", id);
+        place.addProperty("builtBy", "world");
+        place.addProperty("description", "Where " + d.name + " fell. Their head rests on the stone.");
+        JsonObject put = new JsonObject();
+        put.addProperty("collection", "places");
+        put.add("record", place);
+        ctx.invoke("ledger_put", put);
+        rec.add("grave", xyzOf(x, stone.getY(), z));
+        JsonObject ev = new JsonObject();
+        ev.addProperty("npcId", id);
+        ev.addProperty("name", d.name);
+        ev.addProperty("x", x);
+        ev.addProperty("y", stone.getY());
+        ev.addProperty("z", z);
+        ctx.plugin().bridge().broadcastEvent("npc_grave", ev);
+    }
+
+    /**
      * Heads. The plugin drops one when a person dies, stamped with who it was. Vanilla
      * would sweep it up with the rest of the litter after five minutes; a person's head
      * is not litter, so every one lying in the world is kept fresh each beat.
@@ -2311,6 +2469,37 @@ public class People implements GadgetContract {
         }
     }
 
+    /**
+     * A crop only grows in a loaded chunk. A player's farm does not grow while they are
+     * away either - but a player's farm is usually at their base, and these people range
+     * two hundred blocks for a pig. Hold the chunk under every living person's field so
+     * the wheat they planted is wheat when they come back.
+     */
+    private void keepFields(GadgetContext ctx, List<JsonObject> everyone) {
+        World w = ctx.world(null);
+        java.util.Set<Long> want = new java.util.HashSet<Long>();
+        for (JsonObject rec : everyone) {
+            if (!(rec.has("alive") && rec.get("alive").getAsBoolean())) continue;
+            if (!rec.has("field") || !rec.get("field").isJsonObject()) continue;
+            JsonObject f = rec.getAsJsonObject("field");
+            int cx = geti(f, "x", 0) >> 4, cz = geti(f, "z", 0) >> 4;
+            for (int dx = -1; dx <= 1; dx++) for (int dz = -1; dz <= 1; dz++) want.add((((long) (cx + dx)) << 32) ^ ((cz + dz) & 0xFFFFFFFFL));
+        }
+        for (Long k : want) {
+            int cx = (int) (k >> 32), cz = (int) (k & 0xFFFFFFFFL);
+            w.addPluginChunkTicket(cx, cz, ctx.plugin());
+        }
+        FIELD_TICKETS.removeAll(want);
+        for (Long k : FIELD_TICKETS) {
+            int cx = (int) (k >> 32), cz = (int) (k & 0xFFFFFFFFL);
+            w.removePluginChunkTicket(cx, cz, ctx.plugin());
+        }
+        FIELD_TICKETS.clear();
+        FIELD_TICKETS.addAll(want);
+    }
+
+    private static final java.util.Set<Long> FIELD_TICKETS = new java.util.HashSet<Long>();
+
     private void beat(GadgetContext ctx) {
         beats++;
         try {
@@ -2326,6 +2515,7 @@ public class People implements GadgetContract {
             }
             if (beats % 5 == 0) dawn(ctx, everyone);
             if (beats % 60 == 0) keepHeads(ctx);
+            if (beats % 30 == 0) keepFields(ctx, everyone);
         } catch (Throwable ignored) { }
     }
 
@@ -2456,6 +2646,27 @@ public class People implements GadgetContract {
             out.addProperty("npcId", npcId);
             out.addProperty("job", jobKind);
             out.addProperty("started", true);
+            return out;
+        }
+
+        /** Raise graves for everyone dead who has none. */
+        if (action.equals("graves")) {
+            JsonArray made = new JsonArray();
+            for (JsonObject rec : roster(ctx)) {
+                if (rec.has("alive") && rec.get("alive").getAsBoolean()) continue;
+                if (rec.has("grave") && rec.get("grave").isJsonObject()) continue;
+                NpcData d = ctx.plugin().npcManager().get(gets(rec, "id", ""));
+                if (d == null) continue;
+                try {
+                    grave(ctx, rec, d);
+                    save(ctx, rec);
+                    made.add(gets(rec, "name", "?") + " at " + (rec.has("grave") ? rec.getAsJsonObject("grave").toString() : "?"));
+                } catch (Throwable t) {
+                    made.add(gets(rec, "name", "?") + ": " + String.valueOf(t.getMessage()));
+                }
+            }
+            JsonObject out = new JsonObject();
+            out.add("graves", made);
             return out;
         }
 
