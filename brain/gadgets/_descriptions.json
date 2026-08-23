@@ -22,5 +22,5 @@
  "reclaim": "Any Ancient restores the dead by walking to a memorial head; the restored are marked living in the ledger so the map shows them back.",
  "needs": "The eight drives per NPC: fatigue, purpose and curiosity accumulate; safety, shelter, belonging and wealth are read from the world each beat. Writes them to the ledger.",
  "farm": "A field worked forever by a farmer who stays with it - a crop only ripens in a chunk somebody is standing in.",
- "lineage": "An Ancient decides when to call kin into its line, and what that kin is for. Gated on banked food; role chosen by what the line lacks. action:why explains every line."
+ "people": "Every NPC is a player: hp, hunger, inventory, abilities, skills earned by doing, three needs, jobs chosen by skill, dynamic trade."
 }

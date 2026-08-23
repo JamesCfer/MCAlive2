@@ -1,0 +1,1768 @@
+package celestia.gadgets;
+
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import dev.celestia.mcalive2.gadget.GadgetContract;
+import dev.celestia.mcalive2.gadget.GadgetContext;
+import dev.celestia.mcalive2.npc.NpcData;
+import dev.celestia.mcalive2.npc.NpcManager;
+import org.bukkit.Bukkit;
+import org.bukkit.HeightMap;
+import org.bukkit.Location;
+import org.bukkit.Material;
+import org.bukkit.World;
+import org.bukkit.block.Block;
+import org.bukkit.block.data.Ageable;
+import org.bukkit.entity.Entity;
+import org.bukkit.entity.EntityType;
+import org.bukkit.entity.LivingEntity;
+import org.bukkit.inventory.EntityEquipment;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.Recipe;
+import org.bukkit.inventory.RecipeChoice;
+import org.bukkit.inventory.ShapedRecipe;
+import org.bukkit.inventory.ShapelessRecipe;
+import org.bukkit.inventory.meta.Damageable;
+import org.bukkit.inventory.meta.ItemMeta;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * People. Every NPC is a player: 20 hp, 20 hunger, a 36-stack inventory, real tools with
+ * real durability, vanilla recipes and vanilla drop rules, and feet. They start at world
+ * spawn with nothing and get everything else the way a player does.
+ *
+ * What makes one person different from another:
+ *
+ *   ABILITIES  six scores, -3..+3, fixed for life. str dex con wis int cha.
+ *   SKILLS     ten, start at 0, earned by doing. Minutes spent at a skill accumulate and
+ *              point n arrives at 2^n - 1 total minutes (1, 3, 7, 15, 31 ...). Each skill
+ *              leans on one ability. Skill and ability together weight both WHICH job a
+ *              person picks and HOW FAST they do it.
+ *   NEEDS      three. Full hp, full hunger, and one that is theirs alone - to explore, to
+ *              be around people, to own things, to make things. Happiness is simply how
+ *              full the three are.
+ *
+ * A need that is low has several answers and the person picks among them by what they
+ * are good at: the hungry can hunt, fish, farm, or trade for food. Trading is dynamic -
+ * you value an item by how much it serves your own unmet needs, and a deal happens only
+ * when both sides gain by their own reckoning. Nothing worth offering means no deal, and
+ * the person goes and solves it another way.
+ *
+ * All state lives in the ledger record. The only static is the timer. Redefine this
+ * gadget freely - nobody loses anything, and a half-done job resumes where it was.
+ *
+ * Jobs are meant to be added over time. Each is one static method that advances a small
+ * persisted state machine by one beat and returns true when finished.
+ */
+public class People implements GadgetContract {
+
+    // ------------------------------------------------------------------ tables
+
+    private static final String[] SKILLS = {
+        "farming", "hunting", "mining", "building", "fishing",
+        "swimming", "exploring", "treechopping", "crafting", "trading"
+    };
+
+    /** Which ability each skill leans on. Change freely. */
+    private static final Map<String, String> SKILL_STAT = new HashMap<String, String>();
+    static {
+        SKILL_STAT.put("farming", "wis");
+        SKILL_STAT.put("hunting", "dex");
+        SKILL_STAT.put("mining", "str");
+        SKILL_STAT.put("building", "con");
+        SKILL_STAT.put("fishing", "wis");
+        SKILL_STAT.put("swimming", "con");
+        SKILL_STAT.put("exploring", "wis");
+        SKILL_STAT.put("treechopping", "str");
+        SKILL_STAT.put("crafting", "int");
+        SKILL_STAT.put("trading", "cha");
+    }
+
+    private static final int BEAT_TICKS = 20;              // one beat = one second
+    private static final double BEAT_MIN = BEAT_TICKS / 1200.0;
+    private static final int MAX_STACKS = 36;
+
+    // hunger, in the units a player would recognise
+    private static final double EXHAUST_IDLE = 1.0 / 90.0;     // a point every 90 s standing
+    private static final double EXHAUST_WORK = 1.0 / 40.0;     // a point every 40 s working
+    private static final int EAT_AT = 13;
+
+    private static Integer TASK_ID = null;
+    private static int beats = 0;
+    private static long seed = 4242L;
+
+    private static int rand(int n) {
+        seed = seed * 6364136223846793005L + 1442695040888963407L;
+        int v = (int) ((seed >>> 33) % n);
+        return v < 0 ? -v : v;
+    }
+
+    // ------------------------------------------------------------------ timer plumbing
+
+    private static int generation(GadgetContext ctx, boolean bump) {
+        World w = ctx.server().getWorlds().get(0);
+        org.bukkit.persistence.PersistentDataContainer pdc = w.getPersistentDataContainer();
+        org.bukkit.NamespacedKey k = ctx.key("people-generation");
+        Integer cur = pdc.get(k, org.bukkit.persistence.PersistentDataType.INTEGER);
+        int g = cur == null ? 0 : cur.intValue();
+        if (bump) { g = g + 1; pdc.set(k, org.bukkit.persistence.PersistentDataType.INTEGER, Integer.valueOf(g)); }
+        return g;
+    }
+
+    private static int reap(GadgetContext ctx) {
+        int killed = 0;
+        for (org.bukkit.scheduler.BukkitTask t : ctx.server().getScheduler().getPendingTasks()) {
+            if (t.getOwner() != ctx.plugin()) continue;
+            Object inner = runnableOf(t);
+            if (inner != null && inner.getClass().getName().contains("People")) { t.cancel(); killed++; }
+        }
+        return killed;
+    }
+
+    private static Object runnableOf(Object task) {
+        Class<?> c = task.getClass();
+        while (c != null) {
+            java.lang.reflect.Field[] fs = c.getDeclaredFields();
+            for (int i = 0; i < fs.length; i++) {
+                if (!Runnable.class.isAssignableFrom(fs[i].getType())) continue;
+                try {
+                    fs[i].setAccessible(true);
+                    Object v = fs[i].get(task);
+                    if (v != null && v != task) return v;
+                } catch (Throwable ignored) { }
+            }
+            c = c.getSuperclass();
+        }
+        return null;
+    }
+
+    // ------------------------------------------------------------------ ledger
+
+    private static List<JsonObject> roster(GadgetContext ctx) throws Exception {
+        JsonObject q = new JsonObject();
+        q.addProperty("collection", "npcs");
+        JsonArray recs = ctx.invoke("ledger_query", q).getAsJsonArray("records");
+        List<JsonObject> out = new ArrayList<JsonObject>();
+        for (JsonElement e : recs) out.add(e.getAsJsonObject());
+        return out;
+    }
+
+    private static void save(GadgetContext ctx, JsonObject rec) throws Exception {
+        JsonObject p = new JsonObject();
+        p.addProperty("collection", "npcs");
+        p.add("record", rec);
+        ctx.invoke("ledger_put", p);
+    }
+
+    private static int geti(JsonObject o, String k, int dflt) {
+        return o != null && o.has(k) && !o.get(k).isJsonNull() ? o.get(k).getAsInt() : dflt;
+    }
+
+    private static double getd(JsonObject o, String k, double dflt) {
+        return o != null && o.has(k) && !o.get(k).isJsonNull() ? o.get(k).getAsDouble() : dflt;
+    }
+
+    private static String gets(JsonObject o, String k, String dflt) {
+        return o != null && o.has(k) && !o.get(k).isJsonNull() ? o.get(k).getAsString() : dflt;
+    }
+
+    private static JsonObject obj(JsonObject o, String k) {
+        if (!o.has(k) || !o.get(k).isJsonObject()) o.add(k, new JsonObject());
+        return o.getAsJsonObject(k);
+    }
+
+    private static JsonArray arr(JsonObject o, String k) {
+        if (!o.has(k) || !o.get(k).isJsonArray()) o.add(k, new JsonArray());
+        return o.getAsJsonArray(k);
+    }
+
+    /** Fill in anything a record is missing, so a hand-written roster entry is enough. */
+    private static void normalise(JsonObject rec) {
+        JsonObject ab = obj(rec, "abilities");
+        for (String s : new String[]{ "str", "dex", "con", "wis", "int", "cha" }) {
+            if (!ab.has(s)) ab.addProperty(s, 0);
+        }
+        JsonObject sk = obj(rec, "skills");
+        for (int i = 0; i < SKILLS.length; i++) {
+            JsonObject s = obj(sk, SKILLS[i]);
+            if (!s.has("minutes")) s.addProperty("minutes", 0.0);
+            if (!s.has("points")) s.addProperty("points", pointsFor(getd(s, "minutes", 0)));
+        }
+        if (!rec.has("hunger")) rec.addProperty("hunger", 20);
+        if (!rec.has("exhaustion")) rec.addProperty("exhaustion", 0.0);
+        JsonObject need = obj(rec, "need");
+        if (!need.has("kind")) need.addProperty("kind", "explore");
+        if (!need.has("value")) need.addProperty("value", 10);
+        arr(rec, "inventory");
+        if (!rec.has("alive")) rec.addProperty("alive", true);
+    }
+
+    private static int ability(JsonObject rec, String name) {
+        return geti(obj(rec, "abilities"), name, 0);
+    }
+
+    // ------------------------------------------------------------------ skills
+
+    /** Point n at 2^n - 1 minutes: 1, 3, 7, 15, 31 ... */
+    private static int pointsFor(double minutes) {
+        int n = 0;
+        while (Math.pow(2, n + 1) - 1 <= minutes) n++;
+        return n;
+    }
+
+    private static int skill(JsonObject rec, String name) {
+        return geti(obj(obj(rec, "skills"), name), "points", 0);
+    }
+
+    private static void practise(JsonObject rec, String name, double minutes) {
+        JsonObject s = obj(obj(rec, "skills"), name);
+        double m = getd(s, "minutes", 0) + minutes;
+        s.addProperty("minutes", m);
+        s.addProperty("points", pointsFor(m));
+    }
+
+    /** Skill plus the ability it leans on: the number that weights choice and speed. */
+    private static int aptitude(JsonObject rec, String skillName) {
+        return skill(rec, skillName) + ability(rec, SKILL_STAT.get(skillName));
+    }
+
+    /** Beats between actions for a job, shortened by aptitude. */
+    private static int pace(JsonObject rec, String skillName, int baseBeats) {
+        double f = 1.0 + 0.15 * Math.max(-4, aptitude(rec, skillName));
+        return Math.max(1, (int) Math.round(baseBeats / f));
+    }
+
+    // ------------------------------------------------------------------ inventory
+
+    private static int count(JsonObject rec, Material m) {
+        int n = 0;
+        for (JsonElement e : arr(rec, "inventory")) {
+            JsonObject s = e.getAsJsonObject();
+            if (m.name().equals(gets(s, "item", ""))) n += geti(s, "count", 0);
+        }
+        return n;
+    }
+
+    private static int stacksUsed(JsonObject rec) {
+        return arr(rec, "inventory").size();
+    }
+
+    /** Add like a player picking up: merge into stacks, open new ones while there is room. Returns what would not fit. */
+    private static int give(JsonObject rec, Material m, int n) {
+        if (n <= 0) return 0;
+        JsonArray inv = arr(rec, "inventory");
+        int max = Math.max(1, m.getMaxStackSize());
+        if (max > 1) {
+            for (JsonElement e : inv) {
+                JsonObject s = e.getAsJsonObject();
+                if (!m.name().equals(gets(s, "item", ""))) continue;
+                int c = geti(s, "count", 0);
+                int room = max - c;
+                if (room <= 0) continue;
+                int take = Math.min(room, n);
+                s.addProperty("count", c + take);
+                n -= take;
+                if (n == 0) return 0;
+            }
+        }
+        while (n > 0 && inv.size() < MAX_STACKS) {
+            JsonObject s = new JsonObject();
+            s.addProperty("item", m.name());
+            int take = Math.min(max, n);
+            s.addProperty("count", take);
+            if (m.getMaxDurability() > 0) s.addProperty("damage", 0);
+            inv.add(s);
+            n -= take;
+        }
+        return n;
+    }
+
+    private static boolean take(JsonObject rec, Material m, int n) {
+        if (count(rec, m) < n) return false;
+        JsonArray inv = arr(rec, "inventory");
+        for (int i = inv.size() - 1; i >= 0 && n > 0; i--) {
+            JsonObject s = inv.get(i).getAsJsonObject();
+            if (!m.name().equals(gets(s, "item", ""))) continue;
+            int c = geti(s, "count", 0);
+            int t = Math.min(c, n);
+            n -= t;
+            if (c - t <= 0) inv.remove(i); else s.addProperty("count", c - t);
+        }
+        return true;
+    }
+
+    private static boolean isFull(JsonObject rec) {
+        return stacksUsed(rec) >= MAX_STACKS;
+    }
+
+    /** The best tool of a kind in the bag (AXE, PICKAXE, HOE, SWORD, ROD), or null. */
+    private static JsonObject bestTool(JsonObject rec, String kind) {
+        JsonObject best = null;
+        int bestRank = -1;
+        for (JsonElement e : arr(rec, "inventory")) {
+            JsonObject s = e.getAsJsonObject();
+            String n = gets(s, "item", "");
+            if (!n.endsWith("_" + kind) && !(kind.equals("ROD") && n.equals("FISHING_ROD"))) continue;
+            int rank = n.startsWith("NETHERITE") ? 5 : n.startsWith("DIAMOND") ? 4 : n.startsWith("IRON") ? 3
+                    : n.startsWith("STONE") ? 2 : n.startsWith("GOLDEN") ? 1 : n.startsWith("WOODEN") ? 1 : 1;
+            if (rank > bestRank) { bestRank = rank; best = s; }
+        }
+        return best;
+    }
+
+    private static ItemStack stackOf(JsonObject s) {
+        if (s == null) return null;
+        Material m = Material.matchMaterial(gets(s, "item", "AIR"));
+        if (m == null) return null;
+        ItemStack it = new ItemStack(m, 1);
+        if (s.has("damage")) {
+            ItemMeta meta = it.getItemMeta();
+            if (meta instanceof Damageable) {
+                ((Damageable) meta).setDamage(geti(s, "damage", 0));
+                it.setItemMeta(meta);
+            }
+        }
+        return it;
+    }
+
+    /** One use of a tool. Returns true if it just broke (and removes it). */
+    private static boolean wear(JsonObject rec, JsonObject tool) {
+        if (tool == null) return false;
+        Material m = Material.matchMaterial(gets(tool, "item", "AIR"));
+        if (m == null || m.getMaxDurability() <= 0) return false;
+        int d = geti(tool, "damage", 0) + 1;
+        if (d >= m.getMaxDurability()) {
+            arr(rec, "inventory").remove(tool);
+            return true;
+        }
+        tool.addProperty("damage", d);
+        return false;
+    }
+
+    private static void hold(Entity e, JsonObject tool) {
+        if (!(e instanceof LivingEntity)) return;
+        EntityEquipment eq = ((LivingEntity) e).getEquipment();
+        if (eq == null) return;
+        ItemStack it = tool == null ? new ItemStack(Material.AIR) : stackOf(tool);
+        eq.setItemInMainHand(it == null ? new ItemStack(Material.AIR) : it);
+    }
+
+    // ------------------------------------------------------------------ food and value
+
+    private static int nutrition(Material m) {
+        switch (m) {
+            case COOKED_BEEF: case COOKED_PORKCHOP: return 8;
+            case COOKED_MUTTON: case COOKED_SALMON: return 6;
+            case COOKED_CHICKEN: case COOKED_COD: case COOKED_RABBIT: return 6;
+            case BREAD: case BAKED_POTATO: return 5;
+            case APPLE: case CARROT: case MELON_SLICE: return 4;
+            case BEEF: case PORKCHOP: case MUTTON: return 3;
+            case CHICKEN: case RABBIT: case COD: case SALMON: return 2;
+            case SWEET_BERRIES: case BEETROOT: case DRIED_KELP: return 2;
+            case POTATO: return 1;
+            default: return 0;
+        }
+    }
+
+    private static int foodInBag(JsonObject rec) {
+        int n = 0;
+        for (JsonElement e : arr(rec, "inventory")) {
+            JsonObject s = e.getAsJsonObject();
+            Material m = Material.matchMaterial(gets(s, "item", ""));
+            if (m != null) n += nutrition(m) * geti(s, "count", 0);
+        }
+        return n;
+    }
+
+    /** A flat sense of what things are worth, before anyone's needs colour it. */
+    private static double baseValue(Material m) {
+        String n = m.name();
+        if (n.endsWith("_PICKAXE") || n.endsWith("_AXE") || n.endsWith("_HOE") || n.endsWith("_SWORD") || n.endsWith("_SHOVEL")) {
+            return n.startsWith("WOODEN") ? 6 : n.startsWith("STONE") ? 10 : 20;
+        }
+        if (n.equals("FISHING_ROD")) return 8;
+        if (n.endsWith("_INGOT")) return 8;
+        if (n.startsWith("RAW_")) return 5;
+        if (n.equals("COAL")) return 3;
+        if (n.endsWith("_LOG")) return 1.5;
+        if (n.endsWith("_PLANKS")) return 0.5;
+        if (n.equals("STICK")) return 0.25;
+        if (n.equals("COBBLESTONE")) return 0.2;
+        if (n.equals("WHEAT_SEEDS")) return 0.5;
+        if (n.equals("WHEAT")) return 1.5;
+        int food = nutrition(m);
+        if (food > 0) return food * 0.6;
+        return 1.0;
+    }
+
+    /**
+     * What one unit of this is worth TO THIS PERSON right now. Food climbs steeply with
+     * hunger; a tool is worth far more to someone who has none of that kind; anything
+     * is worth a little more to someone who wants to own things.
+     */
+    private static double valueTo(JsonObject rec, Material m) {
+        double v = baseValue(m);
+        int food = nutrition(m);
+        if (food > 0) {
+            int hunger = geti(rec, "hunger", 20);
+            v *= 1.0 + Math.pow(Math.max(0, 20 - hunger), 2) / 60.0;
+            if (foodInBag(rec) == 0) v *= 1.5;
+        }
+        String n = m.name();
+        for (String kind : new String[]{ "PICKAXE", "AXE", "HOE", "SWORD" }) {
+            if (n.endsWith("_" + kind) && bestTool(rec, kind) == null) v *= 2.5;
+        }
+        if (n.equals("FISHING_ROD") && bestTool(rec, "ROD") == null) v *= 2.5;
+        if ("wealth".equals(gets(obj(rec, "need"), "kind", ""))) v *= 1.2;
+        return v;
+    }
+
+    private static double wealthOf(JsonObject rec) {
+        double v = 0;
+        for (JsonElement e : arr(rec, "inventory")) {
+            JsonObject s = e.getAsJsonObject();
+            Material m = Material.matchMaterial(gets(s, "item", ""));
+            if (m != null) v += baseValue(m) * geti(s, "count", 0);
+        }
+        return v;
+    }
+
+    // ------------------------------------------------------------------ needs
+
+    private static double hp(Entity e) {
+        return e instanceof LivingEntity ? ((LivingEntity) e).getHealth() : 20;
+    }
+
+    private static int thirdNeed(JsonObject rec) {
+        JsonObject need = obj(rec, "need");
+        if ("wealth".equals(gets(need, "kind", ""))) {
+            int v = (int) Math.min(20, Math.round(wealthOf(rec) / 8.0));
+            need.addProperty("value", v);
+            return v;
+        }
+        return geti(need, "value", 10);
+    }
+
+    private static void feedNeed(JsonObject rec, String kind, double amount) {
+        JsonObject need = obj(rec, "need");
+        if (!kind.equals(gets(need, "kind", ""))) return;
+        need.addProperty("value", Math.max(0, Math.min(20, getd(need, "value", 10) + amount)));
+    }
+
+    private static int happiness(JsonObject rec, Entity e) {
+        double total = hp(e) + geti(rec, "hunger", 20) + thirdNeed(rec);
+        return (int) Math.round(total / 60.0 * 100.0);
+    }
+
+    // ------------------------------------------------------------------ walking
+
+    private static JsonObject walkStatus(GadgetContext ctx, String id) throws Exception {
+        JsonObject a = new JsonObject();
+        a.addProperty("action", "status");
+        a.addProperty("npcId", id);
+        return ctx.invoke("gadget:navigate", a);
+    }
+
+    private static boolean walking(GadgetContext ctx, String id) {
+        try { return walkStatus(ctx, id).get("walking").getAsBoolean(); } catch (Throwable t) { return false; }
+    }
+
+    /** Start walking toward a spot, in a leg of at most 48 blocks so the pathfinder stays cheap. */
+    private static boolean walk(GadgetContext ctx, Entity e, String id, int x, int y, int z, boolean underground) {
+        Location at = e.getLocation();
+        double dx = x - at.getX(), dz = z - at.getZ();
+        double dist = Math.sqrt(dx * dx + dz * dz);
+        int tx = x, ty = y, tz = z;
+        if (dist > 48) {
+            tx = (int) Math.round(at.getX() + dx / dist * 48);
+            tz = (int) Math.round(at.getZ() + dz / dist * 48);
+            ty = e.getWorld().getHighestBlockYAt(tx, tz, HeightMap.OCEAN_FLOOR) + 1;
+        }
+        JsonObject a = new JsonObject();
+        a.addProperty("npcId", id);
+        JsonObject to = new JsonObject();
+        to.addProperty("x", tx);
+        to.addProperty("y", ty);
+        to.addProperty("z", tz);
+        a.add("to", to);
+        a.addProperty("maxNodes", 6000);
+        if (underground) a.addProperty("underground", true);
+        try {
+            JsonObject r = ctx.invoke("gadget:navigate", a);
+            return r.has("started") && r.get("started").getAsBoolean();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static double flatDist(Entity e, int x, int z) {
+        Location at = e.getLocation();
+        return Math.sqrt(Math.pow(at.getX() - (x + 0.5), 2) + Math.pow(at.getZ() - (z + 0.5), 2));
+    }
+
+    /**
+     * Shared "get there" phase for every job. job.target = {x,y,z}. Returns
+     * 1 when within reach, 0 while still travelling, -1 when it has given up.
+     */
+    private static int travel(GadgetContext ctx, Entity e, String id, JsonObject job, double reach, boolean underground) {
+        JsonObject t = obj(job, "target");
+        int x = geti(t, "x", 0), y = geti(t, "y", 64), z = geti(t, "z", 0);
+        if (flatDist(e, x, z) <= reach && Math.abs(e.getLocation().getY() - y) <= 3) return 1;
+        if (walking(ctx, id)) return 0;
+        int tries = geti(job, "legs", 0);
+        if (tries >= 12) return -1;
+        job.addProperty("legs", tries + 1);
+        // did the last leg get us anywhere? if not twice running, give up
+        double last = getd(job, "lastDist", -1);
+        double now = flatDist(e, x, z);
+        if (last >= 0 && now > last - 2) {
+            int stuck = geti(job, "stuck", 0) + 1;
+            job.addProperty("stuck", stuck);
+            if (stuck >= 3) return -1;
+        } else {
+            job.addProperty("stuck", 0);
+        }
+        job.addProperty("lastDist", now);
+        return walk(ctx, e, id, x, y, z, underground) ? 0 : -1;
+    }
+
+    private static void setTarget(JsonObject job, int x, int y, int z) {
+        JsonObject t = new JsonObject();
+        t.addProperty("x", x);
+        t.addProperty("y", y);
+        t.addProperty("z", z);
+        job.add("target", t);
+        job.remove("legs");
+        job.remove("stuck");
+        job.remove("lastDist");
+    }
+
+    // ------------------------------------------------------------------ world helpers
+
+    private static Material meatOf(EntityType t) {
+        switch (t) {
+            case COW: return Material.BEEF;
+            case PIG: return Material.PORKCHOP;
+            case SHEEP: return Material.MUTTON;
+            case CHICKEN: return Material.CHICKEN;
+            case RABBIT: return Material.RABBIT;
+            default: return null;
+        }
+    }
+
+    private static boolean isLog(Material m) {
+        return m.name().endsWith("_LOG") && !m.name().startsWith("STRIPPED");
+    }
+
+    private static boolean isStoneLike(Material m) {
+        return m == Material.STONE || m == Material.COBBLESTONE || m == Material.ANDESITE
+                || m == Material.GRANITE || m == Material.DIORITE || m == Material.DEEPSLATE
+                || m.name().endsWith("_ORE");
+    }
+
+    /** Nearest block matching a test within r of the entity, searching surface-ish heights. */
+    private static Block nearestBlock(Entity e, int r, int dyDown, int dyUp, BlockTest test) {
+        World w = e.getWorld();
+        Location at = e.getLocation();
+        int cx = at.getBlockX(), cy = at.getBlockY(), cz = at.getBlockZ();
+        Block best = null;
+        double bestD = Double.MAX_VALUE;
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dz = -r; dz <= r; dz++) {
+                for (int dy = -dyDown; dy <= dyUp; dy++) {
+                    Block b = w.getBlockAt(cx + dx, cy + dy, cz + dz);
+                    if (!test.ok(b)) continue;
+                    double d = dx * dx + dz * dz + dy * dy * 0.5;
+                    if (d < bestD) { bestD = d; best = b; }
+                }
+            }
+        }
+        return best;
+    }
+
+    private interface BlockTest { boolean ok(Block b); }
+
+    /** Break a block the way a player with this tool would, and pocket the drops. */
+    private static void breakBlock(JsonObject rec, Block b, JsonObject tool) {
+        ItemStack t = stackOf(tool);
+        Collection<ItemStack> drops = t == null ? b.getDrops() : b.getDrops(t);
+        for (ItemStack d : drops) give(rec, d.getType(), d.getAmount());
+        b.getWorld().playSound(b.getLocation(), org.bukkit.Sound.BLOCK_WOOD_BREAK, 0.6f, 1.0f);
+        b.setType(Material.AIR);
+        wear(rec, tool);
+    }
+
+    // ------------------------------------------------------------------ crafting
+
+    private static List<RecipeChoice> choicesOf(Recipe r) {
+        List<RecipeChoice> out = new ArrayList<RecipeChoice>();
+        if (r instanceof ShapedRecipe) {
+            ShapedRecipe sr = (ShapedRecipe) r;
+            Map<Character, RecipeChoice> map = sr.getChoiceMap();
+            String[] shape = sr.getShape();
+            for (int i = 0; i < shape.length; i++) {
+                for (int j = 0; j < shape[i].length(); j++) {
+                    RecipeChoice ch = map.get(Character.valueOf(shape[i].charAt(j)));
+                    if (ch != null) out.add(ch);
+                }
+            }
+            return out;
+        }
+        if (r instanceof ShapelessRecipe) {
+            List<RecipeChoice> l = ((ShapelessRecipe) r).getChoiceList();
+            for (int i = 0; i < l.size(); i++) if (l.get(i) != null) out.add(l.get(i));
+            return out;
+        }
+        return null;
+    }
+
+    private static boolean needsTable(Recipe r) {
+        if (r instanceof ShapedRecipe) {
+            String[] shape = ((ShapedRecipe) r).getShape();
+            int w = 0;
+            for (int i = 0; i < shape.length; i++) w = Math.max(w, shape[i].length());
+            return w > 2 || shape.length > 2;
+        }
+        if (r instanceof ShapelessRecipe) return ((ShapelessRecipe) r).getChoiceList().size() > 4;
+        return true;
+    }
+
+    /**
+     * Which material to satisfy a recipe slot with. What is in the bag first; failing that,
+     * whichever alternative the bag could MAKE - a table wants "any planks", and someone
+     * holding birch logs should reach for birch planks, not go looking for an oak tree.
+     */
+    private static Material pick(RecipeChoice ch, JsonObject rec) {
+        if (ch instanceof RecipeChoice.MaterialChoice) {
+            List<Material> ms = ((RecipeChoice.MaterialChoice) ch).getChoices();
+            for (Material m : ms) if (count(rec, m) > 0) return m;
+            for (Material m : ms) {
+                List<Recipe> rs = Bukkit.getRecipesFor(new ItemStack(m));
+                for (Recipe r : rs) {
+                    List<RecipeChoice> needs = choicesOf(r);
+                    if (needs == null) continue;
+                    boolean all = true;
+                    for (RecipeChoice n : needs) {
+                        boolean any = false;
+                        if (n instanceof RecipeChoice.MaterialChoice) {
+                            for (Material x : ((RecipeChoice.MaterialChoice) n).getChoices()) if (count(rec, x) > 0) { any = true; break; }
+                        } else if (n instanceof RecipeChoice.ExactChoice) {
+                            for (ItemStack x : ((RecipeChoice.ExactChoice) n).getChoices()) if (count(rec, x.getType()) > 0) { any = true; break; }
+                        }
+                        if (!any) { all = false; break; }
+                    }
+                    if (all) return m;
+                }
+            }
+            return ms.isEmpty() ? null : ms.get(0);
+        }
+        if (ch instanceof RecipeChoice.ExactChoice) {
+            List<ItemStack> ss = ((RecipeChoice.ExactChoice) ch).getChoices();
+            return ss.isEmpty() ? null : ss.get(0).getType();
+        }
+        return null;
+    }
+
+    /** Materials still missing for the cheapest known recipe of want, or null if no recipe. */
+    private static Map<Material, Integer> missingFor(JsonObject rec, Material want, boolean[] tableOut) {
+        List<Recipe> recipes = Bukkit.getRecipesFor(new ItemStack(want));
+        Map<Material, Integer> bestMissing = null;
+        int bestShort = Integer.MAX_VALUE;
+        for (Recipe r : recipes) {
+            List<RecipeChoice> needs = choicesOf(r);
+            if (needs == null) continue;
+            Map<Material, Integer> req = new HashMap<Material, Integer>();
+            for (RecipeChoice ch : needs) {
+                Material m = pick(ch, rec);
+                if (m == null) { req = null; break; }
+                Integer p = req.get(m);
+                req.put(m, (p == null ? 0 : p.intValue()) + 1);
+            }
+            if (req == null) continue;
+            Map<Material, Integer> missing = new HashMap<Material, Integer>();
+            int shortBy = 0;
+            for (Map.Entry<Material, Integer> e : req.entrySet()) {
+                int have = count(rec, e.getKey());
+                if (have < e.getValue().intValue()) {
+                    missing.put(e.getKey(), e.getValue().intValue() - have);
+                    shortBy += e.getValue().intValue() - have;
+                }
+            }
+            if (shortBy < bestShort) {
+                bestShort = shortBy;
+                bestMissing = missing;
+                tableOut[0] = needsTable(r);
+            }
+        }
+        return bestMissing;
+    }
+
+    /** Actually make one of want from the bag. Assumes nothing is missing. */
+    private static boolean craftNow(JsonObject rec, Material want) {
+        List<Recipe> recipes = Bukkit.getRecipesFor(new ItemStack(want));
+        for (Recipe r : recipes) {
+            List<RecipeChoice> needs = choicesOf(r);
+            if (needs == null) continue;
+            Map<Material, Integer> req = new HashMap<Material, Integer>();
+            boolean ok = true;
+            for (RecipeChoice ch : needs) {
+                Material m = pick(ch, rec);
+                if (m == null) { ok = false; break; }
+                Integer p = req.get(m);
+                req.put(m, (p == null ? 0 : p.intValue()) + 1);
+            }
+            if (!ok) continue;
+            for (Map.Entry<Material, Integer> e : req.entrySet()) {
+                if (count(rec, e.getKey()) < e.getValue().intValue()) { ok = false; break; }
+            }
+            if (!ok) continue;
+            for (Map.Entry<Material, Integer> e : req.entrySet()) take(rec, e.getKey(), e.getValue().intValue());
+            ItemStack res = r.getResult();
+            give(rec, res.getType(), res.getAmount());
+            return true;
+        }
+        return false;
+    }
+
+    // ------------------------------------------------------------------ jobs
+
+    private static final String[] GATHER_JOBS = { "hunt", "fish", "farm", "chop", "mine", "explore" };
+
+    private static String skillOf(String job) {
+        if (job.equals("hunt")) return "hunting";
+        if (job.equals("fish")) return "fishing";
+        if (job.equals("farm")) return "farming";
+        if (job.equals("chop")) return "treechopping";
+        if (job.equals("mine")) return "mining";
+        if (job.equals("explore")) return "exploring";
+        if (job.equals("craft")) return "crafting";
+        if (job.equals("trade")) return "trading";
+        if (job.equals("build")) return "building";
+        return null;
+    }
+
+    /** Can this person even attempt the job right now? */
+    private static boolean possible(JsonObject rec, String job, List<JsonObject> everyone) {
+        if (isFull(rec) && (job.equals("hunt") || job.equals("chop") || job.equals("mine") || job.equals("fish"))) return false;
+        if (job.equals("fish")) return bestTool(rec, "ROD") != null;
+        if (job.equals("trade")) {
+            if (everyone.size() < 2 || arr(rec, "inventory").size() == 0) return false;
+            long until = (long) getd(rec, "noTradeUntil", 0);
+            return System.currentTimeMillis() > until;
+        }
+        return true;
+    }
+
+    /** How much a job serves a need, 0..1. */
+    private static double serves(String job, String need, JsonObject rec) {
+        if (need.equals("hunger")) {
+            if (job.equals("hunt")) return 1.0;
+            if (job.equals("fish")) return 1.0;
+            if (job.equals("farm")) return bestTool(rec, "HOE") != null || count(rec, Material.WHEAT_SEEDS) > 0 ? 0.8 : 0.5;
+            if (job.equals("trade")) return 0.9;
+            return 0;
+        }
+        if (need.equals("hp")) return job.equals("rest") ? 1.0 : 0;
+        String kind = gets(obj(rec, "need"), "kind", "explore");
+        if (kind.equals("explore")) return job.equals("explore") ? 1.0 : 0;
+        if (kind.equals("social")) return job.equals("visit") ? 1.0 : (job.equals("trade") ? 0.6 : 0);
+        if (kind.equals("wealth")) {
+            if (job.equals("mine")) return 1.0;
+            if (job.equals("chop")) return 0.7;
+            if (job.equals("hunt")) return 0.5;
+            if (job.equals("trade")) return 0.6;
+            return 0;
+        }
+        if (kind.equals("craft")) return job.equals("craft") ? 1.0 : (job.equals("chop") ? 0.4 : 0);
+        return 0;
+    }
+
+    private static double aptitudeWeight(JsonObject rec, String job) {
+        String s = skillOf(job);
+        if (s == null) return 1.0;
+        return Math.max(0.3, 1.0 + 0.25 * skill(rec, s) + 0.15 * ability(rec, SKILL_STAT.get(s)));
+    }
+
+    /**
+     * Pick what to do next. Each need pulls with the square of its shortfall, each job
+     * answers some needs and not others, and skill makes its own jobs louder. When
+     * nothing is short, people do what they are good at, which is how Bob ends up
+     * mining on a full stomach.
+     */
+    private static String choose(JsonObject rec, Entity e, List<JsonObject> everyone) {
+        double hungerGap = 20 - geti(rec, "hunger", 20);
+        double hpGap = 20 - hp(e);
+        double thirdGap = 20 - thirdNeed(rec);
+        String[] jobs = { "hunt", "fish", "farm", "chop", "mine", "explore", "craft", "trade", "visit", "rest" };
+        String[] needs = { "hunger", "hp", "third" };
+        double[] gaps = { hungerGap, hpGap, thirdGap };
+        List<String> ids = new ArrayList<String>();
+        List<Double> scores = new ArrayList<Double>();
+        boolean anyShort = hungerGap >= 4 || hpGap >= 6 || thirdGap >= 6;
+        for (String job : jobs) {
+            if (!possible(rec, job, everyone)) continue;
+            double s = 0;
+            for (int i = 0; i < needs.length; i++) {
+                if (gaps[i] <= 0) continue;
+                s += gaps[i] * gaps[i] * serves(job, needs[i], rec);
+            }
+            if (!anyShort) {
+                // idle hands: weight purely by what they like, among the gathering jobs
+                boolean gather = false;
+                for (String g : GATHER_JOBS) if (g.equals(job)) gather = true;
+                if (!gather) continue;
+                s = 10;
+            }
+            s *= aptitudeWeight(rec, job);
+            if (s <= 0) continue;
+            ids.add(job);
+            scores.add(Double.valueOf(s));
+        }
+        if (ids.isEmpty()) return "rest";
+        // weighted pick among the top three
+        List<Integer> order = new ArrayList<Integer>();
+        for (int i = 0; i < ids.size(); i++) order.add(Integer.valueOf(i));
+        java.util.Collections.sort(order, new java.util.Comparator<Integer>() {
+            public int compare(Integer a, Integer b) { return Double.compare(scores.get(b), scores.get(a)); }
+        });
+        int pool = Math.min(3, order.size());
+        double sum = 0;
+        for (int i = 0; i < pool; i++) sum += scores.get(order.get(i));
+        double roll = rand(10000) / 10000.0 * sum;
+        for (int i = 0; i < pool; i++) {
+            roll -= scores.get(order.get(i));
+            if (roll <= 0) return ids.get(order.get(i));
+        }
+        return ids.get(order.get(0));
+    }
+
+    private static JsonObject startJob(JsonObject rec, String kind) {
+        JsonObject job = new JsonObject();
+        job.addProperty("kind", kind);
+        job.addProperty("phase", "start");
+        job.addProperty("beats", 0);
+        job.addProperty("wait", 0);
+        rec.add("job", job);
+        return job;
+    }
+
+    /**
+     * End the current job. If it was a step on the way to something else - chopping for
+     * the planks for a table - go back to that, whatever happened here. The caller
+     * decides whether the chain has gone on too long.
+     */
+    private static void finishJob(JsonObject rec, Entity e, String why) {
+        JsonObject job = rec.has("job") && rec.get("job").isJsonObject() ? rec.getAsJsonObject("job") : null;
+        String then = job == null ? null : gets(job, "then", null);
+        String thenWant = job == null ? null : gets(job, "thenWant", null);
+        int depth = job == null ? 0 : geti(job, "depth", 0);
+        rec.remove("job");
+        rec.addProperty("lastJobEnd", why);
+        hold(e, null);
+        if (then != null) {
+            JsonObject next = startJob(rec, then);
+            if (thenWant != null) next.addProperty("want", thenWant);
+            next.addProperty("depth", depth);
+        }
+    }
+
+    // ---- hunt: walk up to an animal and kill it with whatever is in hand
+
+    private static boolean jobHunt(GadgetContext ctx, JsonObject rec, Entity e, String id, JsonObject job) {
+        String phase = gets(job, "phase", "start");
+        if (phase.equals("start")) {
+            int radius = 32 + 6 * Math.max(0, aptitude(rec, "hunting"));
+            LivingEntity best = null;
+            double bestD = Double.MAX_VALUE;
+            for (Entity n : e.getNearbyEntities(radius, 24, radius)) {
+                if (!(n instanceof LivingEntity) || meatOf(n.getType()) == null) continue;
+                double d = n.getLocation().distanceSquared(e.getLocation());
+                if (d < bestD) { bestD = d; best = (LivingEntity) n; }
+            }
+            if (best == null) {
+                // nothing in sight: wander a way off in a random direction and look again
+                int tries = geti(job, "searches", 0);
+                if (tries >= 4) { finishJob(rec, e, "no game"); return true; }
+                job.addProperty("searches", tries + 1);
+                double th = rand(360) * Math.PI / 180;
+                int x = e.getLocation().getBlockX() + (int) (Math.cos(th) * 40);
+                int z = e.getLocation().getBlockZ() + (int) (Math.sin(th) * 40);
+                setTarget(job, x, e.getWorld().getHighestBlockYAt(x, z, HeightMap.OCEAN_FLOOR) + 1, z);
+                job.addProperty("phase", "search");
+                rec.addProperty("activity", "looking for game");
+                return false;
+            }
+            job.addProperty("prey", best.getUniqueId().toString());
+            Location l = best.getLocation();
+            setTarget(job, l.getBlockX(), l.getBlockY(), l.getBlockZ());
+            job.addProperty("phase", "stalk");
+            rec.addProperty("activity", "hunting a " + best.getType().name().toLowerCase());
+            JsonObject sword = bestTool(rec, "SWORD");
+            hold(e, sword != null ? sword : bestTool(rec, "AXE"));
+            return false;
+        }
+        if (phase.equals("search")) {
+            int t = travel(ctx, e, id, job, 3, false);
+            if (t != 0) job.addProperty("phase", "start");
+            return false;
+        }
+        // stalk
+        Entity preyE = null;
+        try { preyE = Bukkit.getEntity(java.util.UUID.fromString(gets(job, "prey", ""))); } catch (Throwable ignored) { }
+        if (!(preyE instanceof LivingEntity) || preyE.isDead()) { job.addProperty("phase", "start"); return false; }
+        LivingEntity prey = (LivingEntity) preyE;
+        Location pl = prey.getLocation();
+        double d = pl.distance(e.getLocation());
+        if (d > 3.0) {
+            // re-aim at where it is now every few beats; animals wander
+            JsonObject t = obj(job, "target");
+            if (Math.abs(geti(t, "x", 0) - pl.getBlockX()) > 3 || Math.abs(geti(t, "z", 0) - pl.getBlockZ()) > 3) {
+                setTarget(job, pl.getBlockX(), pl.getBlockY(), pl.getBlockZ());
+            }
+            int tr = travel(ctx, e, id, job, 2.5, false);
+            if (tr < 0) { finishJob(rec, e, "lost it"); return true; }
+            return false;
+        }
+        // in reach: swing
+        JsonObject weapon = bestTool(rec, "SWORD");
+        if (weapon == null) weapon = bestTool(rec, "AXE");
+        double dmg = 1.0;
+        if (weapon != null) {
+            String n = gets(weapon, "item", "");
+            dmg = n.endsWith("_SWORD") ? (n.startsWith("WOODEN") ? 4 : n.startsWith("STONE") ? 5 : 6)
+                    : (n.startsWith("WOODEN") ? 7 : n.startsWith("STONE") ? 9 : 9);
+        }
+        prey.damage(dmg);
+        wear(rec, weapon);
+        if (prey.isDead() || prey.getHealth() <= 0) {
+            Material meat = meatOf(prey.getType());
+            int n = 1 + rand(prey.getType() == EntityType.CHICKEN || prey.getType() == EntityType.RABBIT ? 1 : 3);
+            give(rec, meat, n);
+            if (prey.getType() == EntityType.COW) give(rec, Material.LEATHER, 1);
+            if (prey.getType() == EntityType.SHEEP) give(rec, Material.WHITE_WOOL, 1);
+            if (prey.getType() == EntityType.CHICKEN) give(rec, Material.FEATHER, 1);
+            // the world's own drops would double up with ours
+            for (Entity it : prey.getNearbyEntities(2, 2, 2)) if (it instanceof org.bukkit.entity.Item) it.remove();
+            finishJob(rec, e, "killed a " + prey.getType().name().toLowerCase());
+            return true;
+        }
+        return false;
+    }
+
+    // ---- chop: nearest log, break it with axe or hands, take the wood
+
+    private static boolean jobChop(GadgetContext ctx, JsonObject rec, Entity e, String id, JsonObject job) {
+        String phase = gets(job, "phase", "start");
+        if (phase.equals("start")) {
+            Block b = nearestBlock(e, 24, 4, 8, new BlockTest() { public boolean ok(Block x) { return isLog(x.getType()); } });
+            if (b == null) {
+                int tries = geti(job, "searches", 0);
+                if (tries >= 3) { finishJob(rec, e, "no trees"); return true; }
+                job.addProperty("searches", tries + 1);
+                double th = rand(360) * Math.PI / 180;
+                int x = e.getLocation().getBlockX() + (int) (Math.cos(th) * 40);
+                int z = e.getLocation().getBlockZ() + (int) (Math.sin(th) * 40);
+                setTarget(job, x, e.getWorld().getHighestBlockYAt(x, z, HeightMap.OCEAN_FLOOR) + 1, z);
+                job.addProperty("phase", "search");
+                rec.addProperty("activity", "looking for trees");
+                return false;
+            }
+            // stand at the foot of the trunk
+            int fy = b.getY();
+            while (fy > e.getWorld().getMinHeight() && isLog(e.getWorld().getBlockAt(b.getX(), fy - 1, b.getZ()).getType())) fy--;
+            setTarget(job, b.getX(), fy, b.getZ());
+            job.addProperty("phase", "go");
+            rec.addProperty("activity", "walking to a tree");
+            return false;
+        }
+        if (phase.equals("search")) {
+            int t = travel(ctx, e, id, job, 3, false);
+            if (t != 0) job.addProperty("phase", "start");
+            return false;
+        }
+        if (phase.equals("go")) {
+            int t = travel(ctx, e, id, job, 2.5, false);
+            if (t < 0) {
+                // could not reach that one; try another, but not forever
+                int fails = geti(job, "fails", 0) + 1;
+                job.addProperty("fails", fails);
+                if (fails >= 3) { finishJob(rec, e, "could not reach a tree"); return true; }
+                job.addProperty("phase", "start");
+                return false;
+            }
+            if (t == 0) return false;
+            job.addProperty("phase", "fell");
+            job.addProperty("wait", 0);
+            rec.addProperty("activity", "felling a tree");
+            hold(e, bestTool(rec, "AXE"));
+            return false;
+        }
+        // fell: one log per pace, from the bottom up, reaching up like a player
+        JsonObject t = obj(job, "target");
+        int x = geti(t, "x", 0), z = geti(t, "z", 0);
+        JsonObject axe = bestTool(rec, "AXE");
+        int need = pace(rec, "treechopping", axe == null ? 4 : 1);
+        int w = geti(job, "wait", 0) + 1;
+        if (w < need) { job.addProperty("wait", w); return false; }
+        job.addProperty("wait", 0);
+        int y = geti(t, "y", 64);
+        Block b = e.getWorld().getBlockAt(x, y, z);
+        if (!isLog(b.getType())) {
+            // trunk is gone - anything left floating above is leaves, which a player leaves too
+            finishJob(rec, e, "felled a tree");
+            return true;
+        }
+        if (isFull(rec)) { finishJob(rec, e, "bag full"); return true; }
+        breakBlock(rec, b, axe);
+        t.addProperty("y", y + 1);
+        if (y + 1 - geti(job, "foot", y) > 6) { finishJob(rec, e, "felled a tree"); return true; }
+        if (!job.has("foot")) job.addProperty("foot", y);
+        return false;
+    }
+
+    // ---- mine: needs a pickaxe; dig into the nearest stone and take what drops
+
+    private static boolean jobMine(GadgetContext ctx, JsonObject rec, Entity e, String id, JsonObject job) {
+        JsonObject pick = bestTool(rec, "PICKAXE");
+        if (pick == null) {
+            // a player would make one first
+            JsonObject j = startJob(rec, "craft");
+            j.addProperty("want", count(rec, Material.COBBLESTONE) >= 3 ? "STONE_PICKAXE" : "WOODEN_PICKAXE");
+            j.addProperty("then", "mine");
+            return false;
+        }
+        String phase = gets(job, "phase", "start");
+        if (phase.equals("start")) {
+            Block b = nearestBlock(e, 16, 6, 3, new BlockTest() {
+                public boolean ok(Block x) {
+                    if (!isStoneLike(x.getType())) return false;
+                    // exposed to air somewhere, so a person could swing at it
+                    return x.getRelative(0, 1, 0).getType().isAir() || x.getRelative(1, 0, 0).getType().isAir()
+                            || x.getRelative(-1, 0, 0).getType().isAir() || x.getRelative(0, 0, 1).getType().isAir()
+                            || x.getRelative(0, 0, -1).getType().isAir();
+                }
+            });
+            if (b == null) {
+                // no rock showing: dig a stair down right here, like a player would
+                Location at = e.getLocation();
+                b = e.getWorld().getBlockAt(at.getBlockX() + 1, at.getBlockY() - 1, at.getBlockZ());
+            }
+            setTarget(job, b.getX(), b.getY() + 1, b.getZ());
+            job.addProperty("phase", "go");
+            rec.addProperty("activity", "walking to the rock");
+            return false;
+        }
+        if (phase.equals("go")) {
+            int t = travel(ctx, e, id, job, 2.5, true);
+            if (t < 0) { finishJob(rec, e, "could not reach the rock"); return true; }
+            if (t == 0) return false;
+            job.addProperty("phase", "dig");
+            job.addProperty("dug", 0);
+            hold(e, pick);
+            rec.addProperty("activity", "mining");
+            return false;
+        }
+        // dig: break the nearest stone within arm's reach each pace, up to a load
+        int need = pace(rec, "mining", 2);
+        int w = geti(job, "wait", 0) + 1;
+        if (w < need) { job.addProperty("wait", w); return false; }
+        job.addProperty("wait", 0);
+        if (isFull(rec)) { finishJob(rec, e, "bag full"); return true; }
+        Block b = nearestBlock(e, 2, 2, 2, new BlockTest() { public boolean ok(Block x) { return isStoneLike(x.getType()); } });
+        if (b == null) { job.addProperty("phase", "start"); return false; }
+        // never dig the block under your own feet into nothing
+        Location at = e.getLocation();
+        if (b.getX() == at.getBlockX() && b.getZ() == at.getBlockZ() && b.getY() < at.getBlockY()) {
+            Block side = e.getWorld().getBlockAt(at.getBlockX() + 1, at.getBlockY(), at.getBlockZ());
+            if (!isStoneLike(side.getType())) { job.addProperty("phase", "start"); return false; }
+            b = side;
+        }
+        breakBlock(rec, b, pick);
+        int dug = geti(job, "dug", 0) + 1;
+        job.addProperty("dug", dug);
+        if (bestTool(rec, "PICKAXE") == null) { finishJob(rec, e, "pickaxe broke"); return true; }
+        if (dug >= 24) { finishJob(rec, e, "brought up a load"); return true; }
+        return false;
+    }
+
+    // ---- fish: stand by water with a rod and wait
+
+    private static boolean jobFish(GadgetContext ctx, JsonObject rec, Entity e, String id, JsonObject job) {
+        JsonObject rod = bestTool(rec, "ROD");
+        if (rod == null) { finishJob(rec, e, "no rod"); return true; }
+        String phase = gets(job, "phase", "start");
+        if (phase.equals("start")) {
+            Block b = nearestBlock(e, 32, 4, 2, new BlockTest() {
+                public boolean ok(Block x) { return x.getType() == Material.WATER && x.getRelative(0, 1, 0).getType().isAir(); }
+            });
+            if (b == null) { finishJob(rec, e, "no water"); return true; }
+            setTarget(job, b.getX(), b.getY() + 1, b.getZ());
+            job.addProperty("phase", "go");
+            rec.addProperty("activity", "walking to the water");
+            return false;
+        }
+        if (phase.equals("go")) {
+            int t = travel(ctx, e, id, job, 3, false);
+            if (t < 0) { finishJob(rec, e, "could not reach water"); return true; }
+            if (t == 0) return false;
+            job.addProperty("phase", "cast");
+            job.addProperty("caught", 0);
+            hold(e, rod);
+            rec.addProperty("activity", "fishing");
+            return false;
+        }
+        // cast: a bite roughly every 20-30 s for a beginner, faster with skill
+        int need = pace(rec, "fishing", 25);
+        int w = geti(job, "wait", 0) + 1;
+        if (w < need) { job.addProperty("wait", w); return false; }
+        job.addProperty("wait", 0);
+        give(rec, rand(3) == 0 ? Material.SALMON : Material.COD, 1);
+        if (wear(rec, rod)) { finishJob(rec, e, "rod broke"); return true; }
+        int c = geti(job, "caught", 0) + 1;
+        job.addProperty("caught", c);
+        if (c >= 5 || isFull(rec)) { finishJob(rec, e, "caught " + c + " fish"); return true; }
+        return false;
+    }
+
+    // ---- farm: seeds from grass, a hoe, a tilled row by water, wheat in time
+
+    private static boolean jobFarm(GadgetContext ctx, JsonObject rec, Entity e, String id, JsonObject job) {
+        String phase = gets(job, "phase", "start");
+        World w = e.getWorld();
+        if (phase.equals("start")) {
+            // a field is remembered once made; until then choose ground by water near home
+            JsonObject field = rec.has("field") && rec.get("field").isJsonObject() ? rec.getAsJsonObject("field") : null;
+            if (field == null) {
+                Block water = nearestBlock(e, 40, 4, 2, new BlockTest() { public boolean ok(Block x) { return x.getType() == Material.WATER; } });
+                if (water == null) { finishJob(rec, e, "no water for a field"); return true; }
+                field = new JsonObject();
+                field.addProperty("x", water.getX() + 2);
+                field.addProperty("y", w.getHighestBlockYAt(water.getX() + 2, water.getZ(), HeightMap.OCEAN_FLOOR));
+                field.addProperty("z", water.getZ());
+                rec.add("field", field);
+            }
+            // what does the field need from me right now?
+            boolean haveHoe = bestTool(rec, "HOE") != null;
+            int seeds = count(rec, Material.WHEAT_SEEDS);
+            Block ripe = null, empty = null, untilled = null;
+            int fx = geti(field, "x", 0), fy = geti(field, "y", 64), fz = geti(field, "z", 0);
+            for (int dx = -2; dx <= 2; dx++) {
+                for (int dz = -2; dz <= 2; dz++) {
+                    Block ground = w.getBlockAt(fx + dx, fy, fz + dz);
+                    Block crop = ground.getRelative(0, 1, 0);
+                    if (ground.getType() == Material.FARMLAND) {
+                        if (crop.getType() == Material.WHEAT) {
+                            if (crop.getBlockData() instanceof Ageable && ((Ageable) crop.getBlockData()).getAge() >= 7 && ripe == null) ripe = crop;
+                        } else if (crop.getType().isAir() && empty == null) empty = ground;
+                    } else if ((ground.getType() == Material.GRASS_BLOCK || ground.getType() == Material.DIRT) && untilled == null) {
+                        untilled = ground;
+                    }
+                }
+            }
+            if (ripe != null) { setTarget(job, ripe.getX(), ripe.getY(), ripe.getZ()); job.addProperty("phase", "reap"); rec.addProperty("activity", "going to harvest"); return false; }
+            if (empty != null && seeds > 0) { setTarget(job, empty.getX(), empty.getY() + 1, empty.getZ()); job.addProperty("phase", "sow"); rec.addProperty("activity", "going to sow"); return false; }
+            if (untilled != null && haveHoe) { setTarget(job, untilled.getX(), untilled.getY() + 1, untilled.getZ()); job.addProperty("phase", "till"); rec.addProperty("activity", "going to till"); return false; }
+            if (seeds == 0) {
+                Block grass = nearestBlock(e, 24, 3, 3, new BlockTest() { public boolean ok(Block x) { return x.getType() == Material.SHORT_GRASS || x.getType() == Material.TALL_GRASS; } });
+                if (grass == null) { finishJob(rec, e, "no grass for seed"); return true; }
+                setTarget(job, grass.getX(), grass.getY(), grass.getZ());
+                job.addProperty("phase", "seed");
+                rec.addProperty("activity", "beating grass for seed");
+                return false;
+            }
+            if (!haveHoe) {
+                JsonObject j = startJob(rec, "craft");
+                j.addProperty("want", count(rec, Material.COBBLESTONE) >= 2 ? "STONE_HOE" : "WOODEN_HOE");
+                j.addProperty("then", "farm");
+                return false;
+            }
+            // planted and growing: nothing to do but let it grow. A crop only ripens in a
+            // loaded chunk, and being here keeps it loaded.
+            finishJob(rec, e, "field is growing");
+            return true;
+        }
+        int t = travel(ctx, e, id, job, 2.5, false);
+        if (t < 0) { finishJob(rec, e, "could not reach the field"); return true; }
+        if (t == 0) return false;
+        int need = pace(rec, "farming", 2);
+        int wt = geti(job, "wait", 0) + 1;
+        if (wt < need) { job.addProperty("wait", wt); return false; }
+        job.addProperty("wait", 0);
+        JsonObject tg = obj(job, "target");
+        int x = geti(tg, "x", 0), y = geti(tg, "y", 64), z = geti(tg, "z", 0);
+        if (phase.equals("seed")) {
+            Block g = w.getBlockAt(x, y, z);
+            if (g.getType() == Material.SHORT_GRASS || g.getType() == Material.TALL_GRASS) breakBlock(rec, g, null);
+            int got = geti(job, "got", 0) + 1;
+            job.addProperty("got", got);
+            if (count(rec, Material.WHEAT_SEEDS) >= 4 || got >= 12) job.addProperty("phase", "start");
+            else {
+                Block grass = nearestBlock(e, 12, 3, 3, new BlockTest() { public boolean ok(Block b) { return b.getType() == Material.SHORT_GRASS || b.getType() == Material.TALL_GRASS; } });
+                if (grass == null) job.addProperty("phase", "start");
+                else setTarget(job, grass.getX(), grass.getY(), grass.getZ());
+            }
+            return false;
+        }
+        if (phase.equals("till")) {
+            Block g = w.getBlockAt(x, y - 1, z);
+            JsonObject hoe = bestTool(rec, "HOE");
+            hold(e, hoe);
+            if (g.getType() == Material.GRASS_BLOCK || g.getType() == Material.DIRT) { g.setType(Material.FARMLAND); wear(rec, hoe); }
+            job.addProperty("phase", "start");
+            return false;
+        }
+        if (phase.equals("sow")) {
+            Block g = w.getBlockAt(x, y - 1, z);
+            Block crop = w.getBlockAt(x, y, z);
+            if (g.getType() == Material.FARMLAND && crop.getType().isAir() && take(rec, Material.WHEAT_SEEDS, 1)) crop.setType(Material.WHEAT);
+            job.addProperty("phase", "start");
+            return false;
+        }
+        if (phase.equals("reap")) {
+            Block crop = w.getBlockAt(x, y, z);
+            if (crop.getType() == Material.WHEAT) breakBlock(rec, crop, null);
+            job.addProperty("phase", "start");
+            return false;
+        }
+        job.addProperty("phase", "start");
+        return false;
+    }
+
+    // ---- explore: walk somewhere you have not been
+
+    private static boolean jobExplore(GadgetContext ctx, JsonObject rec, Entity e, String id, JsonObject job) {
+        String phase = gets(job, "phase", "start");
+        if (phase.equals("start")) {
+            int reach = 32 + 8 * Math.max(0, aptitude(rec, "exploring"));
+            JsonArray seen = arr(rec, "seenChunks");
+            // try a few bearings, prefer one whose far end is an unseen chunk
+            int bx = 0, bz = 0;
+            boolean found = false;
+            for (int i = 0; i < 8 && !found; i++) {
+                double th = rand(360) * Math.PI / 180;
+                int x = e.getLocation().getBlockX() + (int) (Math.cos(th) * reach);
+                int z = e.getLocation().getBlockZ() + (int) (Math.sin(th) * reach);
+                String key = (x >> 4) + "," + (z >> 4);
+                boolean was = false;
+                for (JsonElement s : seen) if (key.equals(s.getAsString())) { was = true; break; }
+                bx = x; bz = z;
+                if (!was) found = true;
+            }
+            setTarget(job, bx, e.getWorld().getHighestBlockYAt(bx, bz, HeightMap.OCEAN_FLOOR) + 1, bz);
+            job.addProperty("phase", "go");
+            rec.addProperty("activity", "exploring");
+            return false;
+        }
+        int t = travel(ctx, e, id, job, 4, false);
+        if (t == 0) return false;
+        finishJob(rec, e, t < 0 ? "turned back" : "explored");
+        return true;
+    }
+
+    // ---- craft: make a thing, gathering what it takes first
+
+    private static boolean jobCraft(GadgetContext ctx, JsonObject rec, Entity e, String id, JsonObject job) {
+        String wantName = gets(job, "want", null);
+        if (wantName == null) {
+            // nothing in particular: make the most useful thing you lack
+            String[] wish = { "CRAFTING_TABLE", "WOODEN_PICKAXE", "WOODEN_AXE", "STONE_PICKAXE", "STONE_AXE", "WOODEN_HOE", "WOODEN_SWORD" };
+            for (String wname : wish) {
+                Material m = Material.matchMaterial(wname);
+                if (m == null || count(rec, m) > 0) continue;
+                String kind = wname.substring(wname.indexOf('_') + 1);
+                if (!wname.equals("CRAFTING_TABLE") && bestTool(rec, kind) != null) continue;
+                wantName = wname;
+                break;
+            }
+            if (wantName == null) { finishJob(rec, e, "nothing worth making"); return true; }
+            job.addProperty("want", wantName);
+        }
+        Material want = Material.matchMaterial(wantName);
+        if (want == null) { finishJob(rec, e, "unknown item"); return true; }
+        int depth = geti(job, "depth", 0);
+        if (depth > 6) { finishJob(rec, e, "gave up on " + wantName.toLowerCase()); return true; }
+
+        boolean[] table = new boolean[1];
+        Map<Material, Integer> missing = missingFor(rec, want, table);
+        if (missing == null) { finishJob(rec, e, "no recipe for " + wantName.toLowerCase()); return true; }
+
+        if (!missing.isEmpty()) {
+            // go get the first missing thing, then come back to this
+            Material m = missing.keySet().iterator().next();
+            int n = missing.get(m).intValue();
+            JsonObject next = null;
+            if (isLog(m)) {
+                next = startJob(rec, "chop");
+            } else if (m == Material.COBBLESTONE) {
+                if (bestTool(rec, "PICKAXE") == null) {
+                    next = startJob(rec, "craft");
+                    next.addProperty("want", "WOODEN_PICKAXE");
+                } else {
+                    next = startJob(rec, "mine");
+                }
+            } else if (m == Material.WHEAT_SEEDS || m == Material.WHEAT) {
+                next = startJob(rec, "farm");
+            } else if (m == Material.STRING || m == Material.LEATHER || m == Material.FEATHER) {
+                finishJob(rec, e, "cannot get " + m.name().toLowerCase());
+                return true;
+            } else {
+                Map<Material, Integer> sub = missingFor(rec, m, new boolean[1]);
+                if (sub == null) { finishJob(rec, e, "cannot get " + m.name().toLowerCase()); return true; }
+                next = startJob(rec, "craft");
+                next.addProperty("want", m.name());
+            }
+            next.addProperty("then", "craft");
+            next.addProperty("thenWant", wantName);
+            next.addProperty("depth", depth + 1);
+            rec.addProperty("activity", "needs " + n + " " + m.name().toLowerCase().replace('_', ' ') + " for a " + wantName.toLowerCase().replace('_', ' '));
+            return false;
+        }
+
+        if (table[0]) {
+            // needs a bench within reach. Place one from the bag, or make one.
+            Block bench = nearestBlock(e, 4, 2, 2, new BlockTest() { public boolean ok(Block b) { return b.getType() == Material.CRAFTING_TABLE; } });
+            if (bench == null) {
+                if (count(rec, Material.CRAFTING_TABLE) == 0) {
+                    JsonObject next = startJob(rec, "craft");
+                    next.addProperty("want", "CRAFTING_TABLE");
+                    next.addProperty("then", "craft");
+                    next.addProperty("thenWant", wantName);
+                    next.addProperty("depth", depth + 1);
+                    return false;
+                }
+                Location at = e.getLocation();
+                Block spot = e.getWorld().getBlockAt(at.getBlockX() + 1, at.getBlockY(), at.getBlockZ());
+                if (!spot.getType().isAir()) spot = e.getWorld().getBlockAt(at.getBlockX() - 1, at.getBlockY(), at.getBlockZ());
+                if (spot.getType().isAir() && take(rec, Material.CRAFTING_TABLE, 1)) {
+                    spot.setType(Material.CRAFTING_TABLE);
+                    practise(rec, "building", 0.5);
+                }
+            }
+        }
+        int need = pace(rec, "crafting", 3);
+        int w = geti(job, "wait", 0) + 1;
+        if (w < need) { job.addProperty("wait", w); rec.addProperty("activity", "making a " + wantName.toLowerCase().replace('_', ' ')); return false; }
+        if (craftNow(rec, want)) {
+            feedNeed(rec, "craft", 5);
+            finishJob(rec, e, "made a " + wantName.toLowerCase().replace('_', ' '));
+            return true;
+        }
+        finishJob(rec, e, "could not make " + wantName.toLowerCase());
+        return true;
+    }
+
+    // ---- visit: go stand near somebody
+
+    private static JsonObject nearestOther(JsonObject rec, Entity e, List<JsonObject> everyone, NpcManager npcs, double within) {
+        JsonObject best = null;
+        double bestD = within;
+        for (JsonObject o : everyone) {
+            String oid = gets(o, "id", "");
+            if (oid.equals(gets(rec, "id", "")) || !o.get("alive").getAsBoolean()) continue;
+            NpcData od = npcs.get(oid);
+            Entity oe = od == null || od.dead ? null : npcs.resolveEntity(od);
+            if (oe == null || !oe.getWorld().equals(e.getWorld())) continue;
+            double d = oe.getLocation().distance(e.getLocation());
+            if (d < bestD) { bestD = d; best = o; }
+        }
+        return best;
+    }
+
+    private static boolean jobVisit(GadgetContext ctx, JsonObject rec, Entity e, String id, JsonObject job, List<JsonObject> everyone) {
+        NpcManager npcs = ctx.plugin().npcManager();
+        String phase = gets(job, "phase", "start");
+        if (phase.equals("start")) {
+            JsonObject other = nearestOther(rec, e, everyone, npcs, 160);
+            if (other == null) { finishJob(rec, e, "nobody around"); return true; }
+            Entity oe = npcs.resolveEntity(npcs.get(gets(other, "id", "")));
+            Location l = oe.getLocation();
+            setTarget(job, l.getBlockX(), l.getBlockY(), l.getBlockZ());
+            job.addProperty("who", gets(other, "id", ""));
+            job.addProperty("phase", "go");
+            rec.addProperty("activity", "going to see " + gets(other, "name", "someone"));
+            return false;
+        }
+        int t = travel(ctx, e, id, job, 4, false);
+        if (t < 0) { finishJob(rec, e, "could not find them"); return true; }
+        if (t == 0) return false;
+        int stay = geti(job, "stay", 0) + 1;
+        job.addProperty("stay", stay);
+        rec.addProperty("activity", "with " + gets(job, "who", "someone"));
+        if (stay >= 30) { finishJob(rec, e, "spent time with " + gets(job, "who", "someone")); return true; }
+        return false;
+    }
+
+    // ---- trade: find someone, work out if there is a deal, make it
+
+    private static boolean jobTrade(GadgetContext ctx, JsonObject rec, Entity e, String id, JsonObject job, List<JsonObject> everyone) {
+        NpcManager npcs = ctx.plugin().npcManager();
+        String phase = gets(job, "phase", "start");
+        if (phase.equals("start")) {
+            // Go to whoever actually has what I am short of, not whoever is closest. A
+            // hungry person walks past the woodcutter to reach the one with the meat.
+            int hunger = geti(rec, "hunger", 20);
+            JsonObject other = null;
+            double bestScore = 0;
+            for (JsonObject o : everyone) {
+                String oid = gets(o, "id", "");
+                if (oid.equals(id) || !o.get("alive").getAsBoolean()) continue;
+                NpcData od = npcs.get(oid);
+                Entity oe = od == null || od.dead ? null : npcs.resolveEntity(od);
+                if (oe == null || !oe.getWorld().equals(e.getWorld())) continue;
+                double dist = oe.getLocation().distance(e.getLocation());
+                if (dist > 160) continue;
+                double worth = 0;
+                for (JsonElement el : arr(o, "inventory")) {
+                    JsonObject s = el.getAsJsonObject();
+                    Material m = Material.matchMaterial(gets(s, "item", ""));
+                    if (m == null) continue;
+                    if (hunger < 16 && nutrition(m) <= 0) continue;
+                    worth = Math.max(worth, valueTo(rec, m));
+                }
+                if (worth <= 0) continue;
+                double score = worth / (1 + dist / 40.0);
+                if (score > bestScore) { bestScore = score; other = o; }
+            }
+            if (other == null) { finishJob(rec, e, "nobody has what I need"); rec.addProperty("noTradeUntil", System.currentTimeMillis() + 300000); return true; }
+            Entity oe = npcs.resolveEntity(npcs.get(gets(other, "id", "")));
+            Location l = oe.getLocation();
+            setTarget(job, l.getBlockX(), l.getBlockY(), l.getBlockZ());
+            job.addProperty("who", gets(other, "id", ""));
+            job.addProperty("phase", "go");
+            rec.addProperty("activity", "going to trade with " + gets(other, "name", "someone"));
+            return false;
+        }
+        int t = travel(ctx, e, id, job, 4, false);
+        if (t < 0) { finishJob(rec, e, "could not reach them"); return true; }
+        if (t == 0) return false;
+
+        JsonObject other = null;
+        for (JsonObject o : everyone) if (gets(o, "id", "").equals(gets(job, "who", ""))) other = o;
+        if (other == null) { finishJob(rec, e, "they left"); return true; }
+
+        // What I want most: the thing that serves my worst need. Food if hungry; a tool I
+        // lack if not; otherwise nothing in particular and this is a social call.
+        int hunger = geti(rec, "hunger", 20);
+        Material want = null;
+        double wantV = 0;
+        for (JsonElement el : arr(other, "inventory")) {
+            JsonObject s = el.getAsJsonObject();
+            Material m = Material.matchMaterial(gets(s, "item", ""));
+            if (m == null) continue;
+            if (hunger < 16 && nutrition(m) <= 0) continue;
+            double v = valueTo(rec, m);
+            if (v > wantV) { wantV = v; want = m; }
+        }
+        if (want == null) {
+            finishJob(rec, e, "they have nothing I need");
+            rec.addProperty("noTradeUntil", System.currentTimeMillis() + 300000);
+            return true;
+        }
+        // What they would accept: anything of mine they value at least as much as what I
+        // take - by THEIR valuation - minus what my trading skill can talk off.
+        double talk = 1.0 - 0.05 * Math.max(0, aptitude(rec, "trading")) + 0.05 * Math.max(0, aptitude(other, "trading"));
+        talk = Math.max(0.6, Math.min(1.4, talk));
+        double askV = valueTo(other, want) * talk;
+        Material offer = null;
+        double offerCost = Double.MAX_VALUE;
+        int offerN = 0;
+        for (JsonElement el : arr(rec, "inventory")) {
+            JsonObject s = el.getAsJsonObject();
+            Material m = Material.matchMaterial(gets(s, "item", ""));
+            if (m == null || m == want) continue;
+            int have = geti(s, "count", 0);
+            double theirs = valueTo(other, m);
+            if (theirs <= 0) continue;
+            int n = (int) Math.ceil(askV / theirs);
+            if (n > have) continue;
+            double myCost = valueTo(rec, m) * n;
+            if (myCost >= wantV) continue;              // not worth it to me
+            if (myCost < offerCost) { offerCost = myCost; offer = m; offerN = n; }
+        }
+        if (offer == null) {
+            finishJob(rec, e, "nothing they want from me");
+            rec.addProperty("noTradeUntil", System.currentTimeMillis() + 300000);
+            return true;
+        }
+        // deal
+        take(rec, offer, offerN);
+        take(other, want, 1);
+        give(rec, want, 1);
+        give(other, offer, offerN);
+        practise(rec, "trading", 1.0);
+        practise(other, "trading", 1.0);
+        feedNeed(rec, "social", 3);
+        feedNeed(other, "social", 3);
+        try { save(ctx, other); } catch (Throwable ignored) { }
+        JsonObject ev = new JsonObject();
+        ev.addProperty("from", gets(rec, "id", ""));
+        ev.addProperty("to", gets(other, "id", ""));
+        ev.addProperty("gave", offerN + " " + offer.name());
+        ev.addProperty("got", "1 " + want.name());
+        ctx.plugin().bridge().broadcastEvent("npc_trade", ev);
+        finishJob(rec, e, "traded " + offerN + " " + offer.name().toLowerCase() + " for " + want.name().toLowerCase());
+        return true;
+    }
+
+    // ------------------------------------------------------------------ the beat
+
+    private void tickOne(GadgetContext ctx, JsonObject rec, List<JsonObject> everyone) throws Exception {
+        NpcManager npcs = ctx.plugin().npcManager();
+        String id = gets(rec, "id", "");
+        NpcData d = npcs.get(id);
+        if (d == null) return;
+        if (d.dead) {
+            if (rec.get("alive").getAsBoolean()) {
+                rec.addProperty("alive", false);
+                rec.remove("job");
+                rec.addProperty("activity", "dead");
+                save(ctx, rec);
+            }
+            return;
+        }
+        Entity e = npcs.resolveEntity(d);
+        if (e == null) return;
+        normalise(rec);
+
+        // --- the body
+        JsonObject job = rec.has("job") && rec.get("job").isJsonObject() ? rec.getAsJsonObject("job") : null;
+        boolean working = job != null && !gets(job, "kind", "").equals("rest");
+        double ex = getd(rec, "exhaustion", 0) + (working ? EXHAUST_WORK : EXHAUST_IDLE);
+        int hunger = geti(rec, "hunger", 20);
+        if (ex >= 1.0) { ex -= 1.0; hunger = Math.max(0, hunger - 1); }
+        rec.addProperty("exhaustion", ex);
+
+        if (hunger <= EAT_AT) {
+            // eat the least wasteful thing in the bag
+            Material meal = null;
+            int bestWaste = Integer.MAX_VALUE;
+            for (JsonElement el : arr(rec, "inventory")) {
+                Material m = Material.matchMaterial(gets(el.getAsJsonObject(), "item", ""));
+                if (m == null) continue;
+                int n = nutrition(m);
+                if (n <= 0) continue;
+                int waste = Math.max(0, n - (20 - hunger));
+                if (waste < bestWaste) { bestWaste = waste; meal = m; }
+            }
+            if (meal != null && take(rec, meal, 1)) {
+                hunger = Math.min(20, hunger + nutrition(meal));
+                rec.addProperty("lastMeal", meal.name());
+            }
+        }
+        rec.addProperty("hunger", hunger);
+
+        if (e instanceof LivingEntity) {
+            LivingEntity le = (LivingEntity) e;
+            if (hunger <= 0 && beats % 4 == 0) {
+                le.damage(1.0);
+                JsonObject ev = new JsonObject();
+                ev.addProperty("npcId", id);
+                ev.addProperty("name", d.name);
+                ctx.plugin().bridge().broadcastEvent("npc_starving", ev);
+            } else if (hunger >= 18 && beats % 4 == 0 && le.getHealth() < 20) {
+                le.setHealth(Math.min(20, le.getHealth() + 1));
+            }
+            if (le.isInWater()) practise(rec, "swimming", BEAT_MIN);
+        }
+
+        // --- the third need drifts, and is fed by arriving somewhere new
+        JsonObject need = obj(rec, "need");
+        String kind = gets(need, "kind", "explore");
+        if (!kind.equals("wealth") && beats % 180 == 0) {
+            need.addProperty("value", Math.max(0, getd(need, "value", 10) - 1));
+        }
+        if (kind.equals("explore")) {
+            String key = (e.getLocation().getBlockX() >> 4) + "," + (e.getLocation().getBlockZ() >> 4);
+            JsonArray seen = arr(rec, "seenChunks");
+            boolean was = false;
+            for (JsonElement s : seen) if (key.equals(s.getAsString())) { was = true; break; }
+            if (!was) {
+                seen.add(key);
+                while (seen.size() > 400) seen.remove(0);
+                feedNeed(rec, "explore", 4);
+            }
+        }
+        if (kind.equals("social") && beats % 30 == 0) {
+            JsonObject o = nearestOther(rec, e, everyone, npcs, 8);
+            if (o != null) feedNeed(rec, "social", 1);
+        }
+
+        // --- the work
+        if (job == null) {
+            String next = choose(rec, e, everyone);
+            job = startJob(rec, next);
+            if (next.equals("rest")) rec.addProperty("activity", "resting");
+        }
+        String jk = gets(job, "kind", "rest");
+        job.addProperty("beats", geti(job, "beats", 0) + 1);
+        String sk = skillOf(jk);
+        if (sk != null) practise(rec, sk, BEAT_MIN);
+
+        boolean done;
+        if (jk.equals("hunt")) done = jobHunt(ctx, rec, e, id, job);
+        else if (jk.equals("chop")) done = jobChop(ctx, rec, e, id, job);
+        else if (jk.equals("mine")) done = jobMine(ctx, rec, e, id, job);
+        else if (jk.equals("fish")) done = jobFish(ctx, rec, e, id, job);
+        else if (jk.equals("farm")) done = jobFarm(ctx, rec, e, id, job);
+        else if (jk.equals("explore")) done = jobExplore(ctx, rec, e, id, job);
+        else if (jk.equals("craft")) done = jobCraft(ctx, rec, e, id, job);
+        else if (jk.equals("visit")) done = jobVisit(ctx, rec, e, id, job, everyone);
+        else if (jk.equals("trade")) done = jobTrade(ctx, rec, e, id, job, everyone);
+        else {
+            // rest: stand still; hp comes back by itself on a full stomach
+            done = geti(job, "beats", 0) >= 20 || hp(e) >= 20;
+            if (done) finishJob(rec, e, "rested");
+        }
+        // a job that ran far too long is stuck somewhere we did not foresee
+        if (!done && rec.has("job") && geti(rec.getAsJsonObject("job"), "beats", 0) > 600) {
+            finishJob(rec, e, "gave up");
+        }
+
+        // --- bookkeeping the console reads
+        rec.addProperty("hp", hp(e));
+        rec.addProperty("happiness", happiness(rec, e));
+        JsonObject needs = new JsonObject();
+        needs.addProperty("hp", hp(e));
+        needs.addProperty("hunger", hunger);
+        needs.addProperty(kind, thirdNeed(rec));
+        rec.add("needs", needs);
+        rec.addProperty("fedState", hunger <= 0 ? "starving" : (hunger <= 6 ? "hungry" : "fed"));
+        save(ctx, rec);
+    }
+
+    private void beat(GadgetContext ctx) {
+        beats++;
+        try {
+            List<JsonObject> everyone = roster(ctx);
+            for (JsonObject rec : everyone) {
+                if (!rec.has("id")) continue;
+                try {
+                    tickOne(ctx, rec, everyone);
+                } catch (Throwable t) {
+                    rec.addProperty("activity", "error: " + String.valueOf(t.getMessage()));
+                    try { save(ctx, rec); } catch (Throwable ignored) { }
+                }
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    // ------------------------------------------------------------------ entry point
+
+    public JsonObject run(JsonObject args, GadgetContext ctx) throws Exception {
+        String action = args.has("action") ? args.get("action").getAsString() : "start";
+
+        if (action.equals("status")) {
+            JsonObject out = new JsonObject();
+            out.addProperty("running", TASK_ID != null);
+            out.addProperty("beats", beats);
+            JsonArray people = new JsonArray();
+            for (JsonObject rec : roster(ctx)) {
+                JsonObject o = new JsonObject();
+                o.addProperty("id", gets(rec, "id", ""));
+                o.addProperty("name", gets(rec, "name", ""));
+                o.addProperty("alive", rec.has("alive") && rec.get("alive").getAsBoolean());
+                o.addProperty("hp", getd(rec, "hp", 20));
+                o.addProperty("hunger", geti(rec, "hunger", 20));
+                o.addProperty("need", gets(obj(rec, "need"), "kind", "") + " " + thirdNeed(rec));
+                o.addProperty("happiness", geti(rec, "happiness", 0));
+                o.addProperty("doing", gets(rec, "activity", "-"));
+                o.addProperty("job", rec.has("job") ? gets(rec.getAsJsonObject("job"), "kind", "-") : "-");
+                o.addProperty("stacks", stacksUsed(rec));
+                JsonObject sk = new JsonObject();
+                for (int i = 0; i < SKILLS.length; i++) {
+                    int p = skill(rec, SKILLS[i]);
+                    if (p > 0) sk.addProperty(SKILLS[i], p);
+                }
+                o.add("skills", sk);
+                people.add(o);
+            }
+            out.add("people", people);
+            return out;
+        }
+
+        /** Spawn one person at world spawn from a roster entry. */
+        if (action.equals("spawn")) {
+            String id = args.get("id").getAsString();
+            String name = gets(args, "name", id);
+            World w = ctx.world(null);
+            Location sp = w.getSpawnLocation();
+            int ox = rand(7) - 3, oz = rand(7) - 3;
+            int x = sp.getBlockX() + ox, z = sp.getBlockZ() + oz;
+            int y = w.getHighestBlockYAt(x, z, HeightMap.OCEAN_FLOOR) + 1;
+
+            JsonObject spawn = new JsonObject();
+            spawn.addProperty("id", id);
+            spawn.addProperty("name", name);
+            spawn.addProperty("entityType", "MANNEQUIN");
+            spawn.addProperty("defense", "fight");
+            if (args.has("skin")) spawn.addProperty("skin", args.get("skin").getAsString());
+            spawn.addProperty("world", w.getName());
+            spawn.addProperty("x", x + 0.5);
+            spawn.addProperty("y", y);
+            spawn.addProperty("z", z + 0.5);
+            spawn.addProperty("snap", true);
+            JsonObject home = new JsonObject();
+            home.addProperty("world", w.getName());
+            home.addProperty("x", x);
+            home.addProperty("y", y);
+            home.addProperty("z", z);
+            spawn.add("home", home);
+            ctx.invoke("npc_spawn", spawn);
+
+            JsonObject rec = new JsonObject();
+            rec.addProperty("id", id);
+            rec.addProperty("name", name);
+            if (args.has("bio")) rec.addProperty("bio", args.get("bio").getAsString());
+            if (args.has("abilities")) rec.add("abilities", args.getAsJsonObject("abilities"));
+            if (args.has("need")) rec.add("need", args.getAsJsonObject("need"));
+            rec.add("home", home);
+            normalise(rec);
+            // the one skill they came with
+            if (args.has("skill")) {
+                JsonObject s = obj(obj(rec, "skills"), args.get("skill").getAsString());
+                s.addProperty("minutes", 1.0);
+                s.addProperty("points", 1);
+            }
+            rec.addProperty("alive", true);
+            rec.addProperty("activity", "just arrived");
+            rec.addProperty("hp", 20);
+            rec.addProperty("happiness", 100);
+            save(ctx, rec);
+            return rec;
+        }
+
+        if (action.equals("stop")) {
+            generation(ctx, true);
+            int killed = reap(ctx);
+            if (TASK_ID != null) { ctx.cancelTask(TASK_ID.intValue()); TASK_ID = null; }
+            JsonObject out = new JsonObject();
+            out.addProperty("stopped", true);
+            out.addProperty("staleTimersCancelled", killed);
+            return out;
+        }
+
+        final int myGen = generation(ctx, true);
+        int killed = reap(ctx);
+        if (TASK_ID != null) { ctx.cancelTask(TASK_ID.intValue()); TASK_ID = null; }
+        TASK_ID = Integer.valueOf(ctx.runTimer(BEAT_TICKS, new Runnable() {
+            public void run() {
+                try {
+                    if (generation(ctx, false) != myGen) { reap(ctx); return; }
+                    beat(ctx);
+                } catch (Throwable ignored) { }
+            }
+        }));
+        JsonObject out = new JsonObject();
+        out.addProperty("started", true);
+        out.addProperty("generation", myGen);
+        out.addProperty("staleTimersCancelled", killed);
+        out.addProperty("beatTicks", BEAT_TICKS);
+        return out;
+    }
+}
