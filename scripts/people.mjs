@@ -106,6 +106,8 @@ async function startWorld() {
   out.people = await cmd("gadget:people", { populationCap: 40 });
   // and they show in the tab list
   out.tablist = await cmd("gadget:tablist", {});
+  // villages: found, joined, inns asked for
+  out.villages = await cmd("gadget:villages", {});
   return out;
 }
 

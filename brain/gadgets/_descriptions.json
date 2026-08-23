@@ -18,10 +18,11 @@
  "roster": "Writes what each NPC is doing onto its ledger record, distinguishing a circuit paused for work from one genuinely stuck.",
  "shelter": "Walks to its work on foot via the navigator - no teleporting.",
  "pursuits": "Needs-and-personality utility chooser; leaves reserved tradespeople to their own work.",
- "navigate": "Player-rules walking: surface-biased A*, settles and falls每 step so nobody hangs in the air.",
+ "navigate": "Player-rules walking: surface-biased A*, settles and falls\u6bcf step so nobody hangs in the air.",
  "reclaim": "Any Ancient restores the dead by walking to a memorial head; the restored are marked living in the ledger so the map shows them back.",
  "needs": "The eight drives per NPC: fatigue, purpose and curiosity accumulate; safety, shelter, belonging and wealth are read from the world each beat. Writes them to the ledger.",
  "farm": "A field worked forever by a farmer who stays with it - a crop only ripens in a chunk somebody is standing in.",
  "people": "Every NPC is a player: hp, hunger, inventory, abilities, skills earned by doing, three needs, jobs chosen by skill, dynamic trade.",
- "tablist": "Every living person appears in the tab list, sent as the real player-info packet."
+ "tablist": "Every living person appears in the tab list, sent as the real player-info packet.",
+ "villages": "Finding, founding and joining villages; asks a capable member for an inn. The building, lodging and market are people jobs."
 }

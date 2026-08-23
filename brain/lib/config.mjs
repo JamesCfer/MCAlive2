@@ -58,7 +58,7 @@ export const ALL_TOOLS = [
   "create_explosion", "strike_lightning", "move_region",
   // NPCs
   "npc_spawn", "npc_update", "npc_remove", "npc_say", "npc_walk_to", "npc_look_at",
-  "npc_equip", "npc_pose", "npc_revive", "npc_head_check",
+  "npc_equip", "npc_pose", "npc_revive", "npc_head_check", "npc_do",
   // Players
   "give_item", "apply_effect", "list_players",
   // Ledger
@@ -89,7 +89,7 @@ export const ALL_TOOLS = [
 // NPC actors may ONLY call these three tools (DESIGN.md "NPC actors").
 // Everything else - including npc_context itself, which would let an actor
 // metagame past the plugin-enforced knowledge isolation - is denied.
-export const ACTOR_TOOLS = ["npc_say", "npc_look_at", "npc_pose"];
+export const ACTOR_TOOLS = ["npc_say", "npc_look_at", "npc_pose", "npc_do"];
 
 // Sense events that feed the director's debounced scene loop. player_quit
 // only updates local presence tracking and never wakes anything (matching
@@ -127,6 +127,12 @@ export function loadConfig(env = process.env) {
     maxTurnsPerMin: num("BRAIN_MAX_TURNS_PER_MIN", 10),
 
     directorModel: env.BRAIN_DIRECTOR_MODEL || "claude-sonnet-5",
+    // The developer: once an hour, add the next roadmap feature (lib/developer.mjs).
+    // 0 disables. Skipped when less than devMinRemainingTokens of the daily budget is left.
+    devIntervalMin: num("BRAIN_DEV_INTERVAL_MIN", 60),
+    devModel: env.BRAIN_DEV_MODEL || "claude-opus-5",
+    devMaxTurns: num("BRAIN_DEV_MAX_TURNS", 120),
+    devMinRemainingTokens: num("BRAIN_DEV_MIN_REMAINING_TOKENS", 800000),
     actorModel: env.BRAIN_ACTOR_MODEL || "claude-haiku-4-5-20251001",
 
     enabled: bool01("BRAIN_ENABLED", true),

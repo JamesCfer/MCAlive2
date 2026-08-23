@@ -817,6 +817,11 @@ public class People implements GadgetContract {
     private static boolean possible(JsonObject rec, String job, List<JsonObject> everyone) {
         if (isFull(rec) && (job.equals("hunt") || job.equals("chop") || job.equals("mine") || job.equals("fish"))) return false;
         if (job.equals("fish")) return bestTool(rec, "ROD") != null;
+        if (job.equals("build")) return rec.has("asked");
+        if (job.equals("market")) {
+            long until = (long) getd(rec, "noMarketUntil", 0);
+            return System.currentTimeMillis() > until && rec.has("village");
+        }
         if (job.equals("trade")) {
             if (everyone.size() < 2 || arr(rec, "inventory").size() == 0) return false;
             long until = (long) getd(rec, "noTradeUntil", 0);
@@ -832,9 +837,11 @@ public class People implements GadgetContract {
             if (job.equals("fish")) return 1.0;
             if (job.equals("farm")) return bestTool(rec, "HOE") != null || count(rec, Material.WHEAT_SEEDS) > 0 ? 0.8 : 0.5;
             if (job.equals("trade")) return 0.9;
+            if (job.equals("market")) return 0.95;
             return 0;
         }
         if (need.equals("hp")) return job.equals("rest") ? 1.0 : 0;
+        if (job.equals("build")) return need.equals("third") && "craft".equals(gets(obj(rec, "need"), "kind", "")) ? 1.0 : 0;
         String kind = gets(obj(rec, "need"), "kind", "explore");
         if (kind.equals("explore")) return job.equals("explore") ? 1.0 : 0;
         if (kind.equals("social")) return job.equals("visit") ? 1.0 : (job.equals("trade") ? 0.6 : 0);
@@ -865,7 +872,7 @@ public class People implements GadgetContract {
         double hungerGap = 20 - geti(rec, "hunger", 20);
         double hpGap = 20 - hp(e);
         double thirdGap = 20 - thirdNeed(rec);
-        String[] jobs = { "hunt", "fish", "farm", "chop", "mine", "explore", "craft", "trade", "visit", "rest" };
+        String[] jobs = { "hunt", "fish", "farm", "chop", "mine", "explore", "craft", "trade", "visit", "rest", "build", "market" };
         String[] needs = { "hunger", "hp", "third" };
         double[] gaps = { hungerGap, hpGap, thirdGap };
         List<String> ids = new ArrayList<String>();
@@ -879,11 +886,12 @@ public class People implements GadgetContract {
                 s += gaps[i] * gaps[i] * serves(job, needs[i], rec);
             }
             if (!anyShort) {
-                // idle hands: weight purely by what they like, among the gathering jobs
-                boolean gather = false;
+                // idle hands: weight purely by what they like, among the gathering jobs -
+                // and a village that has asked for its inn comes first
+                boolean gather = job.equals("build");
                 for (String g : GATHER_JOBS) if (g.equals(job)) gather = true;
                 if (!gather) continue;
-                s = 10;
+                s = job.equals("build") ? 40 : 10;
             }
             s *= aptitudeWeight(rec, job);
             if (s <= 0) continue;
@@ -929,6 +937,7 @@ public class People implements GadgetContract {
         String thenWant = job == null ? null : gets(job, "thenWant", null);
         int depth = job == null ? 0 : geti(job, "depth", 0);
         rec.remove("job");
+        rec.remove("assigned");
         rec.addProperty("lastJobEnd", why);
         hold(e, null);
         if (then != null) {
@@ -1456,6 +1465,329 @@ public class People implements GadgetContract {
         return true;
     }
 
+    // ---- villages: the places ledger, read each beat it is needed
+
+    private static List<JsonObject> places(GadgetContext ctx) {
+        try {
+            JsonObject q = new JsonObject();
+            q.addProperty("collection", "places");
+            JsonArray recs = ctx.invoke("ledger_query", q).getAsJsonArray("records");
+            List<JsonObject> out = new ArrayList<JsonObject>();
+            for (JsonElement el : recs) out.add(el.getAsJsonObject());
+            return out;
+        } catch (Throwable t) {
+            return new ArrayList<JsonObject>();
+        }
+    }
+
+    private static double distTo(JsonObject xyz, Entity e) {
+        Location at = e.getLocation();
+        return Math.sqrt(Math.pow(geti(xyz, "x", 0) - at.getX(), 2) + Math.pow(geti(xyz, "z", 0) - at.getZ(), 2));
+    }
+
+    /** Nearest village with an inn within range, or null. */
+    private static JsonObject nearestInn(List<JsonObject> places, Entity e, double within) {
+        JsonObject best = null;
+        double bestD = within;
+        for (JsonObject p : places) {
+            if (!"village".equals(gets(p, "kind", "")) || !p.has("inn") || !p.get("inn").isJsonObject()) continue;
+            double d = distTo(p.getAsJsonObject("inn"), e);
+            if (d < bestD) { bestD = d; best = p; }
+        }
+        return best;
+    }
+
+    private static boolean isNight(World w) {
+        long t = w.getTime();
+        return t >= 13000 && t < 23000;
+    }
+
+    private static boolean memberOf(JsonObject village, String id) {
+        for (JsonElement m : arr(village, "members")) if (id.equals(m.getAsString())) return true;
+        return false;
+    }
+
+    private static org.bukkit.inventory.Inventory chestAt(World w, JsonObject c) {
+        if (c == null) return null;
+        Block b = w.getBlockAt(geti(c, "x", 0), geti(c, "y", 64), geti(c, "z", 0));
+        b.getChunk().load();
+        org.bukkit.block.BlockState st = b.getState();
+        if (st instanceof org.bukkit.block.Container) return ((org.bukkit.block.Container) st).getInventory();
+        return null;
+    }
+
+    /** The cheapest thing in the bag worth at least {@code min}, that is not a tool. */
+    private static JsonObject cheapest(JsonObject rec, double min) {
+        JsonObject best = null;
+        double bestV = Double.MAX_VALUE;
+        for (JsonElement el : arr(rec, "inventory")) {
+            JsonObject s = el.getAsJsonObject();
+            Material m = Material.matchMaterial(gets(s, "item", ""));
+            if (m == null || m == Material.PLAYER_HEAD || m.getMaxDurability() > 0) continue;
+            double v = baseValue(m);
+            if (v < min) continue;
+            if (v < bestV) { bestV = v; best = s; }
+        }
+        return best;
+    }
+
+    // ---- build: raise the village inn, block by block, from the bag
+
+    private static final int INN_W = 5, INN_D = 5, INN_H = 3;
+
+    /** The i-th block of the inn: {dx, dy, dz, what} with what 0=floor 1=wall 2=roof, or null past the end. */
+    private static int[] innBlock(int i) {
+        int n = 0;
+        for (int dz = 0; dz < INN_D; dz++) for (int dx = 0; dx < INN_W; dx++) { if (n == i) return new int[]{ dx, 0, dz, 0 }; n++; }
+        for (int dy = 1; dy <= INN_H; dy++) {
+            for (int dz = 0; dz < INN_D; dz++) for (int dx = 0; dx < INN_W; dx++) {
+                boolean edge = dx == 0 || dz == 0 || dx == INN_W - 1 || dz == INN_D - 1;
+                if (!edge) continue;
+                boolean door = dz == 0 && dx == INN_W / 2 && dy <= 2;
+                if (door) continue;
+                if (n == i) return new int[]{ dx, dy, dz, 1 };
+                n++;
+            }
+        }
+        for (int dz = 0; dz < INN_D; dz++) for (int dx = 0; dx < INN_W; dx++) { if (n == i) return new int[]{ dx, INN_H + 1, dz, 2 }; n++; }
+        return null;
+    }
+
+    private static Material plankOf(JsonObject rec) {
+        for (JsonElement el : arr(rec, "inventory")) {
+            String n = gets(el.getAsJsonObject(), "item", "");
+            if (n.endsWith("_PLANKS")) return Material.matchMaterial(n);
+        }
+        // split a log into planks, as you would at the bench
+        for (JsonElement el : arr(rec, "inventory")) {
+            String n = gets(el.getAsJsonObject(), "item", "");
+            if (isLog(Material.matchMaterial(n))) {
+                Material planks = Material.matchMaterial(n.replace("_LOG", "_PLANKS"));
+                if (planks != null && take(rec, Material.matchMaterial(n), 1)) { give(rec, planks, 4); return planks; }
+            }
+        }
+        return null;
+    }
+
+    private static boolean jobBuild(GadgetContext ctx, JsonObject rec, Entity e, String id, JsonObject job) {
+        JsonObject ask = rec.has("asked") && rec.get("asked").isJsonObject() ? rec.getAsJsonObject("asked") : null;
+        if (ask == null) { finishJob(rec, e, "nothing to build"); return true; }
+        JsonObject at = ask.getAsJsonObject("at");
+        World w = e.getWorld();
+        int ox = geti(at, "x", 0), oz = geti(at, "z", 0);
+        int oy = w.getHighestBlockYAt(ox + 2, oz + 2, HeightMap.OCEAN_FLOOR);   // the plot's level
+        int i = geti(job, "i", 0);
+        int[] b = innBlock(i);
+        if (b == null) {
+            // finished: furnish it. A chest (the village store), a bench, and beds if there is wool.
+            int cx = ox + 1, cz = oz + INN_D - 2;
+            w.getBlockAt(cx, oy + 1, cz).setType(Material.CHEST);
+            w.getBlockAt(ox + INN_W - 2, oy + 1, cz).setType(Material.CRAFTING_TABLE);
+            int beds = 0;
+            for (int k = 0; k < 2; k++) {
+                if (count(rec, Material.WHITE_WOOL) >= 3 && plankOf(rec) != null) {
+                    Material pl = plankOf(rec);
+                    take(rec, Material.WHITE_WOOL, 3);
+                    take(rec, pl, 3);
+                    Block bed = w.getBlockAt(ox + 1 + k * 2, oy + 1, oz + 1);
+                    bed.setType(Material.WHITE_BED);
+                    beds++;
+                }
+            }
+            JsonObject done = new JsonObject();
+            done.addProperty("action", "inn_built");
+            done.addProperty("village", gets(ask, "village", ""));
+            done.add("at", xyzOf(ox, oy + 1, oz));
+            done.add("chest", xyzOf(cx, oy + 1, cz));
+            done.addProperty("beds", beds);
+            done.addProperty("builder", id);
+            try { ctx.invoke("gadget:villages", done); } catch (Throwable ignored) { }
+            rec.remove("asked");
+            practise(rec, "building", 3.0);
+            feedNeed(rec, "craft", 8);
+            finishJob(rec, e, "raised the inn");
+            return true;
+        }
+        int bx = ox + b[0], by = oy + b[1], bz = oz + b[2];
+        // stand within reach of the block
+        JsonObject t = obj(job, "target");
+        if (Math.abs(geti(t, "x", 0) - bx) > 3 || Math.abs(geti(t, "z", 0) - bz) > 3) {
+            int sx = bx + (b[0] < INN_W / 2 ? -2 : 2), sz = bz + (b[2] < INN_D / 2 ? -2 : 2);
+            setTarget(job, sx, w.getHighestBlockYAt(sx, sz, HeightMap.OCEAN_FLOOR) + 1, sz);
+        }
+        int tr = travel(ctx, e, id, job, 4.5, false);
+        if (tr < 0) { finishJob(rec, e, "could not reach the plot"); return true; }
+        if (tr == 0) return false;
+        int need = pace(rec, "building", 2);
+        int wt = geti(job, "wait", 0) + 1;
+        if (wt < need) { job.addProperty("wait", wt); return false; }
+        job.addProperty("wait", 0);
+        Block target = w.getBlockAt(bx, by, bz);
+        if (b[3] == 0 && !target.getType().isAir() && !target.isPassable()) {
+            // floor on existing ground: nothing to place
+            job.addProperty("i", i + 1);
+            return false;
+        }
+        Material pl = plankOf(rec);
+        if (pl == null) { finishJob(rec, e, "ran out of timber"); return true; }
+        for (Entity n : target.getWorld().getNearbyEntities(target.getLocation().add(0.5, 0.5, 0.5), 0.6, 1.2, 0.6)) {
+            if (n instanceof LivingEntity) { job.addProperty("i", i + 1); return false; }    // never wall anyone in
+        }
+        if (!target.getType().isAir() && target.isPassable()) target.setType(Material.AIR);
+        if (target.getType().isAir()) {
+            take(rec, pl, 1);
+            target.setType(pl);
+            w.playSound(target.getLocation(), org.bukkit.Sound.BLOCK_WOOD_PLACE, 0.7f, 1.0f);
+            if (e instanceof LivingEntity) ((LivingEntity) e).swingMainHand();
+        }
+        job.addProperty("i", i + 1);
+        rec.addProperty("activity", "building the inn (" + (i + 1) + " blocks)");
+        return false;
+    }
+
+    private static JsonObject xyzOf(int x, int y, int z) {
+        JsonObject o = new JsonObject();
+        o.addProperty("x", x);
+        o.addProperty("y", y);
+        o.addProperty("z", z);
+        return o;
+    }
+
+    // ---- lodge: a bed for the night, paid for
+
+    private static boolean jobLodge(GadgetContext ctx, JsonObject rec, Entity e, String id, JsonObject job) {
+        World w = e.getWorld();
+        if (!isNight(w)) { finishJob(rec, e, "slept at the inn"); return true; }
+        String phase = gets(job, "phase", "start");
+        if (phase.equals("start")) {
+            JsonObject v = nearestInn(places(ctx), e, 240);
+            if (v == null) { finishJob(rec, e, "no inn near"); return true; }
+            JsonObject inn = v.getAsJsonObject("inn");
+            setTarget(job, geti(inn, "x", 0) + 2, geti(inn, "y", 64), geti(inn, "z", 0) + 2);
+            job.addProperty("village", gets(v, "id", ""));
+            job.addProperty("phase", "go");
+            rec.addProperty("activity", "heading to the inn at " + gets(v, "name", "the village"));
+            return false;
+        }
+        if (phase.equals("go")) {
+            int tr = travel(ctx, e, id, job, 3, false);
+            if (tr < 0) { finishJob(rec, e, "could not reach the inn"); return true; }
+            if (tr == 0) return false;
+            // pay the house. Members sleep free; a stranger leaves something worth having.
+            JsonObject v = null;
+            for (JsonObject p : places(ctx)) if (gets(job, "village", "").equals(gets(p, "id", ""))) v = p;
+            if (v != null && !memberOf(v, id)) {
+                JsonObject coin = cheapest(rec, 0.5);
+                org.bukkit.inventory.Inventory till = chestAt(w, v.has("store") ? v.getAsJsonObject("store") : null);
+                if (coin == null || till == null) { finishJob(rec, e, "could not pay for a bed"); return true; }
+                Material m = Material.matchMaterial(gets(coin, "item", ""));
+                take(rec, m, 1);
+                till.addItem(new ItemStack(m, 1));
+                JsonObject ev = new JsonObject();
+                ev.addProperty("npcId", id);
+                ev.addProperty("village", gets(v, "id", ""));
+                ev.addProperty("paid", m.name());
+                ctx.plugin().bridge().broadcastEvent("inn_stay", ev);
+            }
+            job.addProperty("phase", "sleep");
+            rec.addProperty("activity", "asleep at the inn");
+            try {
+                JsonObject pose = new JsonObject();
+                pose.addProperty("npcId", id);
+                pose.addProperty("pose", "sleeping");
+                ctx.invoke("npc_pose", pose);
+            } catch (Throwable ignored) { }
+            return false;
+        }
+        // sleep: a full night's rest heals faster than the road does
+        if (e instanceof LivingEntity && beats % 2 == 0) {
+            LivingEntity le = (LivingEntity) e;
+            if (le.getHealth() < 20 && geti(rec, "hunger", 20) >= 6) le.setHealth(Math.min(20, le.getHealth() + 1));
+        }
+        return false;
+    }
+
+    // ---- market: deal with the village store
+
+    private static boolean jobMarket(GadgetContext ctx, JsonObject rec, Entity e, String id, JsonObject job) {
+        World w = e.getWorld();
+        String phase = gets(job, "phase", "start");
+        if (phase.equals("start")) {
+            JsonObject v = nearestInn(places(ctx), e, 240);
+            if (v == null || !v.has("store")) { finishJob(rec, e, "no market near"); return true; }
+            JsonObject st = v.getAsJsonObject("store");
+            setTarget(job, geti(st, "x", 0), geti(st, "y", 64), geti(st, "z", 0));
+            job.addProperty("village", gets(v, "id", ""));
+            job.addProperty("phase", "go");
+            rec.addProperty("activity", "going to market at " + gets(v, "name", "the village"));
+            return false;
+        }
+        int tr = travel(ctx, e, id, job, 3, false);
+        if (tr < 0) { finishJob(rec, e, "could not reach the market"); return true; }
+        if (tr == 0) return false;
+        JsonObject v = null;
+        for (JsonObject p : places(ctx)) if (gets(job, "village", "").equals(gets(p, "id", ""))) v = p;
+        org.bukkit.inventory.Inventory store = v == null ? null : chestAt(w, v.getAsJsonObject("store"));
+        if (store == null) { finishJob(rec, e, "the store is gone"); return true; }
+        double markup = memberOf(v, id) ? 1.0 : 1.25;
+        int hunger = geti(rec, "hunger", 20);
+        int bought = 0, sold = 0;
+
+        // buy what I need, paying with what I value least, at the store's flat prices
+        if (hunger < 16) {
+            for (int slot = 0; slot < store.getSize() && bought < 3; slot++) {
+                ItemStack s = store.getItem(slot);
+                if (s == null || nutrition(s.getType()) <= 0) continue;
+                double price = baseValue(s.getType()) * markup;
+                double paid = 0;
+                List<JsonObject> coins = new ArrayList<JsonObject>();
+                while (paid < price) {
+                    JsonObject coin = cheapest(rec, 0.2);
+                    if (coin == null || nutrition(Material.matchMaterial(gets(coin, "item", ""))) > 0) break;
+                    Material cm = Material.matchMaterial(gets(coin, "item", ""));
+                    take(rec, cm, 1);
+                    store.addItem(new ItemStack(cm, 1));
+                    paid += baseValue(cm);
+                }
+                if (paid < price) break;                 // could not afford it; what was put down stays paid
+                s.setAmount(s.getAmount() - 1);
+                store.setItem(slot, s.getAmount() <= 0 ? null : s);
+                give(rec, s.getType(), 1);
+                bought++;
+            }
+        }
+        // sell surplus the store is short of: cheap bulk I am carrying a lot of
+        for (JsonElement el : new ArrayList<JsonElement>()) { }
+        JsonArray inv = arr(rec, "inventory");
+        for (int k = inv.size() - 1; k >= 0 && sold < 16; k--) {
+            JsonObject s = inv.get(k).getAsJsonObject();
+            Material m = Material.matchMaterial(gets(s, "item", ""));
+            if (m == null || m.getMaxDurability() > 0 || m == Material.PLAYER_HEAD) continue;
+            if (count(rec, m) < 24 || nutrition(m) > 0) continue;
+            if (store.containsAtLeast(new ItemStack(m), 32)) continue;
+            int n = Math.min(8, count(rec, m) - 16);
+            if (n <= 0) continue;
+            if (!store.addItem(new ItemStack(m, n)).isEmpty()) break;
+            take(rec, m, n);
+            sold += n;
+            // the store pays in kind: the most useful thing it holds that I lack
+            for (int slot = 0; slot < store.getSize(); slot++) {
+                ItemStack pay = store.getItem(slot);
+                if (pay == null) continue;
+                if (baseValue(pay.getType()) > baseValue(m) * n) continue;
+                if (count(rec, pay.getType()) > 0) continue;
+                pay.setAmount(pay.getAmount() - 1);
+                store.setItem(slot, pay.getAmount() <= 0 ? null : pay);
+                give(rec, pay.getType(), 1);
+                break;
+            }
+        }
+        if (bought + sold > 0) practise(rec, "trading", 1.0);
+        rec.addProperty("noMarketUntil", System.currentTimeMillis() + 240000);
+        finishJob(rec, e, bought + sold > 0 ? "bought " + bought + ", sold " + sold : "nothing to do at market");
+        return true;
+    }
+
     // ---- visit: go stand near somebody
 
     private static JsonObject nearestOther(JsonObject rec, Entity e, List<JsonObject> everyone, NpcManager npcs, double within) {
@@ -1622,6 +1954,25 @@ public class People implements GadgetContract {
     };
     private static final String[] NEED_KINDS = { "explore", "social", "wealth", "craft" };
 
+    /** Real accounts with distinctive skins, so nobody is a default Steve. */
+    private static final String[] SKINS = {
+        "Notch", "jeb_", "Dinnerbone", "Grumm", "Searge", "xisumavoid", "Mumbo", "Grian", "Iskall85", "Etho",
+        "Docm77", "Zisteau", "Keralis", "BdoubleO100", "Tango", "impulseSV", "Cubfan135", "falsesymmetry",
+        "Stressmonster101", "ZombieCleo", "GoodTimesWithScar", "PearlescentMoon", "GeminiTay", "Rendog",
+        "Joehills", "Hypnotizd", "VintageBeef", "Welsknight", "xBCrafted", "Zedaph", "Smallishbeans", "fWhip",
+        "LDShadowLady", "Solidarity", "Skizzleman", "Kryticalc", "EthosLab"
+    };
+
+    private static String pickSkin(List<JsonObject> everyone) {
+        for (int i = 0; i < 30; i++) {
+            String s = SKINS[rand(SKINS.length)];
+            boolean used = false;
+            for (JsonObject o : everyone) if (s.equalsIgnoreCase(gets(o, "skin", ""))) used = true;
+            if (!used) return s;
+        }
+        return SKINS[rand(SKINS.length)];
+    }
+
     /** Two dice, centred: most people are ordinary, a few are remarkable either way. */
     private static int rollAbility() {
         int v = rand(4) + rand(4) - 3;      // -3..3, peaked at 0
@@ -1652,6 +2003,7 @@ public class People implements GadgetContract {
         for (String s : new String[]{ "str", "dex", "con", "wis", "int", "cha" }) ab.addProperty(s, rollAbility());
         args.add("abilities", ab);
         args.addProperty("skill", SKILLS[rand(SKILLS.length)]);
+        args.addProperty("skin", pickSkin(everyone));
         JsonObject need = new JsonObject();
         need.addProperty("kind", NEED_KINDS[rand(NEED_KINDS.length)]);
         need.addProperty("value", 10);
@@ -1722,6 +2074,37 @@ public class People implements GadgetContract {
             rec.addProperty("activity", "found again");
         }
         normalise(rec);
+
+        // --- gravity, when nothing else is moving them. The walker handles falls on the
+        // move; standing still over nothing (a block mined out from underfoot, a ledge
+        // that was not there a moment ago) must still end on the ground, and a long
+        // drop must hurt the way it hurts a player.
+        if (!walking(ctx, id)) {
+            if (!e.hasGravity()) e.setGravity(true);
+            Location at = e.getLocation();
+            World w = e.getWorld();
+            int fx = at.getBlockX(), fz = at.getBlockZ();
+            int fy = at.getBlockY();
+            boolean inWater = w.getBlockAt(fx, fy, fz).getType() == Material.WATER;
+            if (!inWater) {
+                int fell = 0;
+                while (fell < 24 && fy - 1 > w.getMinHeight()) {
+                    Block below = w.getBlockAt(fx, fy - 1, fz);
+                    Material bm = below.getType();
+                    if (!below.isPassable() && bm != Material.WATER) break;
+                    if (bm == Material.WATER) { fy--; break; }
+                    fy--; fell++;
+                }
+                if (fell > 0) {
+                    Location down = new Location(w, at.getX(), fy, at.getZ(), at.getYaw(), at.getPitch());
+                    e.teleport(down);
+                    if (fell > 3 && e instanceof LivingEntity && w.getBlockAt(fx, fy, fz).getType() != Material.WATER) {
+                        ((LivingEntity) e).damage(fell - 3);
+                        w.playSound(down, org.bukkit.Sound.ENTITY_PLAYER_BIG_FALL, 0.8f, 1.0f);
+                    }
+                }
+            }
+        }
 
         // --- the body
         JsonObject job = rec.has("job") && rec.get("job").isJsonObject() ? rec.getAsJsonObject("job") : null;
@@ -1842,7 +2225,10 @@ public class People implements GadgetContract {
             // something worth having lying nearby? food when hungry, tools any time
             String next = null;
             org.bukkit.entity.Item want = nearestDrop(rec, e, hunger < 16 ? 24 : 12, hunger < 16);
-            if (want != null) {
+            if (want == null && isNight(e.getWorld()) && hunger >= 6 && nearestInn(places(ctx), e, 240) != null
+                    && !rec.has("assigned")) {
+                job = startJob(rec, "lodge");
+            } else if (want != null) {
                 job = startJob(rec, "pickup");
                 Location l = want.getLocation();
                 setTarget(job, l.getBlockX(), l.getBlockY(), l.getBlockZ());
@@ -1868,6 +2254,9 @@ public class People implements GadgetContract {
         else if (jk.equals("craft")) done = jobCraft(ctx, rec, e, id, job);
         else if (jk.equals("visit")) done = jobVisit(ctx, rec, e, id, job, everyone);
         else if (jk.equals("trade")) done = jobTrade(ctx, rec, e, id, job, everyone);
+        else if (jk.equals("build")) done = jobBuild(ctx, rec, e, id, job);
+        else if (jk.equals("lodge")) done = jobLodge(ctx, rec, e, id, job);
+        else if (jk.equals("market")) done = jobMarket(ctx, rec, e, id, job);
         else if (jk.equals("pickup")) {
             int t = travel(ctx, e, id, job, 1.2, false);
             done = t != 0 || geti(job, "beats", 0) > 60;
@@ -1983,7 +2372,8 @@ public class People implements GadgetContract {
             spawn.addProperty("name", name);
             spawn.addProperty("entityType", "MANNEQUIN");
             spawn.addProperty("defense", "fight");
-            if (args.has("skin")) spawn.addProperty("skin", args.get("skin").getAsString());
+            String skin = args.has("skin") ? args.get("skin").getAsString() : pickSkin(roster(ctx));
+            spawn.addProperty("skin", skin);
             spawn.addProperty("world", w.getName());
             spawn.addProperty("x", x + 0.5);
             spawn.addProperty("y", y);
@@ -2000,6 +2390,7 @@ public class People implements GadgetContract {
             JsonObject rec = new JsonObject();
             rec.addProperty("id", id);
             rec.addProperty("name", name);
+            rec.addProperty("skin", skin);
             if (args.has("bio")) rec.addProperty("bio", args.get("bio").getAsString());
             if (args.has("abilities")) rec.add("abilities", args.getAsJsonObject("abilities"));
             if (args.has("need")) rec.add("need", args.getAsJsonObject("need"));
@@ -2017,6 +2408,49 @@ public class People implements GadgetContract {
             rec.addProperty("happiness", 100);
             save(ctx, rec);
             return rec;
+        }
+
+        /**
+         * Somebody asked, and they said yes. Put the job at the front of their day, and
+         * remember the promise so they can be held to it. This is how a conversation
+         * becomes a task: the actor calls it when it agrees to something.
+         */
+        if (action.equals("assign")) {
+            String npcId = args.get("npcId").getAsString();
+            String jobKind = args.get("job").getAsString();
+            String[] known = { "hunt", "fish", "farm", "chop", "mine", "explore", "craft", "trade", "visit", "market", "build", "rest" };
+            boolean ok = false;
+            for (String k : known) if (k.equals(jobKind)) ok = true;
+            if (!ok) throw new IllegalArgumentException("no such job: " + jobKind + " (one of " + String.join(", ", known) + ")");
+            JsonObject q = new JsonObject();
+            q.addProperty("collection", "npcs");
+            q.addProperty("id", npcId);
+            JsonObject rec = ctx.invoke("ledger_get", q);
+            NpcData d = ctx.plugin().npcManager().get(npcId);
+            Entity e = d == null || d.dead ? null : ctx.plugin().npcManager().resolveEntity(d);
+            if (e != null) hold(e, null);
+            JsonObject job = startJob(rec, jobKind);
+            if (args.has("want")) job.addProperty("want", args.get("want").getAsString().toUpperCase(java.util.Locale.ROOT));
+            job.addProperty("assigned", true);
+            if (args.has("for")) job.addProperty("for", args.get("for").getAsString());
+            JsonObject promise = new JsonObject();
+            promise.addProperty("job", jobKind);
+            if (args.has("want")) promise.addProperty("want", args.get("want").getAsString());
+            if (args.has("for")) promise.addProperty("to", args.get("for").getAsString());
+            if (args.has("promise")) promise.addProperty("said", args.get("promise").getAsString());
+            promise.addProperty("at", java.time.Instant.now().toString());
+            JsonArray promises = arr(rec, "promises");
+            promises.add(promise);
+            while (promises.size() > 8) promises.remove(0);
+            rec.addProperty("assigned", jobKind);
+            rec.addProperty("attendUntil", 0);
+            rec.addProperty("activity", "off to " + jobKind + (args.has("for") ? " for " + args.get("for").getAsString() : ""));
+            save(ctx, rec);
+            JsonObject out = new JsonObject();
+            out.addProperty("npcId", npcId);
+            out.addProperty("job", jobKind);
+            out.addProperty("started", true);
+            return out;
         }
 
         if (action.equals("arrive")) {

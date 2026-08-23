@@ -224,6 +224,10 @@ pt("npc_revive", "Bring a dead NPC back to life (dead NPCs never auto-respawn). 
   world: z.string().optional(),
 });
 pt("npc_say", "Make an NPC speak. This is the ONLY dialogue channel - chat is exclusively for dialogue.", { id: z.string(), text: z.string() });
+tool("npc_do", "Commit this NPC to a job right now, as the outcome of a conversation: hunt, fish, farm, chop, mine, explore, craft (with want=ITEM), trade, visit, market, build, rest. Only promise what the sheet shows you can do. The promise is remembered on the sheet.", {
+  id: z.string(), job: z.string(), want: z.string().optional().describe("for craft: the item, e.g. WOODEN_PICKAXE"),
+  for: z.string().optional().describe("who asked"), promise: z.string().optional().describe("what you said you would do, in your words"),
+}, (args) => call("gadget:people", { action: "assign", npcId: args.id, job: args.job, want: args.want, for: args.for, promise: args.promise }));
 pt("npc_walk_to", "Walk an NPC to a position (pauses its daily routine for holdSeconds).", {
   id: z.string(), ...pos,
   speed: z.number().optional(),

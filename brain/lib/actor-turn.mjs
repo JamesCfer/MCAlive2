@@ -73,6 +73,10 @@ export function buildActorPrompt({ npc, facts, player, trigger, message, transcr
     lines.push(`${player} said to you: "${message}"`);
     lines.push("Reply in character with npc_say.");
   }
+  lines.push("");
+  lines.push("If you agree to DO something, say so AND call npc_do with the matching job so it actually happens -");
+  lines.push("hunt, fish, farm, chop, mine, explore, craft (want=ITEM), trade, visit, market, build, rest.");
+  lines.push("Your sheet shows your skills, tools and bag: only promise what you can really do, and say no honestly otherwise.");
   return lines.join("\n");
 }
 

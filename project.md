@@ -20,12 +20,12 @@ These came from James directly and override convenience. Breaking one is a bug, 
 3. **Never ship a capability as a plugin change.** The ladder is: existing tool → formula →
    **gadget** (Java compiled onto the running server via `gadget_define`). The plugin surface
    is frozen.
-4. **Placement of a settlement is authoring, not NPC movement.** Founding or re-founding a
-   line's home may put bodies where they belong. Say so explicitly when you do it.
-5. **Food has no grace period.** Hunger is lethal, drains 1 point per 2 minutes, and starts
-   from an empty store. Do not soften it when a line struggles — a line that cannot feed
-   itself is supposed to die. Softening it is what produced a world of 47 permanently
-   starving people who could never die and never grew.
+4. **Every NPC is a player.** They start at world spawn with nothing, gather like a player,
+   craft like a player, die like a player. Nothing is placed for them, stocked for them or
+   picked for them. If the ground is bad they walk. If they cannot feed themselves they die.
+5. **Food has no grace period.** Hunger is lethal. Do not soften it when someone struggles.
+   Softening it is what produced a world of 47 permanently starving people who could never
+   die and never grew.
 
 ---
 
@@ -38,7 +38,7 @@ These came from James directly and override convenience. Breaking one is a bug, 
   behaviour lives. **Every gadget's source is committed under `brain/gadgets/`** (2026-08-22);
   before that, most existed only inside a running server's `gadgets.json` and one lost disk
   would have taken the entire capability set with it. Edit the file, then install it —
-  `scripts/found.mjs --start` does that for the ones it owns. The brain re-installs
+  `scripts/people.mjs --start` installs every one. The brain re-installs
   `position-tracker` and `world-scan` itself on boot.
 
 Bridge: `ws://192.168.40.4:8765`, token `mca2-Xq7vN4kRw9pTz2Lm8Jd3`.
@@ -52,7 +52,9 @@ server. Drive the bridge with a small Node WebSocket client instead (`auth`, the
 
 | What | Where |
 |---|---|
-| Character sheet — personality, needs, hunger, activity, faction, bloodline, alive | `plugins/MCAlive2/ledger/npcs.json` |
+| Character sheet — abilities, skills, needs, hunger, inventory, job, promises, village, alive | `plugins/MCAlive2/ledger/npcs.json` |
+| Where each person has been (chunk keys), kept off the sheet the actor reads | `ledger/explored.json` |
+| Villages and ruins (`kind: village | ruin | claimed`), inns, stores | `ledger/places.json` |
 | Body — entity type, skin, uuid, home/work, last location, `dead`/`diedAt` | `plugins/MCAlive2/npcs.json` |
 | Other collections | `ledger/{factions,places,facts,quests,promises,players}.json` |
 | Running state (jobs, sessions, chunk tickets) | memory only — dies on restart |
@@ -64,90 +66,103 @@ file but not `alive` in the ledger — always write both.
 
 ## After every server restart
 
-Runtime timers do not survive. The gadget *source* does — and since the 2026-08-22 rebuild
-every gadget's source is committed under `brain/gadgets/`, so nothing has to be reconstructed
-from a running server ever again.
-
-One command re-installs the sources that matter and restarts every timer, reading each line's
-store and field back out of the `places` ledger:
+Runtime timers do not survive. Gadget sources do, and every one is committed under
+`brain/gadgets/`. One command reinstalls all of them and restarts every timer:
 
 ```
-node scripts/found.mjs --start
+node scripts/people.mjs --start
 ```
 
-That is the whole checklist. It is idempotent and safe to run twice. What it starts:
-
-```
-gadget:presence      {radius:1, periodTicks:100}
-gadget:needs         {stores, periodTicks:1200}
-gadget:hunger        {stores, lethal:true, drainPerBeat:1, periodTicks:2400}
-gadget:pursuits      {stores, warehouses, reserved, periodTicks:40}  then action:"live"
-gadget:farm          {fields, periodTicks:15}
-gadget:roster        {periodTicks:200}
-gadget:groundskeeper {periodTicks:300}
-gadget:reclaim       {periodTicks:60}
-gadget:lineage       {stores, maxKin:5, reservePerMouth:20, periodTicks:1200}
-```
+What it starts: `presence` (3x3 chunks around every person), `groundskeeper`, `people`
+(`populationCap: 40`), `tablist`, `villages`. Nothing else should be running — the founder-era
+gadgets (pursuits, needs, hunger, roster, farm, reclaim, industry...) are kept in the repo as
+reference and must NOT be started; they fight `people` for the same bodies.
 
 **Do not auto-install a timer gadget from the brain's boot path.** `gadget_define` loads a new
-class but does not run it, so the *old* timer keeps beating the *old* code and the new source
-silently does nothing until something runs it. Only `position-tracker` is brain-installed, and
-it defines *and* runs. Everything else belongs in the command above.
+class but does not run it, so the old timer keeps beating the old code. Only `position-tracker`
+is brain-installed, and it defines *and* runs.
 
 ---
 
-## How a line grows
+## How people work
 
-The world is founded (2026-08-22) with **eight lone Ancients** and nothing else — no kin, no
-tools, an empty chest, a bench and a furnace on flat ground about 520 blocks from spawn and
-~300–500 from each other. `scripts/found.mjs` surveys for the sites and stands them up.
+**Every NPC is a player.** (2026-08-23, James: "I want npc's to start at spawn just like a
+player, gather resources just like players and be just like fucking players.") The founders,
+lines, lineage and migration are gone. `gadget:people` is the NPC.
 
-Each founder can raise **five generation-1 followers**, and chooses when. `gadget:lineage`
-scores the decision every minute out of the same needs-and-personality arithmetic the chooser
-uses — no threshold, no model call:
+- **Start** at world spawn with nothing. `scripts/people.mjs` spawns `scripts/people.json`; after
+  that 0–5 strangers arrive at 5am each Minecraft day (rolled sheets) until `populationCap` (40).
+- **Body**: 20 hp (the real entity), 20 hunger draining a point a minute working / two idle,
+  a 36-stack inventory in the ledger record (a mannequin cannot carry a real one), tools with
+  real durability, vanilla recipes (`Bukkit.getRecipesFor`) and vanilla drops
+  (`Block.getDrops(tool)`), the tool held in hand. Gravity applies when they stand still; the
+  walker swims through water rather than over it. Death is permanent; the head drops and never
+  despawns; anyone who walks over it carries it with its identity.
+- **Abilities**: str dex con wis int cha, -3..+3, fixed. **Skills**: farming hunting mining
+  building fishing swimming exploring treechopping crafting trading; start 0; minutes at the
+  skill accumulate; point n at 2^n-1 minutes. Each leans on one ability (`SKILL_STAT`). Skill +
+  ability weights which job is picked and how fast it goes (`pace()`).
+- **Needs**: hp, hunger, and one of their own (explore / social / wealth / craft). Happiness
+  is how full the three are. The chooser scores each job by shortfall² × how much the job
+  serves it × aptitude, and picks among the top three; with nothing short, people do what they
+  are good at.
+- **Jobs**: hunt fish farm chop mine explore craft visit trade market build lodge pickup rest.
+  Each is one static method advancing a persisted state machine one beat at a time, so a
+  redefine or a restart resumes mid-job. Crafting resolves its own chain (hoe → sticks → planks
+  → logs → a tree). A job chosen from a conversation (`npc_do` → `people assign`) goes first
+  and is remembered as a promise on the sheet.
+- **Trade**: `valueTo()` prices an item by how much it serves YOUR unmet needs; a deal happens
+  only when both gain by their own reckoning, shaded by trading skill; nothing to offer means
+  no deal and the person goes and solves it another way. A done deal cools the pair for 5 min.
+- **Talking**: the plugin routes chat to an NPC within 8 blocks; an NPC with a player within 4
+  blocks stops, faces them and waits 20 s so that can happen. The actor may call `npc_do`.
+- **Villages** (`gadget:villages`): a person within ~96 blocks of a generated village records
+  it as a ruin; a person with a bench and a neighbour standing in a ruin claims it, or with a
+  field, a bench and two neighbours founds one in the open; two minutes nearby makes you a
+  member and the village your home; a village without an inn asks a member with timber and
+  some building skill, who raises a 5x5 inn block by block (`build`); at night people lodge at
+  the nearest inn (`lodge`), strangers paying one item into the inn chest; that chest is the
+  market (`market`) anyone buys from and sells to at `baseValue`, strangers at 1.25×.
+- **Tab list** (`gadget:tablist`): every living person is a real player-info entry.
 
-```
-pressure  = (necessity + belonging + purpose) x confidence
-restraint = 1.5 + 0.4 x kin + 0.35 x max(0, 12 - fed)
-```
+`gadget:people {action:"status"}` is the one-screen view. `scripts/people.mjs --status` prints it.
 
-- **necessity** — 1.4 per unfilled role (forager, farmer, woodcutter, builder, miner). This is
-  what lets a cold founder grow: Vecna does not want company, he wants the wood cut. Measured,
-  a lone founder scores 8.6 (Vecna) to 12.2 (Lliira) against a restraint of 1.5, so every line
-  calls its first follower as soon as it can feed one.
-- **confidence** — banked nutrition ÷ `(mouths + 1) x 20`, capped at 2.0. **Below 1.0 the
-  decision cannot fire at all.** A line grows exactly as fast as it learns to feed itself.
-- Belonging saturates near four kin (it reads as line-mates within 28 blocks), so the fifth
-  follower is carried by necessity and purpose alone and needs a genuinely stocked larder —
-  measured at 150–164 nutrition banked.
+---
 
-Followers inherit alignment, ethos and the founder's long want, and each personality axis with
-a ±1 drift. Their short want, appearance and activity come from the role they were called for.
-They are `bloodline.generation: 1` with the founder as parent, and carry a `role` field.
+## The developer
 
-A called farmer is immediately reserved with `gadget:pursuits {action:"reserve"}` and handed
-the field with `gadget:farm {action:"assign"}` — both added for exactly this, because
-restarting either gadget to change one name wipes every running job.
+Once an hour (`BRAIN_DEV_INTERVAL_MIN`, default 60) the brain runs `lib/developer.mjs`: it
+takes the first `pending` entry in `brain/roadmap.json` (100 features, in dependency order),
+hands a coding agent this file, the roadmap, the live status and the feature, and lets it work
+in the laptop checkout with file tools plus the live bridge. The agent compiles its gadget on
+the running server, verifies, marks the entry `done` (or `failed`, honestly) with notes,
+appends to "Features added by the developer" below, and commits. The brain then pushes, and
+the self-updater restarts it on the new code.
+
+Guardrails: one run at a time; skipped when fewer than `BRAIN_DEV_MIN_REMAINING_TOKENS`
+(800k) of the daily budget remain; the self-updater waits while a run is in progress; an entry
+that runs twice without being marked is parked as `failed`. `state/developer.log` is the
+journal. **The push needs git credentials on the laptop** — if it fails the feature is still
+live on the server (the gadget was defined) but GitHub lags until someone pushes.
+
+## Features added by the developer
+
+(none yet)
+
+---
 
 ## The gadgets
 
 | Gadget | Does |
 |---|---|
-| `navigate` | A* over standing positions, player rules, surface-biased. Everything that moves goes through this. |
-| `pursuits` | The chooser: 54 actions scored against needs and personality. `action:"why"` explains a decision. |
-| `needs` | Eight drives. Fatigue/purpose/curiosity accumulate; safety/shelter/belonging/wealth are read from the world. |
-| `hunger` | Fed level, eating from the line store, starvation, auto-dispatch of foragers. |
-| `farm` | The sustainable food loop: weed, till, sow, reap; harvests return seed. |
-| `forage` / `forester` / `mine` | Walking expeditions for meat, timber, ore. |
-| `craft` / `smelt` / `store` | Vanilla recipes against a chest; `store` also places blocks and spills surplus. |
-| `shelter` | Raises a hut block by block from a line's store. |
-| `groundskeeper` | Frees NPCs stuck in terrain; digs them out; resumes what it can. |
-| `reclaim` | Any Ancient walks to a memorial head and restores the dead. |
-| `presence` | Holds chunk tickets where NPCs stand; unloads everything else. |
-| `roster` | Writes a plain-English activity onto every ledger record for the map. |
-| `lineage` | An Ancient's own decision to call kin, and what role that kin fills. `action:"why"` shows the arithmetic per line. |
-
----
+| `people` | The NPC. Body, abilities, skills, needs, every job, trade, arrivals, heads. `status`, `spawn`, `arrive`, `assign`. |
+| `villages` | Ruins found, villages founded and joined, inns asked for. `status`, `inn_built`. |
+| `tablist` | People in the player list. `status`, `debug`. |
+| `navigate` | A* over standing positions, player rules, swims through water, surface-biased. Everything that moves goes through this. |
+| `presence` | Holds chunk tickets in a 3x3 around every person; unloads the rest. |
+| `groundskeeper` | Frees people stuck in terrain by walking or digging, never lifting. |
+| `world-scan`, `position-tracker` | Brain-owned: the console map and live positions. |
+| `craft`, `smelt`, `store`, `mine`, `forage`, `forester`, `shelter`, `farm`, `hunger`, `needs`, `pursuits`, `roster`, `reclaim`, `industry`, `build-structure`, `place-structure` | Founder-era. Kept as reference and as a parts bin; not started. |
 
 ## Gotchas paid for in blood
 
@@ -221,17 +236,16 @@ restarting either gadget to change one name wipes every running job.
 
 ## Known open issues
 
-- **The first world died of a fed economy, not a broken one.** 47 NPCs sat at 0/20 fed
-  permanently because starvation had been disarmed while foraging was retuned for walking, and
-  the eight dedicated farmers were never passed as `reserved` after a restart, so the chooser
-  sent every one of them off to forage or fell timber. Both are fixed: hunger is lethal again
-  and `found.mjs --start` always passes the reservations.
-- The **new world is unproven at the far end.** A lone founder reaching five kin has been
-  modelled, not observed. Watch whether any line actually banks 150+ nutrition.
-- Phases 5–7 of the decision plan are unbuilt: multi-step plans, the social layer, and the
-  Ancients' goal arcs. `lineage` is a narrow slice of the social layer, not the whole thing.
-- `npc_begotten` is deliberately **not** in `DIRECTOR_WAKE_EVENTS`. Add it only if you want the
-  director narrating births — it fires at most 40 times in a world's life, so it is affordable.
-- Founder **skins are not recovered.** The old world's skins lived only in the laptop's
-  `plugins/MCAlive2/npcs.json`, which the wipe destroys. Everyone founds as a default mannequin
-  until skins are set with `npc_update`.
+- **Hunting fed nobody for an hour on 2026-08-23** and all four people starved: the first
+  version of real drops finished the loot step the instant the hunter was "near enough" to
+  where the animal stood, with a 1.5-block pickup radius. Fixed (walk onto each drop, 2.5-block
+  pickup, 90 s chase cap) and proven with a test hunter before respawning. Lesson: **a change to
+  how food arrives gets tested with a hungry tester before anyone lives on it.**
+- The plugin's own registry can lose a body that is still standing there (Wren, next to Mara).
+  `people` re-adopts by tag each beat; presence and chat routing then see them again.
+- `tablist` is reflection over server internals (`ClientboundPlayerInfoUpdatePacket$Entry`);
+  a Paper bump shows up as `lastError` in its status, not a compile error.
+- The brain smoke test has one pre-existing failure ("voxel shell is Chebyshev distance 3")
+  from the SHELL=1 change; the test was never updated.
+- Fishing is unreachable until string exists (no spiders spawn). On the roadmap.
+

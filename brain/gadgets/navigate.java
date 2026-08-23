@@ -64,16 +64,26 @@ public class Navigator implements GadgetContract {
     private static boolean solidFooting(Block b) {
         Material m = b.getType();
         if (m == Material.LAVA) return false;
-        if (m == Material.WATER) return true;      // you can swim
+        if (m == Material.WATER) return false;     // water holds nobody up
         return !b.isPassable();
     }
 
-    /** Can an NPC stand here - feet and head clear, something to stand on? */
+    /**
+     * Can an NPC be here - feet and head clear, and either something solid underfoot or
+     * water at the feet? A body in water is IN the water, treading at the surface, not
+     * walking across the top of it. That is the difference between a swimmer and a saint.
+     */
     private static boolean standable(World w, int x, int y, int z) {
         if (y <= w.getMinHeight() + 1 || y >= w.getMaxHeight() - 1) return false;
-        if (!passable(w.getBlockAt(x, y, z))) return false;
+        Block feet = w.getBlockAt(x, y, z);
+        if (!passable(feet)) return false;
         if (!passable(w.getBlockAt(x, y + 1, z))) return false;
+        if (feet.getType() == Material.WATER) return true;
         return solidFooting(w.getBlockAt(x, y - 1, z));
+    }
+
+    private static boolean swimming(World w, int x, int y, int z) {
+        return w.getBlockAt(x, y, z).getType() == Material.WATER;
     }
 
     /** How far a path may sink below the daylit surface before it is refused. */
@@ -89,7 +99,7 @@ public class Navigator implements GadgetContract {
         long k = (((long) x) << 32) ^ (z & 0xFFFFFFFFL);
         Integer v = cache.get(k);
         if (v != null) return v.intValue();
-        int y = w.getHighestBlockYAt(x, z, org.bukkit.HeightMap.OCEAN_FLOOR);
+        int y = w.getHighestBlockYAt(x, z, org.bukkit.HeightMap.MOTION_BLOCKING_NO_LEAVES);
         cache.put(k, Integer.valueOf(y));
         return y;
     }
@@ -165,6 +175,8 @@ public class Navigator implements GadgetContract {
                     // Going under the sky costs. This is what stops a cave mouth scoring as
                     // a shortcut and walking somebody down to bedrock one legal step at a time.
                     if (!underground && depth > 0) step += depth * DEPTH_COST;
+                    // swimming is slow, and a swimmer goes round a lake when there is a round
+                    if (swimming(w, nx, ny, nz)) step *= 2.2;
                     double ng = cur.g + step;
                     Node prev = best.get(nk);
                     if (prev != null && prev.g <= ng) break;
@@ -304,8 +316,9 @@ public class Navigator implements GadgetContract {
             }
             if (++wk.stuckTicks > 100) { finish(ctx, wk, "stuck"); return; }
 
-            double moveX = flat > 0 ? dx / flat * wk.speed : 0;
-            double moveZ = flat > 0 ? dz / flat * wk.speed : 0;
+            double sp = swimming(world, cur.getBlockX(), cur.getBlockY(), cur.getBlockZ()) ? wk.speed * 0.45 : wk.speed;
+            double moveX = flat > 0 ? dx / flat * sp : 0;
+            double moveZ = flat > 0 ? dz / flat * sp : 0;
             double nx = cur.getX() + moveX, nz = cur.getZ() + moveZ;
             // rise or fall towards the next foothold rather than snapping to it
             double dy = ty - cur.getY();
@@ -325,6 +338,7 @@ public class Navigator implements GadgetContract {
             // hangs there. Fall to the first footing under it, as a body would.
             int fell = 0;
             while (fell < 4
+                    && !swimming(world, next.getBlockX(), next.getBlockY(), next.getBlockZ())
                     && !solidFooting(world.getBlockAt(next.getBlockX(), next.getBlockY() - 1, next.getBlockZ()))
                     && passable(world.getBlockAt(next.getBlockX(), next.getBlockY() - 1, next.getBlockZ()))) {
                 next.setY(next.getY() - 1);

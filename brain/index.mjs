@@ -57,6 +57,7 @@ import { runDirectorTurn } from "./lib/director-turn.mjs";
 import { runActorTurn } from "./lib/actor-turn.mjs";
 import { parseActorReport } from "./lib/actor-report.mjs";
 import { SelfUpdater } from "./lib/self-update.mjs";
+import { Developer } from "./lib/developer.mjs";
 
 export async function main(env = process.env) {
   const config = loadConfig(env);
@@ -152,10 +153,11 @@ export async function main(env = process.env) {
    * idle signal of their own, so this polls the two flags directly rather
    * than threading a new event through both - self-update only calls this
    * right before an infrequent restart, so polling cost is a non-issue. */
+  let developer = null; // set below; the self-updater must not restart mid-edit
   function waitUntilIdle(pollMs = 200) {
     return new Promise((resolve) => {
       const check = () => {
-        if (!scheduler.sceneRunning && activeActorTurns === 0) {
+        if (!scheduler.sceneRunning && activeActorTurns === 0 && !(developer && developer.running)) {
           resolve();
           return;
         }
@@ -684,6 +686,7 @@ export async function main(env = process.env) {
   bridge.start();
 
   const stop = () => {
+    if (developer) developer.stop();
     bridge.stop();
     loreWatch.stop();
     actorMemory.saveSync();
@@ -697,6 +700,15 @@ export async function main(env = process.env) {
   // shutdown would, then exits 75 - run-forever.cmd (brain/run-forever.cmd)
   // interprets exit 75 as "restart me immediately", any other nonzero exit
   // as a crash (restart after a short delay), and 0 as a deliberate stop.
+  // The developer: hourly, adds the next feature from brain/roadmap.json and pushes.
+  developer = new Developer({
+    config,
+    usage,
+    repoRoot: path.resolve(BRAIN_ROOT, ".."),
+    bridgeCall: (cmd, args, timeoutMs) => bridge.call(cmd, args, timeoutMs),
+    waitForIdle: () => waitUntilIdle(),
+  }).start();
+
   const selfUpdater = new SelfUpdater({
     checkIntervalSec: config.updateCheckSec,
     waitForIdle: waitUntilIdle,
@@ -716,6 +728,7 @@ export async function main(env = process.env) {
     bridge,
     onlinePlayers,
     selfUpdater,
+    developer,
     stop,
   };
 }

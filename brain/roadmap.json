@@ -1,0 +1,806 @@
+{
+  "version": 1,
+  "note": "One feature per developer run, in order. Statuses: pending | done | failed. The developer edits only the entry it worked on.",
+  "features": [
+    {
+      "id": "f001",
+      "area": "crafting",
+      "title": "Cook meat at a furnace",
+      "what": "A person with raw meat and a furnace in reach (or one in the bag, placed) smelts it with real fuel (logs/planks/coal) and eats cooked food. When hungry and holding raw meat, prefer cooking before eating.",
+      "acceptance": "Someone with raw beef and logs ends up with cooked beef; lastMeal shows COOKED_*.",
+      "status": "pending"
+    },
+    {
+      "id": "f002",
+      "area": "crafting",
+      "title": "Furnace from cobblestone",
+      "what": "Crafting resolves FURNACE (8 cobblestone) through the existing chain so a person who mines can make one, and places it near their bench.",
+      "acceptance": "A person with a pickaxe and no furnace acquires one without any item being handed out.",
+      "status": "pending"
+    },
+    {
+      "id": "f003",
+      "area": "crafting",
+      "title": "Stone tools after wooden",
+      "what": "Once a person holds 3+ cobblestone, tool wants upgrade: STONE_PICKAXE, STONE_AXE, STONE_SWORD, STONE_HOE replace wooden ones in the craft wish list.",
+      "acceptance": "A miner with a wooden pickaxe and cobblestone makes a stone pickaxe and holds it.",
+      "status": "pending"
+    },
+    {
+      "id": "f004",
+      "area": "survival",
+      "title": "Bread from wheat",
+      "what": "A farmer who reaps wheat bakes bread (3 wheat) at a bench and eats it; bread is preferred over raw meat when both are held.",
+      "acceptance": "lastMeal BREAD appears for a farmer within two harvests.",
+      "status": "pending"
+    },
+    {
+      "id": "f005",
+      "area": "survival",
+      "title": "Berries and apples as forage",
+      "what": "Sweet berry bushes and apples from oak leaves count: a hungry person with no meat gathers berries/apples within 24 blocks before hunting.",
+      "acceptance": "A hungry person near berry bushes eats SWEET_BERRIES.",
+      "status": "pending"
+    },
+    {
+      "id": "f006",
+      "area": "survival",
+      "title": "Sleep at night without an inn",
+      "what": "With no inn in reach, a person makes a one-block shelter (dig in or a 1x2 hut) and sleeps through the night; hp regen doubles while asleep.",
+      "acceptance": "At night people stop working and 'asleep' appears in activity.",
+      "status": "pending"
+    },
+    {
+      "id": "f007",
+      "area": "survival",
+      "title": "Torches against the dark",
+      "what": "People who hold coal and sticks craft torches and place one where they work at night and one at their bed.",
+      "acceptance": "Torches appear at camps and fields at night.",
+      "status": "pending"
+    },
+    {
+      "id": "f008",
+      "area": "survival",
+      "title": "Fall damage like a player",
+      "what": "Falls of more than 3 blocks take (blocks-3) hp; the walker refuses drops over 6 unless into water.",
+      "acceptance": "A person never dies to a fall the walker chose.",
+      "status": "pending"
+    },
+    {
+      "id": "f009",
+      "area": "survival",
+      "title": "Fire and lava are fatal hazards",
+      "what": "The walker never paths through lava or fire; a person adjacent to lava backs away; burning takes hp.",
+      "acceptance": "No person ever stands in lava.",
+      "status": "pending"
+    },
+    {
+      "id": "f010",
+      "area": "survival",
+      "title": "Tool upkeep",
+      "what": "A person checks tool durability and crafts a replacement before it breaks.",
+      "acceptance": "Nobody carries a tool under 10% durability for long.",
+      "status": "pending"
+    },
+    {
+      "id": "f011",
+      "area": "mining",
+      "title": "Coal and iron smelting",
+      "what": "A miner with raw iron and a furnace smelts ingots using coal first, then planks; iron tools enter the craft wish list.",
+      "acceptance": "An IRON_PICKAXE appears in someone's bag with no item ever handed out.",
+      "status": "pending"
+    },
+    {
+      "id": "f012",
+      "area": "mining",
+      "title": "Staircase mining to ore depth",
+      "what": "Mining digs a proper staircase down to y=16 and branch-mines, placing a torch every 8 blocks and never digging under its own feet.",
+      "acceptance": "A miner returns with raw iron and coal; the shaft has torches.",
+      "status": "pending"
+    },
+    {
+      "id": "f013",
+      "area": "mining",
+      "title": "Copper",
+      "what": "Copper ore is mined and smelted; copper is a trade good with a base value and feeds any vanilla copper recipe present.",
+      "acceptance": "Copper ingots appear in bags and have a base value.",
+      "status": "pending"
+    },
+    {
+      "id": "f014",
+      "area": "materials",
+      "title": "Leather armour",
+      "what": "A person with 5+ leather crafts leather armour and wears it (equipment slots); armour reduces damage taken.",
+      "acceptance": "A person is seen wearing leather armour.",
+      "status": "pending"
+    },
+    {
+      "id": "f015",
+      "area": "materials",
+      "title": "Shears and wool",
+      "what": "Shears from 2 iron; sheep are sheared rather than killed when wool is the need, and regrow.",
+      "acceptance": "A person with shears shears without killing.",
+      "status": "pending"
+    },
+    {
+      "id": "f016",
+      "area": "materials",
+      "title": "Buckets and water",
+      "what": "An iron bucket lets a farmer carry water to a dry field and a builder make an infinite water source.",
+      "acceptance": "A field with no nearby water gets irrigated.",
+      "status": "pending"
+    },
+    {
+      "id": "f017",
+      "area": "materials",
+      "title": "Stone bricks for walls",
+      "what": "Builders who hold cobblestone make stone bricks and use them for inn walls when available, planks otherwise.",
+      "acceptance": "An inn built by a stone-holding builder has stone walls.",
+      "status": "pending"
+    },
+    {
+      "id": "f018",
+      "area": "materials",
+      "title": "Glass windows",
+      "what": "Sand is smelted to glass; buildings get window panes in the wall pattern.",
+      "acceptance": "Inns built after this have glass.",
+      "status": "pending"
+    },
+    {
+      "id": "f019",
+      "area": "materials",
+      "title": "Bone meal",
+      "what": "Bones (from lore-placed skeletons) or composted plants make bone meal; farmers use it to speed crops.",
+      "acceptance": "Crop growth accelerates when bone meal is held.",
+      "status": "pending"
+    },
+    {
+      "id": "f020",
+      "area": "materials",
+      "title": "Fishing rod from string",
+      "what": "String from cobwebs in mineshafts or spiders when present; the fishing rod recipe resolves and fishing becomes possible.",
+      "acceptance": "Somebody fishes and eats cod.",
+      "status": "pending"
+    },
+    {
+      "id": "f021",
+      "area": "jobs",
+      "title": "Shepherd",
+      "what": "A herd job: lure 2 animals with wheat into a fenced pen near home; the pen is a place record; breeding with wheat produces young; the pen is a food source.",
+      "acceptance": "A pen with 2+ animals exists and food is taken from it.",
+      "status": "pending"
+    },
+    {
+      "id": "f022",
+      "area": "jobs",
+      "title": "Woodcutter replants",
+      "what": "After felling, a person plants a sapling of the same wood in the stump hole if held.",
+      "acceptance": "Saplings appear where trees were cut.",
+      "status": "pending"
+    },
+    {
+      "id": "f023",
+      "area": "jobs",
+      "title": "Builder job for houses",
+      "what": "Members of a village with 60+ planks build a 5x5 house for themselves on a free plot near the inn; the house is their home record.",
+      "acceptance": "A village has houses beyond the inn.",
+      "status": "pending"
+    },
+    {
+      "id": "f024",
+      "area": "jobs",
+      "title": "Road layer",
+      "what": "A villager with 32+ cobblestone lays a one-block path between inn, houses and fields.",
+      "acceptance": "Paths connect village buildings.",
+      "status": "pending"
+    },
+    {
+      "id": "f025",
+      "area": "jobs",
+      "title": "Guard",
+      "what": "A person with a sword and boldness >= 2 takes a patrol job at night around the village edge, attacking hostile mobs in reach.",
+      "acceptance": "A patrolling guard kills a placed zombie.",
+      "status": "pending"
+    },
+    {
+      "id": "f026",
+      "area": "jobs",
+      "title": "Courier",
+      "what": "Carries surplus food from a village store to a person who asked for it via chat (npc_do with want=FOOD).",
+      "acceptance": "A courier delivers food to a hungry person.",
+      "status": "pending"
+    },
+    {
+      "id": "f027",
+      "area": "jobs",
+      "title": "Cook",
+      "what": "A village cook takes raw meat from the store, cooks it at the inn furnace and returns it.",
+      "acceptance": "Store contents change from raw to cooked over time.",
+      "status": "pending"
+    },
+    {
+      "id": "f028",
+      "area": "jobs",
+      "title": "Miner's cart",
+      "what": "A miner with 5 iron and a chest crafts a chest minecart and rails into the shaft to haul loads.",
+      "acceptance": "Rails appear in a shaft.",
+      "status": "pending"
+    },
+    {
+      "id": "f029",
+      "area": "jobs",
+      "title": "Explorer's report",
+      "what": "Discovered ruins are shared to villagers via a fact record when the explorer returns.",
+      "acceptance": "A known-places fact is written by an explorer.",
+      "status": "pending"
+    },
+    {
+      "id": "f030",
+      "area": "jobs",
+      "title": "Fisher's dock",
+      "what": "A fisher with 20 planks builds a 1-wide dock into deep water and fishes from its end.",
+      "acceptance": "A dock exists and a fisher stands on it.",
+      "status": "pending"
+    },
+    {
+      "id": "f031",
+      "area": "trading",
+      "title": "Price memory",
+      "what": "Each person remembers the last price paid for each item and adjusts their valuation toward it; a market that overcharges loses customers.",
+      "acceptance": "The sheet has a prices map that changes after trades.",
+      "status": "pending"
+    },
+    {
+      "id": "f032",
+      "area": "trading",
+      "title": "Bartering talk",
+      "what": "When two people trade, the higher-CHA side proposes; a counteroffer loop of up to 3 rounds narrows the gap; the summary is logged as a fact both know.",
+      "acceptance": "A trade fact with the haggling summary appears.",
+      "status": "pending"
+    },
+    {
+      "id": "f033",
+      "area": "trading",
+      "title": "Village currency",
+      "what": "The village mints a token (a renamed copper nugget) members accept at the market; outsiders pay in goods.",
+      "acceptance": "A token item exists and is used in a market transaction.",
+      "status": "pending"
+    },
+    {
+      "id": "f034",
+      "area": "trading",
+      "title": "Debt and favours",
+      "what": "A person who cannot pay may owe; the creditor records the debt; debts are repaid from surplus; unpaid debts lower the creditor's regard for the debtor.",
+      "acceptance": "A debt is recorded and later cleared.",
+      "status": "pending"
+    },
+    {
+      "id": "f035",
+      "area": "trading",
+      "title": "Traveling merchant",
+      "what": "One high-CHA trader takes a peddle job: walks between villages carrying goods from the store with the biggest surplus to the one with the biggest shortage.",
+      "acceptance": "Goods move between two stores by a walker.",
+      "status": "pending"
+    },
+    {
+      "id": "f036",
+      "area": "trading",
+      "title": "Market stall",
+      "what": "A village with 4+ members and a store builds a stall with a sign listing the store's top goods and prices.",
+      "acceptance": "A sign near the store lists goods.",
+      "status": "pending"
+    },
+    {
+      "id": "f037",
+      "area": "trading",
+      "title": "Gifts",
+      "what": "People with warmth give a small gift to the person nearby whose social need is lowest; the receiver's social need rises.",
+      "acceptance": "A gift event appears.",
+      "status": "pending"
+    },
+    {
+      "id": "f038",
+      "area": "trading",
+      "title": "Reputation",
+      "what": "Each person has a reputation raised by kept promises, gifts and fair trades, lowered by theft or broken promises; reputation shades market markup.",
+      "acceptance": "Reputation field exists and moves.",
+      "status": "pending"
+    },
+    {
+      "id": "f039",
+      "area": "trading",
+      "title": "Theft",
+      "what": "A person with low CHA, high boldness and hunger under 4 may steal from a store; if seen by a member, reputation drops and a guard responds.",
+      "acceptance": "A theft event appears with a witness.",
+      "status": "pending"
+    },
+    {
+      "id": "f040",
+      "area": "trading",
+      "title": "Wages",
+      "what": "A village pays members from the store for completed village jobs (build, patrol, cook); wages are recorded on the sheet.",
+      "acceptance": "A wage payment appears after a village job.",
+      "status": "pending"
+    },
+    {
+      "id": "f041",
+      "area": "talking",
+      "title": "Ask for directions",
+      "what": "Players can ask an NPC where a village, person or ruin is; the actor answers from the places ledger and looks toward it.",
+      "acceptance": "An actor answers a where-is question with coordinates.",
+      "status": "pending"
+    },
+    {
+      "id": "f042",
+      "area": "talking",
+      "title": "NPCs talk to each other",
+      "what": "When two people spend 30+ seconds within 4 blocks, a short in-character exchange is generated once per pair per hour via the actor and spoken with npc_say; cheap model only.",
+      "acceptance": "Two NPCs are seen speaking near each other.",
+      "status": "pending"
+    },
+    {
+      "id": "f043",
+      "area": "talking",
+      "title": "Promise follow-through",
+      "what": "When a chat-assigned job finishes, the person walks back to the asker if within 64 blocks and reports via npc_say.",
+      "acceptance": "An NPC reports back after a chat-assigned job.",
+      "status": "pending"
+    },
+    {
+      "id": "f044",
+      "area": "talking",
+      "title": "Rumours",
+      "what": "Facts with knownBy spread: when two people meet, one fact each is shared with a probability weighted by CHA.",
+      "acceptance": "A fact's knownBy list grows through meetings.",
+      "status": "pending"
+    },
+    {
+      "id": "f045",
+      "area": "talking",
+      "title": "Greetings by name",
+      "what": "NPCs greet players they have met before by name and remember the last thing they were asked.",
+      "acceptance": "Actor memory shows the player's name on a second meeting.",
+      "status": "pending"
+    },
+    {
+      "id": "f046",
+      "area": "talking",
+      "title": "Mood in speech",
+      "what": "The actor prompt includes a one-line mood derived from happiness and needs so replies change tone when hungry or hurt.",
+      "acceptance": "Replies differ between a fed and a starving NPC.",
+      "status": "pending"
+    },
+    {
+      "id": "f047",
+      "area": "talking",
+      "title": "Quests from needs",
+      "what": "An NPC with a need below 8 may ask a nearby player for help with a concrete task and records it as a quest; completing it raises reputation and the need.",
+      "acceptance": "A quest record is created by an NPC and completed by a player.",
+      "status": "pending"
+    },
+    {
+      "id": "f048",
+      "area": "talking",
+      "title": "Naming places",
+      "what": "The founder of a village names it in conversation if asked; the name updates the place record.",
+      "acceptance": "A village is renamed via chat.",
+      "status": "pending"
+    },
+    {
+      "id": "f049",
+      "area": "talking",
+      "title": "Mourning",
+      "what": "When a person dies, those who knew them lose social/happiness and speak of them when asked; the head's location is a fact they know.",
+      "acceptance": "NPCs mention a dead friend by name.",
+      "status": "pending"
+    },
+    {
+      "id": "f050",
+      "area": "talking",
+      "title": "Recruiting",
+      "what": "A village member with CHA >= 2 invites lingering non-members to join; joining time halves after an invitation.",
+      "acceptance": "A join event cites an inviter.",
+      "status": "pending"
+    },
+    {
+      "id": "f051",
+      "area": "gui",
+      "title": "Sheet on sneak-click",
+      "what": "Right-clicking an NPC while sneaking opens a chest-style GUI showing abilities, skills, needs and bag (read-only).",
+      "acceptance": "A GUI opens for a sneaking player.",
+      "status": "pending"
+    },
+    {
+      "id": "f052",
+      "area": "gui",
+      "title": "Village board",
+      "what": "A village has a lectern with a book at the inn listing members, jobs, store contents and open quests.",
+      "acceptance": "A book in the inn lists current facts.",
+      "status": "pending"
+    },
+    {
+      "id": "f053",
+      "area": "gui",
+      "title": "Trade window",
+      "what": "Players can open a trade GUI with an NPC: the NPC offers items at its valuation; the player pays with items.",
+      "acceptance": "A player buys bread from an NPC in a GUI.",
+      "status": "pending"
+    },
+    {
+      "id": "f054",
+      "area": "gui",
+      "title": "Name tags with status",
+      "what": "The name above each NPC shows a small status glyph: hunger, job, village.",
+      "acceptance": "Name tags update live.",
+      "status": "pending"
+    },
+    {
+      "id": "f055",
+      "area": "gui",
+      "title": "Tab list faces",
+      "what": "Tab entries carry the NPC's skin face and a suffix with their village.",
+      "acceptance": "Tab list shows faces.",
+      "status": "pending"
+    },
+    {
+      "id": "f056",
+      "area": "gui",
+      "title": "Console: people page",
+      "what": "The Lore Console gets a /people page listing everyone with needs, skills, job and a click-to-locate.",
+      "acceptance": "/people renders.",
+      "status": "pending"
+    },
+    {
+      "id": "f057",
+      "area": "gui",
+      "title": "Console: village layer",
+      "what": "The map shows village boundaries, inns, stores and fields as overlays.",
+      "acceptance": "Overlays render on /map.",
+      "status": "pending"
+    },
+    {
+      "id": "f058",
+      "area": "gui",
+      "title": "Scoreboard sidebar",
+      "what": "Players near a village see a sidebar with its name, population and store food count.",
+      "acceptance": "Sidebar appears near a village.",
+      "status": "pending"
+    },
+    {
+      "id": "f059",
+      "area": "gui",
+      "title": "Death notices",
+      "what": "When an NPC dies, nearby players get a chat line from someone who knew them, and the head location.",
+      "acceptance": "A death notice appears.",
+      "status": "pending"
+    },
+    {
+      "id": "f060",
+      "area": "gui",
+      "title": "Quest log command",
+      "what": "Players can type a command to list quests NPCs have given them.",
+      "acceptance": "A quest list prints.",
+      "status": "pending"
+    },
+    {
+      "id": "f061",
+      "area": "ore",
+      "title": "Silver",
+      "what": "A lore ore: a deepslate-level silver (a display-named raw iron variant) found by miners below y=0; a currency metal and a cheap tool tier.",
+      "acceptance": "Silver appears in a miner's bag.",
+      "status": "pending"
+    },
+    {
+      "id": "f062",
+      "area": "ore",
+      "title": "Gem finds",
+      "what": "Rare emerald/diamond finds while mining at depth; gems are high-value trade goods the market prices by scarcity.",
+      "acceptance": "A gem trade occurs.",
+      "status": "pending"
+    },
+    {
+      "id": "f063",
+      "area": "ore",
+      "title": "Clay and bricks",
+      "what": "Clay from riverbanks is smelted into bricks; brick buildings are the premium tier.",
+      "acceptance": "A brick building exists.",
+      "status": "pending"
+    },
+    {
+      "id": "f064",
+      "area": "magic",
+      "title": "Herbalism",
+      "what": "An eleventh skill (leans on WIS): gathering flowers and mushrooms and brewing a simple healing tea at a campfire that restores hp.",
+      "acceptance": "A person heals with tea.",
+      "status": "pending"
+    },
+    {
+      "id": "f065",
+      "area": "magic",
+      "title": "Charms",
+      "what": "A crafter with high INT makes a charm (a renamed item) that grants +1 to one ability while held; charms trade at high value.",
+      "acceptance": "A charm exists and changes an aptitude.",
+      "status": "pending"
+    },
+    {
+      "id": "f066",
+      "area": "magic",
+      "title": "Wards",
+      "what": "A village with a shrine (a small built structure) halves hostile spawns within 48 blocks.",
+      "acceptance": "A shrine exists and spawn counts drop.",
+      "status": "pending"
+    },
+    {
+      "id": "f067",
+      "area": "magic",
+      "title": "Spellbooks",
+      "what": "Rare books found in ruins teach one spell to a reader with INT >= 2: light (places torches at range), mend (repairs a tool), ward.",
+      "acceptance": "A spell is learned and cast.",
+      "status": "pending"
+    },
+    {
+      "id": "f068",
+      "area": "magic",
+      "title": "Mana",
+      "what": "People who know a spell gain a mana meter that refills with rest; casting costs mana.",
+      "acceptance": "Mana appears on a caster's sheet.",
+      "status": "pending"
+    },
+    {
+      "id": "f069",
+      "area": "magic",
+      "title": "Enchanting",
+      "what": "Villages with a library building and 15 bookshelves can enchant tools; enchanted tools carry real enchantments.",
+      "acceptance": "An enchanted tool exists.",
+      "status": "pending"
+    },
+    {
+      "id": "f070",
+      "area": "magic",
+      "title": "Omens",
+      "what": "The director may place an omen (a lightning strike, a ruin appearing); NPCs who witness it gain a fact and talk about it.",
+      "acceptance": "An omen fact spreads.",
+      "status": "pending"
+    },
+    {
+      "id": "f071",
+      "area": "planning",
+      "title": "Daily plan",
+      "what": "Each person makes a plan at dawn: three goals for the day ordered by needs and skills; jobs are chosen from the plan first.",
+      "acceptance": "A plan field appears at dawn and is followed.",
+      "status": "pending"
+    },
+    {
+      "id": "f072",
+      "area": "planning",
+      "title": "Long-term goal",
+      "what": "Each person has one long-term goal (own a house, reach skill 5, found a village, get rich); goals shade job weights.",
+      "acceptance": "A goal field exists and drives choices.",
+      "status": "pending"
+    },
+    {
+      "id": "f073",
+      "area": "planning",
+      "title": "Stockpile targets",
+      "what": "People keep a target count for food, logs, cobblestone and tools and work toward shortfalls.",
+      "acceptance": "Targets appear and gathering stops at the target.",
+      "status": "pending"
+    },
+    {
+      "id": "f074",
+      "area": "planning",
+      "title": "Home base",
+      "what": "Each person picks a home spot and keeps a chest there; surplus goes in; the chest is a place record.",
+      "acceptance": "Personal chests exist with contents.",
+      "status": "pending"
+    },
+    {
+      "id": "f075",
+      "area": "planning",
+      "title": "Hours of the day",
+      "what": "Work weights shift with the day: gathering by day, crafting and building at dusk, sleep at night.",
+      "acceptance": "Activity mix changes across the day.",
+      "status": "pending"
+    },
+    {
+      "id": "f076",
+      "area": "planning",
+      "title": "Weather awareness",
+      "what": "In rain people prefer indoor jobs; in thunder they shelter.",
+      "acceptance": "Activity changes with weather.",
+      "status": "pending"
+    },
+    {
+      "id": "f077",
+      "area": "planning",
+      "title": "Apprenticeship",
+      "what": "A person with skill 0 in a job who works beside someone with skill 3+ gains minutes 50% faster.",
+      "acceptance": "Skill minutes grow faster near a master.",
+      "status": "pending"
+    },
+    {
+      "id": "f078",
+      "area": "planning",
+      "title": "Aging",
+      "what": "People age a year per N Minecraft days; elders get +1 WIS, -1 STR; at a cap they die of old age (head drops).",
+      "acceptance": "An age field exists and an elder dies naturally.",
+      "status": "pending"
+    },
+    {
+      "id": "f079",
+      "area": "planning",
+      "title": "Families",
+      "what": "Two people with high regard for each other and a house may have a child NPC (generation+1) born at the house with inherited abilities +-1.",
+      "acceptance": "A child record with parents exists.",
+      "status": "pending"
+    },
+    {
+      "id": "f080",
+      "area": "planning",
+      "title": "Regard between people",
+      "what": "Each person keeps a regard score per other person, moved by trades, gifts, help and harm; regard shades who they visit and trade with.",
+      "acceptance": "A regard map exists and changes.",
+      "status": "pending"
+    },
+    {
+      "id": "f081",
+      "area": "villages",
+      "title": "Store accounting",
+      "what": "The store tracks in/out per person; members with the most contribution get first pick at the market.",
+      "acceptance": "A ledger of contributions exists.",
+      "status": "pending"
+    },
+    {
+      "id": "f082",
+      "area": "villages",
+      "title": "Founding charter",
+      "what": "Founding requires the founder to write a charter (facts: name, rule) which the actor voices when asked.",
+      "acceptance": "A charter fact exists.",
+      "status": "pending"
+    },
+    {
+      "id": "f083",
+      "area": "villages",
+      "title": "Expansion",
+      "what": "When members exceed beds, the village asks for a second inn or houses; plots are assigned on a grid around the origin.",
+      "acceptance": "A second building is built when population grows.",
+      "status": "pending"
+    },
+    {
+      "id": "f084",
+      "area": "villages",
+      "title": "Defence",
+      "what": "At night members with swords stand watch at the inn; a placed zombie near the inn is fought.",
+      "acceptance": "A zombie is killed at a village at night.",
+      "status": "pending"
+    },
+    {
+      "id": "f085",
+      "area": "villages",
+      "title": "Village fields",
+      "what": "Fields near a village are village fields; any member may harvest and the crop goes to the store.",
+      "acceptance": "Store receives wheat from village fields.",
+      "status": "pending"
+    },
+    {
+      "id": "f086",
+      "area": "villages",
+      "title": "Well",
+      "what": "A village builds a well (cobblestone ring over a water source) as its centre marker.",
+      "acceptance": "A well exists at the origin.",
+      "status": "pending"
+    },
+    {
+      "id": "f087",
+      "area": "villages",
+      "title": "Gatherings",
+      "what": "Once per day a village with 4+ members holds a gathering at dusk: everyone comes to the inn, social need rises, a rumour is exchanged.",
+      "acceptance": "A gathering event fires.",
+      "status": "pending"
+    },
+    {
+      "id": "f088",
+      "area": "villages",
+      "title": "Leadership",
+      "what": "The member with the highest reputation is the head; the head assigns the village's build requests.",
+      "acceptance": "A head field exists on the village.",
+      "status": "pending"
+    },
+    {
+      "id": "f089",
+      "area": "villages",
+      "title": "Taxes",
+      "what": "Members pay one item of value per day into the store; non-payers lose membership after three days.",
+      "acceptance": "Membership changes over unpaid days.",
+      "status": "pending"
+    },
+    {
+      "id": "f090",
+      "area": "villages",
+      "title": "Trade routes",
+      "what": "Peddlers link villages; a fact records the route; prices equalise over time.",
+      "acceptance": "Two stores show converged prices.",
+      "status": "pending"
+    },
+    {
+      "id": "f091",
+      "area": "world",
+      "title": "Animal husbandry",
+      "what": "Animals in pens are fed and bred; babies grow; the pen is the village's meat supply and hunting ranges shrink.",
+      "acceptance": "Pen population grows and hunting frequency drops.",
+      "status": "pending"
+    },
+    {
+      "id": "f092",
+      "area": "world",
+      "title": "Hostile nights",
+      "what": "The director places a few hostiles near villages at night on a cadence; guards and walls matter.",
+      "acceptance": "Hostiles appear and are dealt with.",
+      "status": "pending"
+    },
+    {
+      "id": "f093",
+      "area": "world",
+      "title": "Lost and found",
+      "what": "Dropped tools are remembered as facts by the dropper and retrieved when passing.",
+      "acceptance": "A dropped tool is picked back up later.",
+      "status": "pending"
+    },
+    {
+      "id": "f094",
+      "area": "world",
+      "title": "Boats",
+      "what": "A person with 5 planks crafts a boat and crosses water in it instead of swimming.",
+      "acceptance": "A boat crossing is observed.",
+      "status": "pending"
+    },
+    {
+      "id": "f095",
+      "area": "world",
+      "title": "Bridges",
+      "what": "Builders span gaps under 6 blocks with planks on frequently walked routes.",
+      "acceptance": "A bridge exists on a route.",
+      "status": "pending"
+    },
+    {
+      "id": "f096",
+      "area": "world",
+      "title": "Signposts",
+      "what": "Villages place signs at their boundary naming the village and pointing to neighbours.",
+      "acceptance": "Signs exist at boundaries.",
+      "status": "pending"
+    },
+    {
+      "id": "f097",
+      "area": "world",
+      "title": "Graves",
+      "what": "A dead person's head is buried by a friend under a cobblestone marker with a sign; the grave is a place.",
+      "acceptance": "A grave place exists.",
+      "status": "pending"
+    },
+    {
+      "id": "f098",
+      "area": "world",
+      "title": "Head revival ritual",
+      "what": "Bringing a head to a village shrine with 10 food and a bed lets the village revive the person (npc_revive); costs the store.",
+      "acceptance": "A revival happens at a shrine.",
+      "status": "pending"
+    },
+    {
+      "id": "f099",
+      "area": "world",
+      "title": "Storm damage",
+      "what": "Plank buildings may lose a block in thunderstorms; builders repair them.",
+      "acceptance": "A repair job runs after a storm.",
+      "status": "pending"
+    },
+    {
+      "id": "f100",
+      "area": "world",
+      "title": "Seasons",
+      "what": "Every 20 days a season changes: winter slows crops and raises hunger drain; people stock up in autumn.",
+      "acceptance": "A season field exists and behaviour changes.",
+      "status": "pending"
+    }
+  ]
+}
