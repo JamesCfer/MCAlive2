@@ -878,8 +878,12 @@ public class People implements GadgetContract {
         List<String> ids = new ArrayList<String>();
         List<Double> scores = new ArrayList<Double>();
         boolean anyShort = hungerGap >= 4 || hpGap >= 6 || thirdGap >= 6;
+        // Genuinely hungry? Then the only question is how to get food - by whatever you are
+        // best at. Nobody goes down the mine on an empty stomach to feel rich.
+        boolean starving = hungerGap >= 13;
         for (String job : jobs) {
             if (!possible(rec, job, everyone)) continue;
+            if (starving && serves(job, "hunger", rec) <= 0) continue;
             double s = 0;
             for (int i = 0; i < needs.length; i++) {
                 if (gaps[i] <= 0) continue;
