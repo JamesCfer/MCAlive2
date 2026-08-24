@@ -1683,10 +1683,10 @@ public class People implements GadgetContract {
         return null;
     }
 
-    /** Is this 7x7 (the inn plus a border) open, dry, level ground? */
-    private static boolean plotOk(World w, int x, int z) {
+    /** Is this footprint (plus a border) open, dry, level ground? */
+    private static boolean plotOk(World w, int x, int z, int pw, int pd) {
         int min = Integer.MAX_VALUE, max = Integer.MIN_VALUE;
-        for (int dx = -1; dx <= INN_W; dx++) for (int dz = -1; dz <= INN_D; dz++) {
+        for (int dx = -1; dx <= pw; dx++) for (int dz = -1; dz <= pd; dz++) {
             int y = w.getHighestBlockYAt(x + dx, z + dz, HeightMap.MOTION_BLOCKING_NO_LEAVES);
             Material m = w.getBlockAt(x + dx, y, z + dz).getType();
             if (m == Material.WATER || m == Material.LAVA || isLog(m) || m == Material.FARMLAND
@@ -1697,15 +1697,85 @@ public class People implements GadgetContract {
         return max - min <= 1;
     }
 
-    /** Nearest usable plot to the village centre, searching outward; null if none within 24. */
-    private static int[] findPlot(World w, int cx, int cz) {
-        for (int r = 4; r <= 24; r += 2) {
+    /** Is nobody else's claim under this footprint? (Absent claims gadget: land is free.) */
+    private static boolean plotUnclaimed(GadgetContext ctx, String owner, int x, int z, int pw, int pd) {
+        try {
+            JsonObject q = new JsonObject();
+            q.addProperty("action", "check_rect");
+            q.addProperty("owner", owner);
+            q.addProperty("x1", x - 1);
+            q.addProperty("z1", z - 1);
+            q.addProperty("x2", x + pw);
+            q.addProperty("z2", z + pd);
+            return ctx.invoke("gadget:claims", q).get("ok").getAsBoolean();
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    /** Nearest usable, unclaimed plot to the centre, searching outward; null if none within 32. */
+    private static int[] findPlot(GadgetContext ctx, String owner, World w, int cx, int cz, int pw, int pd) {
+        for (int r = 4; r <= 32; r += 2) {
             for (int dx = -r; dx <= r; dx += 2) for (int dz = -r; dz <= r; dz += 2) {
                 if (Math.abs(dx) != r && Math.abs(dz) != r) continue;
-                if (plotOk(w, cx + dx, cz + dz)) return new int[]{ cx + dx, cz + dz };
+                if (plotOk(w, cx + dx, cz + dz, pw, pd) && plotUnclaimed(ctx, owner, cx + dx, cz + dz, pw, pd))
+                    return new int[]{ cx + dx, cz + dz };
             }
         }
         return null;
+    }
+
+    /** Stake the land under a plot for its owner - the 3-block barrier around every
+     *  block of the house, drawn once, up front, where everyone can see the line. */
+    private static void stakePlot(GadgetContext ctx, String owner, int x, int z, int pw, int pd) {
+        try {
+            JsonObject q = new JsonObject();
+            q.addProperty("action", "stake");
+            q.addProperty("owner", owner);
+            q.addProperty("x1", x);
+            q.addProperty("z1", z);
+            q.addProperty("x2", x + pw - 1);
+            q.addProperty("z2", z + pd - 1);
+            ctx.invoke("gadget:claims", q);
+        } catch (Throwable ignored) { }
+    }
+
+    // The house library, fetched from the ledger and kept warm. scripts/blueprints.mjs
+    // seeds and pushes it; villages picks what a member can afford; this raises it.
+    private static final Map<String, JsonObject> BP_CACHE = new HashMap<String, JsonObject>();
+    private static long bpCacheAt = 0;
+
+    private static JsonObject blueprint(GadgetContext ctx, String bpId) {
+        if (bpId == null || bpId.isEmpty()) return null;
+        long now = System.currentTimeMillis();
+        if (now - bpCacheAt > 600_000) { BP_CACHE.clear(); bpCacheAt = now; }
+        JsonObject bp = BP_CACHE.get(bpId);
+        if (bp != null) return bp;
+        try {
+            JsonObject q = new JsonObject();
+            q.addProperty("action", "get");
+            q.addProperty("id", bpId);
+            bp = ctx.invoke("gadget:blueprints", q);
+            if (bp != null && bp.has("blocks")) BP_CACHE.put(bpId, bp);
+            return bp;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** Resolve one blueprint material token against the bag: $PLANKS/$LOG bend to
+     *  whatever wood they gathered, anything else is taken literally. Null: bag empty. */
+    private static Material matOf(JsonObject rec, String token) {
+        if (token.equals("$PLANKS") || token.equals("$SLAB") || token.equals("$FENCE")) return plankOf(rec);
+        if (token.equals("$LOG")) {
+            for (JsonElement el : arr(rec, "inventory")) {
+                Material m = Material.matchMaterial(gets(el.getAsJsonObject(), "item", ""));
+                if (m != null && isLog(m)) return m;
+            }
+            return plankOf(rec);   // out of whole logs: a plank corner beats no corner
+        }
+        Material m = Material.matchMaterial(token);
+        return m != null && count(rec, m) > 0 ? m : null;
     }
 
     private static boolean jobBuild(GadgetContext ctx, JsonObject rec, Entity e, String id, JsonObject job) {
@@ -1713,23 +1783,84 @@ public class People implements GadgetContract {
         if (ask == null) { finishJob(rec, e, "nothing to build"); return true; }
         World w = e.getWorld();
         JsonObject at = ask.getAsJsonObject("at");
+        boolean isHouse = "build_house".equals(gets(ask, "kind", "build_inn"));
+        JsonObject bp = isHouse ? blueprint(ctx, gets(ask, "blueprint", null)) : null;
+        if (isHouse && (bp == null || !bp.has("blocks") || !bp.get("blocks").isJsonArray())) {
+            rec.remove("asked");
+            rec.addProperty("noBuildUntil", System.currentTimeMillis() + 600000);
+            finishJob(rec, e, "lost the drawings for the house");
+            return true;
+        }
+        int pw = isHouse ? geti(bp, "w", 5) : INN_W;
+        int pd = isHouse ? geti(bp, "d", 5) : INN_D;
+        String claimOwner = isHouse ? "npc:" + id : "village:" + gets(ask, "village", "");
+        String what = isHouse ? gets(bp, "name", "a house") : "the inn";
         if (!ask.has("plotOk")) {
-            // the village named a spot; the builder chooses the actual ground, like anyone would
-            int[] plot = findPlot(w, geti(at, "x", 0), geti(at, "z", 0));
+            // the village named a spot; the builder chooses the actual ground, like
+            // anyone would - open, level, and on nobody else's land
+            int[] plot = findPlot(ctx, claimOwner, w, geti(at, "x", 0), geti(at, "z", 0), pw, pd);
             if (plot == null) {
                 rec.remove("asked");
                 rec.addProperty("noBuildUntil", System.currentTimeMillis() + 600000);
-                finishJob(rec, e, "no clear ground for an inn");
+                finishJob(rec, e, "no clear ground for " + what);
                 return true;
             }
             at.addProperty("x", plot[0]);
             at.addProperty("z", plot[1]);
             ask.addProperty("plotOk", true);
+            // the line is drawn the moment the first block is coming: the plot and the
+            // three blocks around every edge of it belong to the builder now
+            stakePlot(ctx, claimOwner, plot[0], plot[1], pw, pd);
         }
         int ox = geti(at, "x", 0), oz = geti(at, "z", 0);
-        int oy = w.getHighestBlockYAt(ox + 2, oz + 2, HeightMap.MOTION_BLOCKING_NO_LEAVES);   // the plot's level
+        int oy = w.getHighestBlockYAt(ox + pw / 2, oz + pd / 2, HeightMap.MOTION_BLOCKING_NO_LEAVES);   // the plot's level
         int i = geti(job, "i", 0);
-        int[] b = innBlock(i);
+        JsonArray bpBlocks = isHouse ? bp.getAsJsonArray("blocks") : null;
+        int[] b;
+        String token = null;
+        if (isHouse) {
+            if (i < bpBlocks.size()) {
+                JsonObject blk = bpBlocks.get(i).getAsJsonObject();
+                b = new int[]{ geti(blk, "dx", 0), geti(blk, "dy", 0), geti(blk, "dz", 0), geti(blk, "dy", 0) == 0 ? 0 : 1 };
+                token = gets(blk, "m", "$PLANKS");
+            } else {
+                b = null;
+            }
+        } else {
+            b = innBlock(i);
+        }
+        if (b == null && isHouse) {
+            // finished: it is home now. A bed if there is wool for one.
+            if (count(rec, Material.WHITE_WOOL) >= 3 && plankOf(rec) != null) {
+                Material pl = plankOf(rec);
+                take(rec, Material.WHITE_WOOL, 3);
+                take(rec, pl, 3);
+                w.getBlockAt(ox + 1, oy + 1, oz + pd - 2).setType(Material.WHITE_BED);
+            }
+            JsonObject house = xyzOf(ox, oy + 1, oz);
+            rec.add("house", house);
+            JsonObject home = new JsonObject();
+            home.addProperty("world", w.getName());
+            home.addProperty("x", ox + pw / 2);
+            home.addProperty("y", oy + 1);
+            home.addProperty("z", oz + pd / 2);
+            rec.add("home", home);
+            try {
+                NpcData d = ctx.plugin().npcManager().get(id);
+                if (d != null) { d.home = new Location(w, ox + pw / 2, oy + 1, oz + pd / 2); ctx.plugin().npcManager().save(); }
+            } catch (Throwable ignored) { }
+            JsonObject ev = new JsonObject();
+            ev.addProperty("npcId", id);
+            ev.addProperty("blueprint", gets(bp, "id", ""));
+            ev.addProperty("village", gets(ask, "village", ""));
+            ev.add("at", house);
+            ctx.plugin().bridge().broadcastEvent("house_built", ev);
+            rec.remove("asked");
+            practise(rec, "building", 3.0);
+            feedNeed(rec, "craft", 8);
+            finishJob(rec, e, "raised " + what);
+            return true;
+        }
         if (b == null) {
             // finished: furnish it. A chest (the village store), a bench, and beds if there is wool.
             int cx = ox + 1, cz = oz + INN_D - 2;
@@ -1764,7 +1895,7 @@ public class People implements GadgetContract {
         // stand within reach of the block
         JsonObject t = obj(job, "target");
         if (Math.abs(geti(t, "x", 0) - bx) > 3 || Math.abs(geti(t, "z", 0) - bz) > 3) {
-            int sx = bx + (b[0] < INN_W / 2 ? -2 : 2), sz = bz + (b[2] < INN_D / 2 ? -2 : 2);
+            int sx = bx + (b[0] < pw / 2 ? -2 : 2), sz = bz + (b[2] < pd / 2 ? -2 : 2);
             setTarget(job, sx, w.getHighestBlockYAt(sx, sz, HeightMap.MOTION_BLOCKING_NO_LEAVES) + 1, sz);
         }
         int tr = travel(ctx, e, id, job, 4.5, false);
@@ -1774,7 +1905,7 @@ public class People implements GadgetContract {
             if (fails >= 3) {
                 rec.remove("asked");
                 rec.addProperty("noBuildUntil", System.currentTimeMillis() + 600000);
-                finishJob(rec, e, "gave up on the inn plot for now");
+                finishJob(rec, e, "gave up on the plot for now");
             } else {
                 finishJob(rec, e, "could not reach the plot");
             }
@@ -1791,8 +1922,8 @@ public class People implements GadgetContract {
             job.addProperty("i", i + 1);
             return false;
         }
-        Material pl = plankOf(rec);
-        if (pl == null) { finishJob(rec, e, "ran out of timber"); return true; }
+        Material pl = isHouse ? matOf(rec, token) : plankOf(rec);
+        if (pl == null) { finishJob(rec, e, "ran out of materials"); return true; }
         for (Entity n : target.getWorld().getNearbyEntities(target.getLocation().add(0.5, 0.5, 0.5), 0.6, 1.2, 0.6)) {
             if (n instanceof LivingEntity) { job.addProperty("i", i + 1); return false; }    // never wall anyone in
         }
@@ -1800,12 +1931,64 @@ public class People implements GadgetContract {
         if (target.getType().isAir()) {
             take(rec, pl, 1);
             target.setType(pl);
-            w.playSound(target.getLocation(), org.bukkit.Sound.BLOCK_WOOD_PLACE, 0.7f, 1.0f);
+            String pn = pl.name();
+            boolean stone = pn.contains("COBBLE") || pn.contains("STONE") || pn.contains("BRICK");
+            w.playSound(target.getLocation(), stone ? org.bukkit.Sound.BLOCK_STONE_PLACE : org.bukkit.Sound.BLOCK_WOOD_PLACE, 0.7f, 1.0f);
             if (e instanceof LivingEntity) ((LivingEntity) e).swingMainHand();
         }
         job.addProperty("i", i + 1);
-        rec.addProperty("activity", "building the inn (" + (i + 1) + " blocks)");
+        rec.addProperty("activity", "building " + what + " (" + (i + 1) + " blocks)");
         return false;
+    }
+
+    // ---- confront: walk over to whoever crossed your line and say so to their face.
+    // gadget:claims raises the alert; the walk, the look and the words happen here. No
+    // violence - the memory of it lives in the claims hostility ledger, and what grows
+    // out of a third or fourth crossing is the director's story to tell.
+
+    private static boolean jobConfront(GadgetContext ctx, JsonObject rec, Entity e, String id, JsonObject job) {
+        JsonObject alert = rec.has("alert") && rec.get("alert").isJsonObject() ? rec.getAsJsonObject("alert") : null;
+        if (alert == null) { finishJob(rec, e, "nothing to confront"); return true; }
+        String who = gets(alert, "who", "someone");
+        if (geti(job, "beats", 0) > 90) {
+            rec.remove("alert");
+            finishJob(rec, e, "let it go");
+            return true;
+        }
+        // if the trespasser is still around, walk at them, not at where they were
+        Entity them = null;
+        for (Entity n : e.getNearbyEntities(48, 24, 48)) {
+            String nn = n instanceof org.bukkit.entity.Player ? ((org.bukkit.entity.Player) n).getName() : n.getCustomName() == null ? null : org.bukkit.ChatColor.stripColor(n.getCustomName());
+            if (who.equals(nn)) { them = n; break; }
+        }
+        if (them != null) {
+            JsonObject t = obj(job, "target");
+            Location l = them.getLocation();
+            if (Math.abs(geti(t, "x", 0) - l.getBlockX()) > 4 || Math.abs(geti(t, "z", 0) - l.getBlockZ()) > 4) {
+                setTarget(job, l.getBlockX(), l.getBlockY(), l.getBlockZ());
+            }
+        }
+        int tr = travel(ctx, e, id, job, 3.0, false);
+        if (tr == 0) return false;
+        if (tr > 0 && them != null) {
+            Location look = e.getLocation();
+            look.setDirection(them.getLocation().toVector().subtract(look.toVector()));
+            e.setRotation(look.getYaw(), look.getPitch());
+        }
+        if (tr > 0) {
+            try {
+                JsonObject a = new JsonObject();
+                a.addProperty("id", id);
+                a.addProperty("text", them != null
+                        ? "I saw you cross my line, " + who + ". This ground is mine. Don't do it again."
+                        : "Whoever was on my land - I know, and I remember.");
+                ctx.invoke("npc_say", a);
+            } catch (Throwable ignored) { }
+            feedNeed(rec, "social", 2);
+        }
+        rec.remove("alert");
+        finishJob(rec, e, tr > 0 ? "had words with " + who : "could not catch the trespasser");
+        return true;
     }
 
     private static JsonObject xyzOf(int x, int y, int z) {
@@ -2462,6 +2645,20 @@ public class People implements GadgetContract {
             return;
         }
 
+        // --- somebody on their land? claims put an alert on the sheet; go have words.
+        // A promise to a player still comes first.
+        JsonObject alert = rec.has("alert") && rec.get("alert").isJsonObject() ? rec.getAsJsonObject("alert") : null;
+        if (alert != null && System.currentTimeMillis() > (long) getd(alert, "until", 0)) {
+            rec.remove("alert");
+            alert = null;
+        }
+        if (alert != null && "trespass".equals(gets(alert, "kind", ""))
+                && (job == null || (!"confront".equals(gets(job, "kind", "")) && !job.has("assigned")))) {
+            job = startJob(rec, "confront");
+            setTarget(job, geti(alert, "x", 0), geti(alert, "y", 64), geti(alert, "z", 0));
+            rec.addProperty("activity", "going to see about " + gets(alert, "who", "someone") + " on their land");
+        }
+
         // --- the work
         if (job == null) {
             // something worth having lying nearby? food when hungry, tools any time
@@ -2497,6 +2694,7 @@ public class People implements GadgetContract {
         else if (jk.equals("visit")) done = jobVisit(ctx, rec, e, id, job, everyone);
         else if (jk.equals("trade")) done = jobTrade(ctx, rec, e, id, job, everyone);
         else if (jk.equals("build")) done = jobBuild(ctx, rec, e, id, job);
+        else if (jk.equals("confront")) done = jobConfront(ctx, rec, e, id, job);
         else if (jk.equals("lodge")) done = jobLodge(ctx, rec, e, id, job);
         else if (jk.equals("market")) done = jobMarket(ctx, rec, e, id, job);
         else if (jk.equals("pickup")) {

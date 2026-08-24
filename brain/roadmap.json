@@ -184,7 +184,8 @@
       "title": "Builder job for houses",
       "what": "Members of a village with 60+ planks build a 5x5 house for themselves on a free plot near the inn; the house is their home record.",
       "acceptance": "A village has houses beyond the inn.",
-      "status": "pending"
+      "status": "done",
+      "notes": "Done 2026-08-24, generalized: blueprint library (gadget:blueprints, scripts/blueprints.mjs) tiered by material cost; villages asks members for the best house they can afford; people builds it block by block, stakes the plot via gadget:claims, house becomes home."
     },
     {
       "id": "f024",

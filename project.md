@@ -75,7 +75,9 @@ node scripts/people.mjs --start
 ```
 
 What it starts: `presence` (3x3 chunks around every person), `groundskeeper`, `people`
-(`populationCap: 40`), `tablist`, `villages`. Nothing else should be running — the founder-era
+(`populationCap: 40`), `tablist`, `villages`, `claims` (block-place listener + trespass
+sweep). `blueprints` needs no start - it is a pure store; its library and all claim
+columns persist in the world's PersistentDataContainer and survive restarts. Nothing else should be running — the founder-era
 gadgets (pursuits, needs, hunger, roster, farm, reclaim, industry...) are kept in the repo as
 reference and must NOT be started; they fight `people` for the same bodies.
 
@@ -124,6 +126,19 @@ lines, lineage and migration are gone. `gadget:people` is the NPC.
   some building skill, who raises a 5x5 inn block by block (`build`); at night people lodge at
   the nearest inn (`lodge`), strangers paying one item into the inn chest; that chest is the
   market (`market`) anyone buys from and sells to at `baseValue`, strangers at 1.25×.
+- **Houses and land** (2026-08-24): once a village has its inn, a member without a house
+  is asked to build the best one they can afford from the blueprint library
+  (`gadget:blueprints`, tiered by material cost - people start with a 96-plank shack and
+  earn up to cobble longhouses as their building skill and bags grow; the finished house
+  becomes their `home`). Every plot - and every block a player places - stakes a 3-block
+  barrier with `gadget:claims`. First claim wins; plot searches skip claimed ground.
+  A stranger crossing a personal line gets a spoken warning; lingering (10 s) raises a
+  `claim_trespass` event, a hostility count and a confront alert the owner answers by
+  walking over and saying so (`confront` job). Placing/breaking blocks on someone's land
+  is an immediate `claim_violation`. Fellow villagers are not strangers, and village land
+  (inn, market) never counts walking as trespass. Neither event wakes the director
+  (cooldowns 5 min/60 s per pair regardless); the hostility ledger is there for the
+  director to read when it is awake anyway.
 - **Tab list** (`gadget:tablist`): every living person is a real player-info entry.
 
 `gadget:people {action:"status"}` is the one-screen view. `scripts/people.mjs --status` prints it.
@@ -159,6 +174,8 @@ live on the server (the gadget was defined) but GitHub lags until someone pushes
 | `people` | The NPC. Body, abilities, skills, needs, every job, trade, arrivals, heads. `status`, `spawn`, `arrive`, `assign`. |
 | `villages` | Ruins found, villages founded and joined, inns asked for. `status`, `inn_built`. |
 | `tablist` | People in the player list. `status`, `debug`. |
+| `claims` | Land. Placed blocks stake a 3-block barrier per owner (`npc:`/`player:`/`village:`); first claim wins. Trespass on personal land: warning (`npc_say`), then `claim_trespass` event + hostility record + a confront alert on the owner's sheet. Building on it: immediate `claim_violation`. Village land blocks building only - strangers are welcome to walk it. `status`, `stake`, `owner_of`, `check_rect`, `release`, `hostility`. |
+| `blueprints` | The house library, tiered by material cost. `scripts/blueprints.mjs` seeds/ingests (.schem) and pushes it; `villages` picks what a member can afford; `people` builds it. `list`, `get`, `put`, `delete`. |
 | `navigate` | A* over standing positions, player rules, swims through water, surface-biased. Everything that moves goes through this. |
 | `presence` | Holds chunk tickets in a 3x3 around every person; unloads the rest. |
 | `groundskeeper` | Frees people stuck in terrain by walking or digging, never lifting. |

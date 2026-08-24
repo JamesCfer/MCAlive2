@@ -365,11 +365,72 @@ public class Villages implements GadgetContract {
                     }
                 }
 
+                // --- a home of their own: once the inn stands, a member with the materials
+                // for the best house they can afford is asked to raise it. The library is
+                // tiered by cost (scripts/blueprints.mjs), so people start with the simple
+                // houses and earn their way up.
+                if (village != null && hasMember(village, id) && village.has("inn")
+                        && !rec.has("house") && !rec.has("asked")) {
+                    long noBuildUntil = rec.has("noBuildUntil") && !rec.get("noBuildUntil").isJsonNull() ? rec.get("noBuildUntil").getAsLong() : 0L;
+                    if (System.currentTimeMillis() > noBuildUntil) {
+                        JsonObject bp = bestAffordable(ctx, rec);
+                        if (bp != null) {
+                            JsonObject ask = new JsonObject();
+                            ask.addProperty("kind", "build_house");
+                            ask.addProperty("blueprint", gets(bp, "id", ""));
+                            ask.addProperty("village", gets(village, "id", ""));
+                            JsonObject o = village.getAsJsonObject("origin");
+                            // start the plot search a little out from the centre; the
+                            // builder's own plot search respects existing claims
+                            ask.add("at", xyz(geti(o, "x", 0) + 8 + rand(9), geti(o, "y", 64), geti(o, "z", 0) + 8 + rand(9)));
+                            rec.add("asked", ask);
+                            changed = true;
+                        }
+                    }
+                }
+
                 if (changed) put(ctx, "npcs", rec);
             }
             lastError = null;
         } catch (Throwable t) {
             lastError = t.getClass().getSimpleName() + ": " + String.valueOf(t.getMessage());
+        }
+    }
+
+    /**
+     * The best house in the library this person can pay for out of the bag, or null.
+     * "Best" is highest tier first, dearest second; the building-skill gate keeps a
+     * rich beginner in a shack until they have actually built things.
+     */
+    private static JsonObject bestAffordable(GadgetContext ctx, JsonObject rec) {
+        try {
+            int planks = countEnding(rec, "_PLANKS");
+            int logs = countEnding(rec, "_LOG");
+            int cobble = count(rec, "COBBLESTONE");
+            int building = skill(rec, "building");
+            JsonObject best = null;
+            int bestScore = -1;
+            JsonObject q = new JsonObject();
+            q.addProperty("action", "list");
+            List<JsonObject> lib = new ArrayList<JsonObject>();
+            for (JsonElement el : ctx.invoke("gadget:blueprints", q).getAsJsonArray("blueprints")) lib.add(el.getAsJsonObject());
+            for (JsonObject bp : lib) {
+                if (!bp.has("materials") || !bp.get("materials").isJsonObject()) continue;
+                JsonObject m = bp.getAsJsonObject("materials");
+                int tier = geti(bp, "tier", 0);
+                if (building < tier) continue;
+                int needLogs = geti(m, "$LOG", 0);
+                int needPlanks = geti(m, "$PLANKS", 0);
+                int needCobble = geti(m, "COBBLESTONE", 0);
+                if (logs < needLogs) continue;
+                if ((logs - needLogs) * 4 + planks < needPlanks) continue;
+                if (cobble < needCobble) continue;
+                int score = tier * 10000 + needPlanks + needCobble + 4 * needLogs;
+                if (score > bestScore) { bestScore = score; best = bp; }
+            }
+            return best;
+        } catch (Throwable t) {
+            return null;
         }
     }
 

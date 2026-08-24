@@ -108,6 +108,8 @@ async function startWorld() {
   out.tablist = await cmd("gadget:tablist", {});
   // villages: found, joined, inns asked for
   out.villages = await cmd("gadget:villages", {});
+  // land: every placed block claims a 3-block barrier; crossing it is noticed
+  out.claims = await cmd("gadget:claims", {});
   return out;
 }
 
