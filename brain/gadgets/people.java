@@ -1740,6 +1740,20 @@ public class People implements GadgetContract {
         } catch (Throwable ignored) { }
     }
 
+    /** Give a plot back when a build is abandoned, so failed sites don't clutter the map. */
+    private static void unstakePlot(GadgetContext ctx, String owner, int x, int z, int pw, int pd) {
+        try {
+            JsonObject q = new JsonObject();
+            q.addProperty("action", "unstake");
+            q.addProperty("owner", owner);
+            q.addProperty("x1", x);
+            q.addProperty("z1", z);
+            q.addProperty("x2", x + pw - 1);
+            q.addProperty("z2", z + pd - 1);
+            ctx.invoke("gadget:claims", q);
+        } catch (Throwable ignored) { }
+    }
+
     // The house library, fetched from the ledger and kept warm. scripts/blueprints.mjs
     // seeds and pushes it; villages picks what a member can afford; this raises it.
     private static final Map<String, JsonObject> BP_CACHE = new HashMap<String, JsonObject>();
@@ -1903,6 +1917,7 @@ public class People implements GadgetContract {
             int fails = geti(ask, "fails", 0) + 1;
             ask.addProperty("fails", fails);
             if (fails >= 3) {
+                unstakePlot(ctx, claimOwner, ox, oz, pw, pd);
                 rec.remove("asked");
                 rec.addProperty("noBuildUntil", System.currentTimeMillis() + 600000);
                 finishJob(rec, e, "gave up on the plot for now");
@@ -1923,6 +1938,8 @@ public class People implements GadgetContract {
             return false;
         }
         Material pl = isHouse ? matOf(rec, token) : plankOf(rec);
+        // an empty bag pauses the build - the ask and the claim stay, and the job
+        // resumes past the blocks already standing once they have gathered more
         if (pl == null) { finishJob(rec, e, "ran out of materials"); return true; }
         for (Entity n : target.getWorld().getNearbyEntities(target.getLocation().add(0.5, 0.5, 0.5), 0.6, 1.2, 0.6)) {
             if (n instanceof LivingEntity) { job.addProperty("i", i + 1); return false; }    // never wall anyone in

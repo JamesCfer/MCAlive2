@@ -500,6 +500,29 @@ public class Claims implements GadgetContract {
             return out;
         }
 
+        if (action.equals("unstake")) {
+            // give back one plot (plus its barrier) without touching the owner's other land -
+            // what a builder does when they abandon a site
+            String owner = gets(args, "owner", null);
+            if (owner == null) throw new IllegalArgumentException("unstake needs an owner");
+            int x1 = geti(args, "x1", 0), z1 = geti(args, "z1", 0);
+            int x2 = geti(args, "x2", x1), z2 = geti(args, "z2", z1);
+            int r = geti(args, "r", RADIUS);
+            Set<Long> mine = BY_OWNER.get(owner);
+            int n = 0;
+            if (mine != null) {
+                for (int x = Math.min(x1, x2) - r; x <= Math.max(x1, x2) + r; x++) {
+                    for (int z = Math.min(z1, z2) - r; z <= Math.max(z1, z2) + r; z++) {
+                        Long key = Long.valueOf(pack(x, z));
+                        if (owner.equals(COLS.get(key))) { COLS.remove(key); mine.remove(key); n++; }
+                    }
+                }
+            }
+            if (n > 0) DIRTY.add(owner);
+            out.addProperty("released", n);
+            return out;
+        }
+
         if (action.equals("release")) {
             String owner = gets(args, "owner", null);
             if (owner == null) throw new IllegalArgumentException("release needs an owner");
