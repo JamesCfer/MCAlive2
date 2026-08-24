@@ -4,3 +4,4 @@ state/
 DISABLED
 *.log
 brain/chronicle/
+brain/blueprints/incoming/

@@ -214,10 +214,50 @@ function simplify(state) {
   return null; // something nobody here can produce
 }
 
-function ingest(file) {
-  let raw = fs.readFileSync(file);
-  if (raw[0] === 0x1f && raw[1] === 0x8b) raw = zlib.gunzipSync(raw);
-  let root = readNbt(raw);
+/** Litematica regions -> a flat cell list in a common {w,h,d,get(x,y,z)} shape.
+ *  Block states are bit-packed into a long array, entries spanning long boundaries. */
+function litematicGrid(root) {
+  const regions = root.Regions;
+  const boxes = [];
+  for (const rg of Object.values(regions)) {
+    const p = rg.Position, s = rg.Size;
+    boxes.push({
+      rg,
+      x0: s.x >= 0 ? p.x : p.x + s.x + 1,
+      y0: s.y >= 0 ? p.y : p.y + s.y + 1,
+      z0: s.z >= 0 ? p.z : p.z + s.z + 1,
+      w: Math.abs(s.x), h: Math.abs(s.y), d: Math.abs(s.z),
+    });
+  }
+  const gx = Math.min(...boxes.map((b) => b.x0));
+  const gy = Math.min(...boxes.map((b) => b.y0));
+  const gz = Math.min(...boxes.map((b) => b.z0));
+  const w = Math.max(...boxes.map((b) => b.x0 + b.w)) - gx;
+  const h = Math.max(...boxes.map((b) => b.y0 + b.h)) - gy;
+  const d = Math.max(...boxes.map((b) => b.z0 + b.d)) - gz;
+  const cells = new Map(); // "x,y,z" -> state name
+  for (const b of boxes) {
+    const palette = b.rg.BlockStatePalette.map((e) => e.Name);
+    const longs = b.rg.BlockStates.map((v) => BigInt.asUintN(64, v));
+    const bits = Math.max(2, Math.ceil(Math.log2(palette.length)));
+    const mask = (1n << BigInt(bits)) - 1n;
+    for (let y = 0; y < b.h; y++)
+      for (let z = 0; z < b.d; z++)
+        for (let x = 0; x < b.w; x++) {
+          const idx = (y * b.d + z) * b.w + x;
+          const off = idx * bits;
+          const li = off >> 6, sb = BigInt(off & 63);
+          let v = longs[li] >> sb;
+          if ((off & 63) + bits > 64) v |= longs[li + 1] << (64n - sb);
+          const state = palette[Number(v & mask)];
+          if (state && !state.includes("air"))
+            cells.set(`${b.x0 - gx + x},${b.y0 - gy + y},${b.z0 - gz + z}`, state);
+        }
+  }
+  return { w, h, d, get: (x, y, z) => cells.get(`${x},${y},${z}`) || "minecraft:air" };
+}
+
+function spongeGrid(root) {
   if (root.Schematic) root = root.Schematic; // sponge v3 wraps everything
   const w = root.Width, h = root.Height, d = root.Length;
   if (w == null || h == null || d == null) throw new Error("no Width/Height/Length - not a Sponge .schem?");
@@ -229,6 +269,15 @@ function ingest(file) {
   for (const [state, idx] of Object.entries(palette)) byIndex[Number(idx)] = state;
   const indices = varints(data);
   if (indices.length !== w * h * d) throw new Error(`block data ${indices.length} != ${w}x${h}x${d}`);
+  return { w, h, d, get: (x, y, z) => byIndex[indices[x + z * w + y * w * d]] };
+}
+
+function ingest(file) {
+  let raw = fs.readFileSync(file);
+  if (raw[0] === 0x1f && raw[1] === 0x8b) raw = zlib.gunzipSync(raw);
+  const root = readNbt(raw);
+  const grid = root.Regions ? litematicGrid(root) : spongeGrid(root);
+  const { w, h, d } = grid;
 
   if (w > 16 || d > 16) throw new Error(`footprint ${w}x${d} - too big for a village plot (max 16x16)`);
   if (h > 14) throw new Error(`height ${h} - too tall (max 14)`);
@@ -241,7 +290,7 @@ function ingest(file) {
   for (let y = 0; y < h; y++)
     for (let z = 0; z < d; z++)
       for (let x = 0; x < w; x++) {
-        const state = byIndex[indices[x + z * w + y * w * d]];
+        const state = grid.get(x, y, z);
         const m = simplify(state);
         if (m === "") { if (!state.includes("air")) dropped++; continue; }
         total++;
@@ -278,6 +327,40 @@ function ingest(file) {
   };
   bp.tier = tierOf(mats);
   return { bp, dropped, rejected };
+}
+
+// ---------------------------------------------------------------- compact grid import
+//
+// The browser-side harvester (used to pull schematics off sites that only serve a real
+// browser) emits a compact form: material-token palette + one string per y-layer,
+// row-major, '.' = air, 'A'.. = palette index. This converts it to standard blueprints.
+
+function fromGrid(g) {
+  const CH = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const blocks = [];
+  const mats = {};
+  for (let y = 0; y < g.layers.length; y++) {
+    const s = g.layers[y];
+    if (s.length !== g.w * g.d) throw new Error(`layer ${y} is ${s.length} chars, expected ${g.w * g.d} - corrupt copy`);
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] === ".") continue;
+      const m = g.palette[CH.indexOf(s[i])];
+      blocks.push({ dx: i % g.w, dy: y, dz: Math.floor(i / g.w), m });
+      mats[m] = (mats[m] || 0) + 1;
+    }
+  }
+  if (!blocks.length) throw new Error("empty grid");
+  if (blocks.length > 4000) throw new Error(`${blocks.length} blocks - too many (max 4000)`);
+  const minY = blocks.reduce((m, b) => Math.min(m, b.dy), Infinity);
+  for (const b of blocks) b.dy -= minY;
+  blocks.sort((a, b) => a.dy - b.dy || a.dz - b.dz || a.dx - b.dx);
+  const bp = {
+    id: g.id, name: g.name || g.id.replace(/-/g, " "),
+    w: g.w, h: 1 + blocks.reduce((m, b) => Math.max(m, b.dy), 0), d: g.d,
+    blocks, materials: mats, source: g.source || "grid",
+  };
+  bp.tier = tierOf(mats);
+  return bp;
 }
 
 // ---------------------------------------------------------------- library on disk
@@ -347,7 +430,7 @@ if (mode === "seed") {
 } else if (mode === "ingest") {
   if (!arg) throw new Error("ingest needs a .schem file or a directory of them");
   const files = fs.statSync(arg).isDirectory()
-    ? fs.readdirSync(arg).filter((n) => n.match(/\.(schem|schematic)$/i)).map((n) => path.join(arg, n))
+    ? fs.readdirSync(arg).filter((n) => n.match(/\.(schem|schematic|litematic)$/i)).map((n) => path.join(arg, n))
     : [arg];
   for (const f of files) {
     try {
@@ -358,11 +441,23 @@ if (mode === "seed") {
       console.log(`  SKIP ${path.basename(f)}: ${e.message}`);
     }
   }
+} else if (mode === "grid") {
+  if (!arg) throw new Error("grid needs a JSON file (one compact grid or an array of them)");
+  const data = JSON.parse(fs.readFileSync(arg, "utf8"));
+  for (const g of Array.isArray(data) ? data : [data]) {
+    try {
+      const bp = fromGrid(g);
+      saveBlueprint(bp);
+      console.log(describe(bp));
+    } catch (e) {
+      console.log(`  SKIP ${g.id}: ${e.message}`);
+    }
+  }
 } else if (mode === "list") {
   for (const bp of loadLibrary().sort((a, b) => a.tier - b.tier || costOf(a.materials) - costOf(b.materials)))
     console.log(describe(bp));
 } else if (mode === "push") {
   await push();
 } else {
-  console.log("usage: node scripts/blueprints.mjs seed | ingest <path> | list | push");
+  console.log("usage: node scripts/blueprints.mjs seed | ingest <path> | grid <json> | list | push");
 }
