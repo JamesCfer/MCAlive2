@@ -47,7 +47,94 @@ function tierOf(materials) {
   if (c < 120) return 0;
   if (c < 260) return 1;
   if (c < 600) return 2;
-  return 3;
+  if (c < 1400) return 3;
+  if (c < 3000) return 4;
+  return 5;
+}
+
+// ---------------------------------------------------------------- purpose and size
+
+// What a building is for, guessed from its name (a search-term hint breaks ties).
+// The order matters: the first match wins, and "house" words come last because
+// half the uploads are called "medieval tavern house".
+const PURPOSES = [
+  ["inn", /tavern|\binn\b|pub\b|alehouse/],
+  ["church", /church|chapel|cathedral|temple|shrine|monastery/],
+  ["smithy", /smith|forge|foundry|smelter/],
+  ["farm", /\bfarm|barn|stable|coop|pen\b|granary|silo|greenhouse|orchard/],
+  ["storage", /storage|warehouse|store\s?room|depot|cellar|vault/],
+  ["shop", /shop|market|stall|store\b|bakery|butcher|trading|merchant|bank/],
+  ["tower", /tower|watchtower|lookout|keep\b|bastion|outpost/],
+  ["civic", /town\s?hall|hall\b|library|school|tribunal|court|guild|meeting/],
+  ["dock", /dock|pier|harbou?r|port\b|boathouse|lighthouse|fisher/],
+  ["mill", /windmill|watermill|\bmill\b|sawmill/],
+  ["well", /\bwell\b|fountain/],
+  ["bridge", /bridge/],
+  ["house", /house|home|cottage|cabin|hut|shack|residence|manor|dwelling|starter|survival|cozy|casa|villa/],
+];
+
+function purposeOf(name, hint) {
+  const n = String(name).toLowerCase();
+  for (const [p, re] of PURPOSES) if (re.test(n)) return p;
+  if (hint) for (const [p, re] of PURPOSES) if (re.test(hint)) return p;
+  return "misc";
+}
+
+// Which plot it needs. Village house plots are "small"; the rest wait for asks
+// (town halls, big churches) that know to clear more ground.
+function sizeClassOf(w, d) {
+  const m = Math.max(w, d);
+  return m <= 16 ? "small" : m <= 24 ? "medium" : "large";
+}
+
+const GRID_CH = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+/** Blocks-form -> the compact grid form everything is stored in. */
+function blocksToGrid(bp) {
+  const palette = [];
+  const palIdx = {};
+  const cells = new Map();
+  let maxY = 0;
+  for (const b of bp.blocks) {
+    if (!(b.m in palIdx)) { palIdx[b.m] = palette.length; palette.push(b.m); }
+    cells.set(`${b.dx},${b.dy},${b.dz}`, GRID_CH[palIdx[b.m]]);
+    if (b.dy > maxY) maxY = b.dy;
+  }
+  if (palette.length > GRID_CH.length) throw new Error(`${palette.length} materials - palette overflow`);
+  const layers = [];
+  for (let y = 0; y <= maxY; y++) {
+    let s = "";
+    for (let z = 0; z < bp.d; z++)
+      for (let x = 0; x < bp.w; x++) s += cells.get(`${x},${y},${z}`) || ".";
+    layers.push(s);
+  }
+  const { blocks, ...rest } = bp;
+  return { ...rest, h: maxY + 1, palette, layers };
+}
+
+/** Recount the bill and dimensions straight from the layers, so a grid can never
+ *  disagree with its own metadata. */
+function annotate(g, hint) {
+  const mats = {};
+  let n = 0;
+  for (let y = 0; y < g.layers.length; y++) {
+    const s = g.layers[y];
+    if (s.length !== g.w * g.d) throw new Error(`layer ${y} is ${s.length} chars, expected ${g.w * g.d} - corrupt`);
+    for (const ch of s) {
+      if (ch === ".") continue;
+      const m = g.palette[GRID_CH.indexOf(ch)];
+      if (m == null) throw new Error(`layer ${y}: '${ch}' not in palette`);
+      mats[m] = (mats[m] || 0) + 1;
+      n++;
+    }
+  }
+  if (!n) throw new Error("empty grid");
+  g.h = g.layers.length;
+  g.materials = mats;
+  g.tier = tierOf(mats);
+  g.purpose = g.purpose || purposeOf(g.name || g.id, hint);
+  g.sizeClass = sizeClassOf(g.w, g.d);
+  return g;
 }
 
 // ---------------------------------------------------------------- seed designs
@@ -123,18 +210,16 @@ function house({ id, name, w, d, wallH, wall, corners, windows }) {
     (a, b) => a.dy - b.dy || a.dz - b.dz || a.dx - b.dx
   );
   for (const k of Object.keys(mats)) if (mats[k] <= 0) delete mats[k];
-  const bp = {
+  return annotate(blocksToGrid({
     id,
     name,
+    purpose: "house",
     w,
-    h: 1 + list.reduce((m, b) => Math.max(m, b.dy), 0),
     d,
     blocks: list,
     materials: mats,
     source: "seed",
-  };
-  bp.tier = tierOf(mats);
-  return bp;
+  }));
 }
 
 function seedDesigns() {
@@ -279,8 +364,8 @@ function ingest(file) {
   const grid = root.Regions ? litematicGrid(root) : spongeGrid(root);
   const { w, h, d } = grid;
 
-  if (w > 16 || d > 16) throw new Error(`footprint ${w}x${d} - too big for a village plot (max 16x16)`);
-  if (h > 14) throw new Error(`height ${h} - too tall (max 14)`);
+  if (w > 32 || d > 32) throw new Error(`footprint ${w}x${d} - too big even for a civic plot (max 32x32)`);
+  if (h > 26) throw new Error(`height ${h} - too tall (max 26)`);
 
   const blocks = [];
   const mats = {};
@@ -309,7 +394,7 @@ function ingest(file) {
       .map(([n, c]) => `${n} x${c}`).join(", ");
     throw new Error(`too fancy: ${Math.round((100 * rejected) / total)}% of it is blocks nobody can produce (${top})`);
   }
-  if (blocks.length > 4000) throw new Error(`${blocks.length} blocks - too many (max 4000)`);
+  if (blocks.length > 12000) throw new Error(`${blocks.length} blocks - too many (max 12000)`);
   // drop empty bottom layers so dy 0 is the floor
   const minY = blocks.reduce((m, b) => Math.min(m, b.dy), Infinity);
   for (const b of blocks) b.dy -= minY;
@@ -317,50 +402,15 @@ function ingest(file) {
 
   const id = path.basename(file).replace(/\.(schem|schematic|litematic)$/i, "")
     .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  const bp = {
+  const bp = annotate(blocksToGrid({
     id,
     name: id.replace(/-/g, " "),
-    w, h: 1 + blocks.reduce((m, b) => Math.max(m, b.dy), 0), d,
+    w, d,
     blocks,
     materials: mats,
     source: path.basename(file),
-  };
-  bp.tier = tierOf(mats);
+  }));
   return { bp, dropped, rejected };
-}
-
-// ---------------------------------------------------------------- compact grid import
-//
-// The browser-side harvester (used to pull schematics off sites that only serve a real
-// browser) emits a compact form: material-token palette + one string per y-layer,
-// row-major, '.' = air, 'A'.. = palette index. This converts it to standard blueprints.
-
-function fromGrid(g) {
-  const CH = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-  const blocks = [];
-  const mats = {};
-  for (let y = 0; y < g.layers.length; y++) {
-    const s = g.layers[y];
-    if (s.length !== g.w * g.d) throw new Error(`layer ${y} is ${s.length} chars, expected ${g.w * g.d} - corrupt copy`);
-    for (let i = 0; i < s.length; i++) {
-      if (s[i] === ".") continue;
-      const m = g.palette[CH.indexOf(s[i])];
-      blocks.push({ dx: i % g.w, dy: y, dz: Math.floor(i / g.w), m });
-      mats[m] = (mats[m] || 0) + 1;
-    }
-  }
-  if (!blocks.length) throw new Error("empty grid");
-  if (blocks.length > 4000) throw new Error(`${blocks.length} blocks - too many (max 4000)`);
-  const minY = blocks.reduce((m, b) => Math.min(m, b.dy), Infinity);
-  for (const b of blocks) b.dy -= minY;
-  blocks.sort((a, b) => a.dy - b.dy || a.dz - b.dz || a.dx - b.dx);
-  const bp = {
-    id: g.id, name: g.name || g.id.replace(/-/g, " "),
-    w: g.w, h: 1 + blocks.reduce((m, b) => Math.max(m, b.dy), 0), d: g.d,
-    blocks, materials: mats, source: g.source || "grid",
-  };
-  bp.tier = tierOf(mats);
-  return bp;
 }
 
 // ---------------------------------------------------------------- library on disk
@@ -378,9 +428,13 @@ function saveBlueprint(bp) {
   fs.writeFileSync(path.join(DIR, `${bp.id}.json`), JSON.stringify(bp));
 }
 
+function blockCount(bp) {
+  return bp.layers.reduce((n, s) => n + s.replace(/\./g, "").length, 0);
+}
+
 function describe(bp) {
   const bill = Object.entries(bp.materials).map(([k, v]) => `${k} ${v}`).join("  ");
-  return `  t${bp.tier}  ${bp.id.padEnd(16)} ${String(bp.w).padStart(2)}x${bp.d} h${bp.h}  ${String(bp.blocks.length).padStart(4)} blocks  cost ${Math.round(costOf(bp.materials))}   ${bill}`;
+  return `  t${bp.tier}  ${(bp.purpose || "?").padEnd(7)} ${(bp.sizeClass || "?").padEnd(6)} ${bp.id.padEnd(30)} ${String(bp.w).padStart(2)}x${bp.d} h${bp.h}  ${String(blockCount(bp)).padStart(5)} blocks  cost ${Math.round(costOf(bp.materials))}   ${bill}`;
 }
 
 // ---------------------------------------------------------------- bridge
@@ -409,12 +463,19 @@ async function push() {
     ws.onerror = (e) => reject(new Error("ws error: " + (e.message || e)));
     setTimeout(() => reject(new Error("connect timeout")), 20000);
   });
-  // one call: gadget:blueprints keeps the library in the world's persistent data
-  // (the ledger's collections are fixed, and facts feed actor prompts)
-  const r = await call("gadget:blueprints", { action: "put", blueprints: lib });
-  if (!r.ok) throw new Error(`push: ${r.error}`);
-  for (const bp of lib) console.log(`  pushed ${bp.id} (tier ${bp.tier}, ${bp.blocks.length} blocks)`);
-  console.log(`  library now holds ${r.data.total}`);
+  // gadget:blueprints keeps the library gzipped in the world's persistent data
+  // (the ledger's collections are fixed, and facts feed actor prompts). Replace
+  // wholesale so deletions on disk propagate, in chunks the bridge is happy with.
+  const CHUNK = 60;
+  for (let i = 0; i < lib.length; i += CHUNK) {
+    const r = await call("gadget:blueprints", {
+      action: "put",
+      blueprints: lib.slice(i, i + CHUNK),
+      replace: i === 0,
+    });
+    if (!r.ok) throw new Error(`push: ${r.error}`);
+    console.log(`  pushed ${Math.min(i + CHUNK, lib.length)}/${lib.length}  (library now ${r.data.total})`);
+  }
   ws.close();
 }
 
@@ -442,16 +503,28 @@ if (mode === "seed") {
     }
   }
 } else if (mode === "grid") {
-  if (!arg) throw new Error("grid needs a JSON file (one compact grid or an array of them)");
-  const data = JSON.parse(fs.readFileSync(arg, "utf8"));
+  // A JSON array of compact grids (or a gzip of one, from the browser harvester).
+  if (!arg) throw new Error("grid needs a JSON (or .json.gz) file of compact grids");
+  let raw = fs.readFileSync(arg);
+  if (raw[0] === 0x1f && raw[1] === 0x8b) raw = zlib.gunzipSync(raw);
+  const data = JSON.parse(raw.toString("utf8"));
   for (const g of Array.isArray(data) ? data : [data]) {
     try {
-      const bp = fromGrid(g);
+      const bp = annotate(g, g.hint);
+      delete bp.hint;
       saveBlueprint(bp);
       console.log(describe(bp));
     } catch (e) {
       console.log(`  SKIP ${g.id}: ${e.message}`);
     }
+  }
+} else if (mode === "migrate") {
+  // one-off: convert pre-grid (blocks-form) files on disk to the grid form
+  for (const bp of loadLibrary()) {
+    if (bp.layers) continue;
+    const g = annotate(blocksToGrid(bp));
+    saveBlueprint(g);
+    console.log(describe(g));
   }
 } else if (mode === "list") {
   for (const bp of loadLibrary().sort((a, b) => a.tier - b.tier || costOf(a.materials) - costOf(b.materials)))
@@ -459,5 +532,5 @@ if (mode === "seed") {
 } else if (mode === "push") {
   await push();
 } else {
-  console.log("usage: node scripts/blueprints.mjs seed | ingest <path> | grid <json> | list | push");
+  console.log("usage: node scripts/blueprints.mjs seed | ingest <path> | grid <json[.gz]> | migrate | list | push");
 }

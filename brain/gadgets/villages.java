@@ -412,6 +412,9 @@ public class Villages implements GadgetContract {
             int bestScore = -1;
             JsonObject q = new JsonObject();
             q.addProperty("action", "list");
+            q.addProperty("purpose", "house");        // no one lives in the windmill
+            q.addProperty("sizeClass", "small");      // a village plot is at most 16x16
+            q.addProperty("maxTier", building);
             List<JsonObject> lib = new ArrayList<JsonObject>();
             for (JsonElement el : ctx.invoke("gadget:blueprints", q).getAsJsonArray("blueprints")) lib.add(el.getAsJsonObject());
             for (JsonObject bp : lib) {

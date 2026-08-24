@@ -25,5 +25,6 @@
  "people": "Every NPC is a player: hp, hunger, inventory, abilities, skills earned by doing, three needs, jobs chosen by skill, dynamic trade.",
  "tablist": "Every living person appears in the tab list, sent as the real player-info packet.",
  "villages": "Finding, founding and joining villages; asks a capable member for an inn, and members with the materials for a house from the blueprint library. The building, lodging and market are people jobs.",
- "claims": "Land ownership: placed blocks stake a 3-block barrier per owner (npc/player/village), first claim wins. Trespass on personal land draws a warning, then a claim_trespass event, a hostility record and a confrontation; building on it is an immediate claim_violation."
+ "claims": "Land ownership: placed blocks stake a 3-block barrier per owner (npc/player/village), first claim wins. Trespass on personal land draws a warning, then a claim_trespass event, a hostility record and a confrontation; building on it is an immediate claim_violation.",
+ "blueprints": "The building library: compact palette-grid designs tagged by purpose (house/inn/church/smithy/farm/shop/tower/...), tier (material cost) and size class, gzipped into world PDC. list filters by purpose/tier/size; get expands to the blocks list people build from."
 }
