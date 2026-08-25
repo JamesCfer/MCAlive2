@@ -1,0 +1,1 @@
+{"id":"simpel-well","name":"simpel well","w":3,"h":9,"d":3,"palette":["COBBLESTONE","$PLANKS","$LOG"],"layers":["A...AA..A",".A.A.A.A.",".A.A.A.A.",".A.A.A.A.","AAAA.AAAA","A.A...A.A","B.B...B.B","B.B.C.B.B","....A...."],"materials":{"COBBLESTONE":29,"$PLANKS":8,"$LOG":1},"source":"simpel Well-from-abfielder.litematic","tier":0,"purpose":"well","sizeClass":"small"}

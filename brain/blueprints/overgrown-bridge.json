@@ -1,0 +1,1 @@
+{"id":"overgrown-bridge","name":"overgrown bridge","w":15,"h":3,"d":3,"palette":["$PLANKS"],"layers":[".......A.A..........A..A.............A.A.....","..A...AA.A...A.....A.....AAA....A....A.AA....",".A.A..........A..A..........A..A.A.........A."],"materials":{"$PLANKS":27},"source":"Overgrown Bridge-from-abfielder.litematic","tier":0,"purpose":"bridge","sizeClass":"small"}

@@ -112,9 +112,22 @@ function blocksToGrid(bp) {
   return { ...rest, h: maxY + 1, palette, layers };
 }
 
+/** Run-length decode a layer ("12.3A2." -> "............AAA..") - the transfer form
+ *  the browser harvester emits, much smaller and cheap to validate. */
+function rleDecode(s) {
+  let out = "";
+  for (const [, n, ch] of s.matchAll(/(\d+)(.)/g)) out += ch.repeat(+n);
+  return out;
+}
+
 /** Recount the bill and dimensions straight from the layers, so a grid can never
- *  disagree with its own metadata. */
+ *  disagree with its own metadata - and if it arrived with a bill already counted
+ *  at the source, any mismatch means the copy is corrupt. */
 function annotate(g, hint) {
+  if (g.rle) {
+    g.layers = g.layers.map(rleDecode);
+    delete g.rle;
+  }
   const mats = {};
   let n = 0;
   for (let y = 0; y < g.layers.length; y++) {
@@ -129,6 +142,12 @@ function annotate(g, hint) {
     }
   }
   if (!n) throw new Error("empty grid");
+  if (g.materials) {
+    for (const k of new Set([...Object.keys(mats), ...Object.keys(g.materials)])) {
+      if ((mats[k] || 0) !== (g.materials[k] || 0))
+        throw new Error(`bill mismatch on ${k}: counted ${mats[k] || 0}, source says ${g.materials[k] || 0} - corrupt copy`);
+    }
+  }
   g.h = g.layers.length;
   g.materials = mats;
   g.tier = tierOf(mats);
