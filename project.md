@@ -14,6 +14,12 @@ These came from James directly and override convenience. Breaking one is a bug, 
    abilities (spells, tools) are welcome — but only things a player could also be given.
    *Smooth per-tick stepped movement is how the plugin moves a body with no mob AI; that counts
    as walking. Jumping a body across the map does not.*
+   **The one exception is `gadget:gather`** (2026-08-25, James: "i want all npc's to be
+   teleported to spawn... I want players to be teleported there too at the same time"). It is
+   an operator calling a muster - a thing that happens TO the world from outside it, like
+   weather or an update restart - not a capability anything inside the simulation has. It is
+   on no tool list, has no timer, and nothing but a hand at a keyboard can invoke it. Rule 1
+   still governs every other movement in the world.
 2. **Tokens are only for authoring new options.** Every decision at runtime is arithmetic in
    gadget Java. A model is consulted to write a *new action* into the catalogue, never to pick
    among the ones that exist.
@@ -258,6 +264,7 @@ live on the server (the gadget was defined) but GitHub lags until someone pushes
 | `claims` | Land. Placed blocks stake a 3-block barrier per owner (`npc:`/`player:`/`village:`); first claim wins. Trespass on personal land: warning (`npc_say`), then `claim_trespass` event + hostility record + a confront alert on the owner's sheet. Building on it: immediate `claim_violation`. Village land blocks building only - strangers are welcome to walk it. `status`, `stake`, `owner_of`, `check_rect`, `release`, `hostility`. |
 | `blueprints` | The building library: compact palette-grid designs tagged by **purpose** (house, inn, church, smithy, farm, shop, tower, storage, civic, dock, mill...), **tier** (material cost, t0-t5) and **size class** (small ≤16, medium ≤24, large ≤32 footprint), stored gzipped in world PDC. `scripts/blueprints.mjs` seeds/ingests (.schem/.litematic) and pushes; `villages` picks an affordable small house; `get` expands a grid to the blocks list `people` builds from. `list {purpose,maxTier,sizeClass}`, `get`, `put`, `delete`, `stats`. Medium/large and non-house purposes are inventory for future asks (expansion, town halls) - only the house ask uses the library so far. |
 | `navigate` | A* over standing positions, player rules, swims through water, surface-biased. Everything that moves goes through this. |
+| `gather` | Operator muster: every living NPC and every online player to spawn, in one tick, spiralled a block apart so nobody lands inside anybody. Cancels walks in flight first - navigate steps a body by teleporting it to the next foothold, so a stale path would drag its owner straight back out. Jobs are left alone, so the walk back starts on the next beat. `now`, `where`. |
 | `presence` | Holds chunk tickets in a 3x3 around every person; unloads the rest. |
 | `groundskeeper` | Frees people stuck in terrain by walking or digging, never lifting. |
 | `world-scan`, `position-tracker` | Brain-owned: the console map and live positions. |
