@@ -3869,6 +3869,16 @@ public class People implements GadgetContract {
             return out;
         }
 
+        // Anything that is not a known action USED to fall through to here and restart
+        // the world: statics reset, every running job dropped, every beat-relative clock
+        // left stale. That turned a brain that had been taught a new action, against a
+        // server that had not been given it yet, into a roster-wide outage - one punch
+        // from a player was enough. Starting is now something you have to ask for.
+        if (!action.equals("start") && !action.equals("restart")) {
+            throw new IllegalArgumentException("gadget:people has no action \"" + action
+                    + "\" (start, stop, status, spawn, arrive, assign, graves, give, bond)");
+        }
+
         final int myGen = generation(ctx, true);
         int killed = reap(ctx);
         if (TASK_ID != null) { ctx.cancelTask(TASK_ID.intValue()); TASK_ID = null; }

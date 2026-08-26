@@ -18,6 +18,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { buildWorldModel, formatWorldOverview } from "./lib/worldmodel.mjs";
+import { supportsAction } from "./lib/gadget-caps.mjs";
 import { appendEntry as chronicleAppend, readFile as chronicleReadFile, rewriteFile as chronicleRewrite } from "./lib/chronicle.mjs";
 import { capToolResultText, resolveMaxToolResultChars } from "./lib/tool-result-cap.mjs";
 
@@ -231,7 +232,14 @@ tool("npc_do", "Commit this NPC to a job right now, as the outcome of a conversa
 tool("npc_give", "Hand a player something out of your own bag, as a gift or your side of a trade you just agreed. It drops at their feet - nobody reaches into anybody's inventory. Only what your sheet says you carry, and only to somebody who does not distrust you.", {
   id: z.string(), player: z.string(), item: z.string().describe("material name, e.g. COOKED_BEEF"),
   count: z.number().optional().describe("how many (default 1)"),
-}, (args) => call("gadget:people", { action: "give", npcId: args.id, player: args.player, item: args.item, count: args.count }));
+}, async (args) => {
+  // gadget:people restarts itself on any action it does not recognise (see
+  // lib/gadget-caps.mjs), so never send "give" to a build that predates it.
+  if (!(await supportsAction(call, "people", "give"))) {
+    throw new Error("this server's gadget:people cannot hand items over yet - say so in character rather than pretending you did");
+  }
+  return call("gadget:people", { action: "give", npcId: args.id, player: args.player, item: args.item, count: args.count });
+});
 pt("npc_walk_to", "Walk an NPC to a position (pauses its daily routine for holdSeconds).", {
   id: z.string(), ...pos,
   speed: z.number().optional(),

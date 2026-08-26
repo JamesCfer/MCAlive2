@@ -59,6 +59,7 @@ import { parseActorReport } from "./lib/actor-report.mjs";
 import { SelfUpdater } from "./lib/self-update.mjs";
 import { Developer } from "./lib/developer.mjs";
 import { NeedsLog } from "./lib/needs-log.mjs";
+import { supportsAction } from "./lib/gadget-caps.mjs";
 import { resetIfNewEpoch } from "./lib/chronicle.mjs";
 
 export async function main(env = process.env) {
@@ -714,7 +715,12 @@ export async function main(env = process.env) {
           // and `attackerType` says which. A mob mauling somebody is nobody's fault.
           const by = data && data.attackerType === "player" ? data.player : null;
           if (by && data.npcId) {
-            bridge.call("gadget:people", { action: "bond", npcId: data.npcId, player: by, delta: -25, why: "hit me" })
+            // Only when the gadget on the server actually knows "bond". An action it has
+            // never heard of falls through to gadget:people's start branch and restarts
+            // the whole world, so a player throwing one punch would reset the roster.
+            supportsAction((cmd, a, t) => bridge.call(cmd, a, t), "people", "bond")
+              .then((ok) => ok && bridge.call("gadget:people",
+                { action: "bond", npcId: data.npcId, player: by, delta: -25, why: "hit me" }))
               .catch((e) => log.error("bond_update_failed", { error: String(e && e.message || e) }));
           }
         }
