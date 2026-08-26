@@ -127,6 +127,14 @@ public class Navigator implements GadgetContract {
         // down its own shaft - but a walk between two places on the surface must stay on it.
         int targetDepth = surfaceAt(w, surf, tx, tz) - ty;
         boolean underground = allowUnderground || targetDepth > MAX_DEPTH;
+        // Somebody who is ALREADY deeper than the cap - a miner at the bottom of its own
+        // shaft, anybody who fell into a cave - must still be able to climb out. The depth
+        // rule was applied to every neighbour regardless of where the walker stood, so a
+        // body below the cap had no legal move at all: A* expanded nothing, findPath
+        // returned empty, and every job that person took ended in "could not reach".
+        // They stood still for good. Never refuse a step that is no deeper than the
+        // ground already underfoot; DEPTH_COST still pulls the route up to daylight.
+        int depthCap = Math.max(MAX_DEPTH, surfaceAt(w, surf, sx, sz) - sy);
         final Node start = new Node(sx, sy, sz);
         start.g = 0;
         start.f = dist(sx, sy, sz, tx, ty, tz);
@@ -168,7 +176,7 @@ public class Navigator implements GadgetContract {
                     if (!standable(w, nx, ny, nz)) continue;
                     if (dy == 1 && !passable(w.getBlockAt(cur.x, cur.y + 2, cur.z))) continue; // headroom to climb
                     int depth = surfaceAt(w, surf, nx, nz) - ny;
-                    if (!underground && depth > MAX_DEPTH) continue;   // refuse to sink
+                    if (!underground && depth > depthCap) continue;   // refuse to sink
                     long nk = key(nx, ny, nz);
                     if (closed.contains(nk)) break;
                     double step = (diagonal ? 1.414 : 1.0) + (dy < 0 ? 0.4 * -dy : 0) + (dy > 0 ? 0.5 : 0);

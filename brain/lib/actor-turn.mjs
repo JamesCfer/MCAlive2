@@ -79,6 +79,20 @@ export function buildActorPrompt({ npc, facts, player, trigger, message, transcr
     lines.push("Recent conversation:");
     for (const t of transcript.recent) lines.push(`${t.who}: ${t.text}`);
   }
+  // What this person already thinks of the player in front of them. The number is moved
+  // by things that happened - being hit, being given something, a promise kept - never by
+  // the actor, so it is the one part of the prompt an NPC cannot talk itself out of.
+  const bond = npc && npc.bonds && npc.bonds[player];
+  if (bond && typeof bond.score === "number") {
+    lines.push("");
+    lines.push(`How you feel about ${player}: ${bond.score >= 0 ? "+" : ""}${bond.score} out of 100 - you ${feelingWord(bond.score)}.`);
+    if (bond.last) lines.push(`Most recently: ${bond.last}.`);
+    if (Array.isArray(bond.because) && bond.because.length) {
+      lines.push(`What built that: ${bond.because.slice(-4).join("; ")}.`);
+    }
+    lines.push("Let that colour how warm you are, what you agree to, and what you refuse.");
+  }
+
   lines.push("");
   if (trigger === "npc_interact") {
     lines.push(`${player} just walked up and interacted with you. Greet them in character and speak with npc_say.`);
@@ -90,7 +104,21 @@ export function buildActorPrompt({ npc, facts, player, trigger, message, transcr
   lines.push("If you agree to DO something, say so AND call npc_do with the matching job so it actually happens -");
   lines.push("hunt, fish, farm, chop, mine, explore, craft (want=ITEM), trade, visit, market, build, rest.");
   lines.push("Your sheet shows your skills, tools and bag: only promise what you can really do, and say no honestly otherwise.");
+  lines.push("");
+  lines.push("If you agree to hand something over - a gift, or your side of a trade you just struck - call");
+  lines.push("npc_give with the item and how many. It drops the thing at their feet, out of your own bag, so");
+  lines.push("only offer what your sheet says you are carrying. Somebody you do not trust gets nothing.");
   return lines.join("\n");
+}
+
+/** The same scale gadget:people uses, so the prompt and the world agree what a number means. */
+function feelingWord(score) {
+  if (score <= -60) return "hate them";
+  if (score <= -25) return "do not trust them";
+  if (score < 10) return "barely know them";
+  if (score < 40) return "like them";
+  if (score < 75) return "count them a friend";
+  return "would do anything for them";
 }
 
 /**

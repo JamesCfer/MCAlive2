@@ -12,10 +12,10 @@
 //   t=700ms   npc_interact  -> mara-baker  (must route to an ACTOR turn)
 //   t=900ms   player_chat WITH nearNpcId -> kess-smith (also an ACTOR turn;
 //             proves this NPC only ever sees ITS OWN facts, not mara's)
-//   t=2200ms  npc_death (well outside the debounce window -> its own scene)
-//   t=3000ms  region_enter   \
-//   t=3050ms  region_exit     } re-enabled M2 wake events, batched into a
-//   t=3100ms  player_idle_scene / THIRD scene, separate from npc_death
+//   t=2200ms  npc_death (written to the needs log, never a scene)
+//   t=3000ms  region_enter   \  ambient: dropped, these wake nothing
+//   t=3050ms  region_exit    /
+//   t=3100ms  player_idle_scene  a player moment: still gets its own scene
 //
 // Env:
 //   MOCK_BRIDGE_PORT   port to listen on (default 8899)

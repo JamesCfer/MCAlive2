@@ -15,15 +15,15 @@
 //   6. each actor turn's allowlist is exactly the three actor tools, and its
 //      disallowedTools complement excludes them but includes director-only
 //      tools (npc_context, ledger_put, ...)
-//   7. a later, well-separated event (npc_death) starts its own director
-//      scene, separate from the first batch
+//   7. npc_death is written to the needs log (facts/needs-log) with a cause,
+//      and never starts a director scene
 //   8. the kill switch (BRAIN_DISABLED_FILE present) blocks both director
 //      scenes and actor turns entirely
 //   9. the daily usage budget file is written on startup
 //   10. reconnect-with-backoff against a refused port keeps the process
 //      alive and keeps retrying instead of exiting
-//   11. the re-enabled M2 wake events (player_idle_scene, region_enter,
-//      region_exit) reach the director's scene queue, batched together
+//   11. player_idle_scene still reaches the director's scene queue, while the
+//      ambient region_enter/region_exit are dropped without waking anything
 //   12. the director's dry-run prompt is a structured briefing: a SCENE
 //      section grouped per player, and a STANDING ORDERS section carrying
 //      the adjudication procedure and the actor-report validation rule
@@ -42,7 +42,7 @@ import path from "node:path";
 import os from "node:os";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
-import { namespacedTool, MCP_SERVER_NAME, ALL_TOOLS, ACTOR_TOOLS, actorDisallowedTools, DIRECTOR_WAKE_EVENTS, loadConfig } from "../lib/config.mjs";
+import { namespacedTool, MCP_SERVER_NAME, ALL_TOOLS, ACTOR_TOOLS, actorDisallowedTools, DIRECTOR_WAKE_EVENTS, NEEDS_LOG_EVENTS, loadConfig } from "../lib/config.mjs";
 import { parseActorReport } from "../lib/actor-report.mjs";
 import { ActorMemory } from "../lib/actor-memory.mjs";
 import { formatHumanLine, compactArgs, log } from "../lib/logger.mjs";
@@ -127,9 +127,24 @@ async function main() {
   assert(disallowed.includes(namespacedTool("ledger_put", MCP_SERVER_NAME)), "ledger_put is denied to actors");
   assert(disallowed.includes(namespacedTool("set_block", MCP_SERVER_NAME)), "set_block is denied to actors");
 
-  assert(DIRECTOR_WAKE_EVENTS.has("player_idle_scene"), "player_idle_scene is a director wake event (M2 re-enabled)");
-  assert(DIRECTOR_WAKE_EVENTS.has("region_enter"), "region_enter is a director wake event (M2 re-enabled)");
-  assert(DIRECTOR_WAKE_EVENTS.has("region_exit"), "region_exit is a director wake event (M2 re-enabled)");
+  assert(ACTOR_TOOLS.includes("npc_give"), "npc_give is an actor tool - handing something over is part of a conversation");
+  assert(ALL_TOOLS.includes("npc_give"), "npc_give is in ALL_TOOLS");
+  {
+    const bridgeSrc = fs.readFileSync(path.join(BRAIN_DIR, "mcp-bridge.mjs"), "utf8");
+    assert(/tool\("npc_give"/.test(bridgeSrc), "npc_give is registered in mcp-bridge.mjs");
+    assert(/action: "give"/.test(bridgeSrc), "npc_give routes to gadget:people action=give");
+  }
+
+  assert(DIRECTOR_WAKE_EVENTS.has("player_idle_scene"), "player_idle_scene is a director wake event (a player moment)");
+  // Ambient world traffic no longer wakes the director: it spent a turn per event
+  // concluding nothing, and a five million token day with it. See config.mjs.
+  assert(!DIRECTOR_WAKE_EVENTS.has("region_enter"), "region_enter does NOT wake the director (ambient)");
+  assert(!DIRECTOR_WAKE_EVENTS.has("region_exit"), "region_exit does NOT wake the director (ambient)");
+  assert(!DIRECTOR_WAKE_EVENTS.has("player_explored"), "player_explored does NOT wake the director (ambient)");
+  assert(!DIRECTOR_WAKE_EVENTS.has("world_turn"), "world_turn does NOT wake the director (ambient heartbeat)");
+  assert(!DIRECTOR_WAKE_EVENTS.has("npc_death"), "npc_death does NOT wake the director - it is written to the needs log");
+  assert(NEEDS_LOG_EVENTS.has("npc_death"), "npc_death feeds the needs log");
+  assert(NEEDS_LOG_EVENTS.has("npc_attacked"), "npc_attacked feeds the needs log (death attribution)");
   assert(DIRECTOR_WAKE_EVENTS.has("operator_order"), "operator_order is a director wake event (Lore Console orders)");
   assert(DIRECTOR_WAKE_EVENTS.has("sequence_done"), "sequence_done is a director wake event (plugin-side timed sequence finished)");
 
@@ -147,8 +162,8 @@ async function main() {
     assert(actorDisallowedTools(MCP_SERVER_NAME).includes(namespacedTool(t, MCP_SERVER_NAME)), `${t} is in the actor disallow-list`);
   }
   assert(DIRECTOR_WAKE_EVENTS.has("formula_error"), "formula_error is a director wake event");
-  assert(DIRECTOR_WAKE_EVENTS.has("npc_job_done"), "npc_job_done is a director wake event");
-  assert(DIRECTOR_WAKE_EVENTS.has("npc_job_blocked"), "npc_job_blocked is a director wake event");
+  assert(!DIRECTOR_WAKE_EVENTS.has("npc_job_done"), "npc_job_done wakes nothing (informational)");
+  assert(NEEDS_LOG_EVENTS.has("npc_job_blocked"), "npc_job_blocked feeds the needs log - a stalled job is evidence of a missing capability");
 
   console.log("\n1a².52. Behavior-program tools: present in ALL_TOOLS, absent from ACTOR_TOOLS, registered in mcp-bridge.mjs");
   const BEHAVIOR_TOOLS = ["behavior_create", "behavior_update", "behavior_pause", "behavior_resume",
@@ -158,8 +173,8 @@ async function main() {
     assert(!ACTOR_TOOLS.includes(t), `${t} is NOT in ACTOR_TOOLS (director-only by omission)`);
     assert(actorDisallowedTools(MCP_SERVER_NAME).includes(namespacedTool(t, MCP_SERVER_NAME)), `${t} is in the actor disallow-list`);
   }
-  assert(DIRECTOR_WAKE_EVENTS.has("behavior_done"), "behavior_done is a director wake event");
-  assert(DIRECTOR_WAKE_EVENTS.has("behavior_blocked"), "behavior_blocked is a director wake event");
+  assert(!DIRECTOR_WAKE_EVENTS.has("behavior_done"), "behavior_done wakes nothing (informational)");
+  assert(NEEDS_LOG_EVENTS.has("behavior_blocked"), "behavior_blocked feeds the needs log, not the director (this is the event that once woke it 16 times a minute)");
   {
     const bridgeSrcForBehavior = fs.readFileSync(path.join(BRAIN_DIR, "mcp-bridge.mjs"), "utf8");
     for (const t of BEHAVIOR_TOOLS) {
@@ -1389,7 +1404,7 @@ async function main() {
   for (const turn of [maraTurn, kessTurn]) {
     if (!turn) continue;
     const got = [...turn.allowedTools].sort();
-    assert(JSON.stringify(got) === JSON.stringify(expectedAllowed), `actor allowedTools is exactly the 3 actor tools for ${turn.npcId} (got ${JSON.stringify(got)})`);
+    assert(JSON.stringify(got) === JSON.stringify(expectedAllowed), `actor allowedTools is exactly the ${ACTOR_TOOLS.length} actor tools for ${turn.npcId} (got ${JSON.stringify(got)})`);
     assert(!turn.disallowedTools.includes(namespacedTool("npc_say", MCP_SERVER_NAME)), `npc_say is not disallowed for ${turn.npcId}`);
     assert(turn.disallowedTools.includes(namespacedTool("ledger_put", MCP_SERVER_NAME)), `ledger_put is disallowed for ${turn.npcId}`);
   }
@@ -1414,24 +1429,32 @@ async function main() {
   const gadgetRunCalls = bridge1.logs.filter((l) => l.mock === "command_received" && l.cmd === "gadget_run" && l.args && l.args.id === "position-tracker");
   assert(gadgetRunCalls.length >= 1, "mock bridge received gadget_run for id=\"position-tracker\" on boot");
 
-  // --- separate director scene for the later, well-separated event ---
-  const gotSecondScene = await waitFor(brain1.logs, () => sceneStarts().length >= 2, 3000);
-  assert(gotSecondScene, "a second, separate director scene started for the later npc_death event");
-  const second = sceneStarts()[1];
-  if (second) {
-    assert(second.events.includes("npc_death"), "second scene is for the npc_death event");
-    assert(second.batchSize === 1, `second scene was not merged with the first (batchSize=${second.batchSize})`);
+  // --- a death is written down, not narrated ---
+  // npc_death used to start its own director scene. It now goes to the needs log,
+  // which the developer reads once an hour to decide what to build. Proof is the
+  // ledger_put the mock bridge receives, not a scene.
+  const gotDeathLogged = await waitFor(brain1.logs, (l) => l.msg === "needs_log_death", 5000);
+  assert(gotDeathLogged, "npc_death was written to the needs log");
+  const deathLog = brain1.logs.find((l) => l.msg === "needs_log_death");
+  if (deathLog) assert(deathLog.who === "Sella", `the logged death names the person who died (got ${deathLog.who})`);
+  const needsPuts = bridge1.logs.filter((l) => l.mock === "command_received" && l.cmd === "ledger_put"
+    && l.args && l.args.record && l.args.record.id === "needs-log");
+  assert(needsPuts.length >= 1, "mock bridge received a ledger_put for facts/needs-log");
+  if (needsPuts.length) {
+    const entries = needsPuts[needsPuts.length - 1].args.record.entries || [];
+    assert(entries.some((e) => e.kind === "death" && e.who === "Sella"), "the needs-log record contains Sella's death");
   }
+  assert(!sceneStarts().some((s) => s.events.includes("npc_death")), "npc_death never lands in a director scene any more");
 
-  // --- re-enabled M2 wake events (player_idle_scene/region_enter/region_exit) ---
-  const gotThirdScene = await waitFor(brain1.logs, () => sceneStarts().length >= 3, 3000);
-  assert(gotThirdScene, "a third director scene started for the region_enter/region_exit/player_idle_scene events");
-  const third = sceneStarts()[2];
+  // --- ambient events are dropped; the player moment still wakes the director ---
+  const gotSecondScene = await waitFor(brain1.logs, () => sceneStarts().length >= 2, 4000);
+  assert(gotSecondScene, "a second director scene started for the player_idle_scene event");
+  const third = sceneStarts()[1];
   if (third) {
-    assert(third.events.includes("region_enter"), "third scene includes region_enter");
-    assert(third.events.includes("region_exit"), "third scene includes region_exit");
+    assert(!third.events.includes("region_enter"), "region_enter was dropped, not batched into a scene");
+    assert(!third.events.includes("region_exit"), "region_exit was dropped, not batched into a scene");
     assert(third.events.includes("player_idle_scene"), "third scene includes player_idle_scene");
-    assert(third.batchSize === 3, `third scene batched all three re-enabled M2 events together (got batchSize=${third.batchSize})`);
+    assert(third.batchSize === 1, `only player_idle_scene reached the scene; region_enter/exit were dropped (got batchSize=${third.batchSize})`);
   }
 
   // --- director briefing structure: SCENE grouping + adjudication procedure ---

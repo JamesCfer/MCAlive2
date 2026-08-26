@@ -85,6 +85,8 @@ public class People implements GadgetContract {
     }
 
     private static final int BEAT_TICKS = 20;              // one beat = one second
+    /** How many goes a job a player asked for gets before the day takes over again. */
+    private static final int ASSIGN_TRIES = 5;
     private static final double BEAT_MIN = BEAT_TICKS / 1200.0;
     private static final int MAX_STACKS = 36;
 
@@ -843,8 +845,54 @@ public class People implements GadgetContract {
         return null;
     }
 
+    /**
+     * Jobs that just came to nothing, and how long to leave them alone.
+     *
+     * The chooser scores a job on needs and aptitude, and those inputs do not change
+     * from one second to the next. So a job that fails the instant it starts - "no
+     * trees", "no game", "nothing worth making" - gets chosen again on the very next
+     * beat, and again, and again, forever. The person stands on one block all day
+     * apparently doing nothing, because every second they DO pick a task and it dies
+     * before it moves them. Nothing in `possible()` remembered the last attempt.
+     *
+     * So: a job that ends without ever getting going is set aside, for longer each time
+     * it fails in a row, and the chooser looks at something else. Success clears it.
+     */
+    private static final int COOL_BASE = 45;      // beats - three quarters of a minute
+    private static final int COOL_MAX = 600;      // beats - ten minutes
+
+    private static JsonObject cools(JsonObject rec) {
+        if (!rec.has("cool") || !rec.get("cool").isJsonObject()) rec.add("cool", new JsonObject());
+        return rec.getAsJsonObject("cool");
+    }
+
+    private static boolean cooling(JsonObject rec, String job) {
+        JsonObject c = cools(rec);
+        return c.has(job) && geti(c.getAsJsonObject(job), "until", 0) > beats;
+    }
+
+    private static void coolOff(JsonObject rec, String job) {
+        JsonObject c = cools(rec);
+        JsonObject e = c.has(job) && c.get(job).isJsonObject() ? c.getAsJsonObject(job) : new JsonObject();
+        int runs = geti(e, "runs", 0) + 1;
+        int wait = Math.min(COOL_MAX, COOL_BASE * (1 << Math.min(4, runs - 1)));
+        e.addProperty("runs", runs);
+        e.addProperty("until", beats + wait);
+        c.add(job, e);
+    }
+
+    private static void warmUp(JsonObject rec, String job) {
+        cools(rec).remove(job);
+    }
+
+    /** Everything is on ice - better to try again than to stand still. */
+    private static void warmAll(JsonObject rec) {
+        rec.remove("cool");
+    }
+
     /** Can this person even attempt the job right now? */
     private static boolean possible(JsonObject rec, String job, List<JsonObject> everyone) {
+        if (cooling(rec, job)) return false;
         if (isFull(rec) && (job.equals("hunt") || job.equals("chop") || job.equals("mine") || job.equals("fish"))) return false;
         if (job.equals("fish")) return bestTool(rec, "ROD") != null;
         if (job.equals("build")) return rec.has("asked") && System.currentTimeMillis() > (long) getd(rec, "noBuildUntil", 0);
@@ -935,7 +983,15 @@ public class People implements GadgetContract {
             ids.add(job);
             scores.add(Double.valueOf(s));
         }
-        if (ids.isEmpty()) return "rest";
+        if (ids.isEmpty()) {
+            // Everything scored zero or is cooling off. Standing still is never the
+            // answer while there is daylight and a working pair of legs: go and look at
+            // somewhere else, which is always possible and always visibly something.
+            if (hpGap >= 10) return "rest";
+            if (!cooling(rec, "explore")) return "explore";
+            warmAll(rec);
+            return "explore";
+        }
         // weighted pick among the top three
         List<Integer> order = new ArrayList<Integer>();
         for (int i = 0; i < ids.size(); i++) order.add(Integer.valueOf(i));
@@ -964,6 +1020,20 @@ public class People implements GadgetContract {
     }
 
     /**
+     * Did that job actually come to something? The endings are the job methods' own
+     * words, and the productive ones are a short, closed list - everything else is some
+     * flavour of "there was nothing here to do", which is exactly the case that must not
+     * be chosen again one second later.
+     */
+    private static boolean wentWell(String why) {
+        if (why == null) return false;
+        String[] good = { "brought up", "caught", "felled", "made ", "raised", "rested",
+                          "slept", "spent time", "traded", "picked something up" };
+        for (String g : good) if (why.startsWith(g)) return true;
+        return false;
+    }
+
+    /**
      * End the current job. If it was a step on the way to something else - chopping for
      * the planks for a table - go back to that, whatever happened here. The caller
      * decides whether the chain has gone on too long.
@@ -973,15 +1043,48 @@ public class People implements GadgetContract {
         String then = job == null ? null : gets(job, "then", null);
         String thenWant = job == null ? null : gets(job, "thenWant", null);
         int depth = job == null ? 0 : geti(job, "depth", 0);
+        boolean promised = job != null && job.has("assigned");
+        String kind = job == null ? null : gets(job, "kind", null);
+        String want = job == null ? null : gets(job, "want", null);
+        String forWhom = job == null ? null : gets(job, "for", null);
         rec.remove("job");
-        rec.remove("assigned");
         rec.addProperty("lastJobEnd", why);
         hold(e, null);
+        // Remember how that went, so the chooser stops offering a job that has nothing
+        // behind it and offers a different one instead.
+        if (kind != null) {
+            if (wentWell(why)) warmUp(rec, kind); else coolOff(rec, kind);
+        }
         if (then != null) {
             JsonObject next = startJob(rec, then);
             if (thenWant != null) next.addProperty("want", thenWant);
             next.addProperty("depth", depth);
+            // The promise carries down the chain. Told to make a hoe, the chopping and the
+            // crafting it resolves into are all still the thing that was promised.
+            if (promised) {
+                next.addProperty("assigned", true);
+                if (forWhom != null) next.addProperty("for", forWhom);
+            }
+            return;
         }
+        if (promised && kind != null) {
+            // A promise to a player is not discharged by one attempt. Chopping that ends
+            // in "could not reach a tree" after six seconds is exactly what it looks like
+            // when somebody says they will and then does not: they walk a few steps and
+            // drift back to standing about. Go again a few times before the day takes over.
+            int tries = geti(rec, "assignTries", 0) + 1;
+            if (tries < ASSIGN_TRIES) {
+                rec.addProperty("assignTries", tries);
+                JsonObject again = startJob(rec, kind);
+                if (want != null) again.addProperty("want", want);
+                if (forWhom != null) again.addProperty("for", forWhom);
+                again.addProperty("assigned", true);
+                rec.addProperty("activity", "back to " + kind + (forWhom != null ? " for " + forWhom : ""));
+                return;
+            }
+            rec.remove("assignTries");
+        }
+        rec.remove("assigned");
     }
 
     // ---- hunt: walk up to an animal and kill it with whatever is in hand
@@ -1109,7 +1212,9 @@ public class People implements GadgetContract {
     private static boolean jobChop(GadgetContext ctx, JsonObject rec, Entity e, String id, JsonObject job) {
         String phase = gets(job, "phase", "start");
         if (phase.equals("start")) {
-            Block b = nearestBlock(e, 24, 4, 8, new BlockTest() { public boolean ok(Block x) { return isLog(x.getType()); } });
+            // Look only a little way up. Reaching eight blocks overhead finds the branches
+            // of a big oak, and a branch is not a trunk.
+            Block b = nearestBlock(e, 24, 4, 3, new BlockTest() { public boolean ok(Block x) { return isLog(x.getType()); } });
             if (b == null) {
                 int tries = geti(job, "searches", 0);
                 if (tries >= 3) { finishJob(rec, e, "no trees"); return true; }
@@ -1123,8 +1228,20 @@ public class People implements GadgetContract {
                 return false;
             }
             // stand at the foot of the trunk
+            World cw = e.getWorld();
             int fy = b.getY();
-            while (fy > e.getWorld().getMinHeight() && isLog(e.getWorld().getBlockAt(b.getX(), fy - 1, b.getZ()).getType())) fy--;
+            while (fy > cw.getMinHeight() && isLog(cw.getBlockAt(b.getX(), fy - 1, b.getZ()).getType())) fy--;
+            // A trunk stands on the ground. Air under the lowest log means this was a limb
+            // out over open space, and aiming at it is the tree version of aiming at a
+            // roof: the walker gets to the column, stands on the ground five blocks under
+            // the target, and the arrival test - which wants to be within three blocks
+            // vertically - never fires. Three of those and the job ends "could not reach
+            // a tree", which is most of what the roster was doing all day. Take the ground.
+            if (cw.getBlockAt(b.getX(), fy - 1, b.getZ()).isPassable()) {
+                int g = fy;
+                while (g > cw.getMinHeight() + 1 && cw.getBlockAt(b.getX(), g - 1, b.getZ()).isPassable()) g--;
+                fy = g;
+            }
             setTarget(job, b.getX(), fy, b.getZ());
             job.addProperty("phase", "go");
             rec.addProperty("activity", "walking to a tree");
@@ -2016,6 +2133,40 @@ public class People implements GadgetContract {
         return o;
     }
 
+    /**
+     * A spot beside a building that a body can actually stand on.
+     *
+     * A structure's recorded position is not reliably its floor - Finnstead's inn is
+     * filed at y=67 with its ground at 63 and its top plank at 66, so the lodging target
+     * was the ROOF. Nobody walks onto a roof: navigate answered "no way there on foot",
+     * lodge ended in "could not reach the inn", the job was cleared, and one beat later
+     * the same impossible job was chosen again. Every villager burned every night
+     * standing still in a one-second loop. Aim at real ground on the ring outside the
+     * walls instead, nearest the door side, and let the stored y be a hint and no more.
+     */
+    private static int[] approach(World w, int ox, int oy, int oz, int sw, int sd) {
+        int cx = ox + sw / 2, cz = oz + sd / 2;
+        int bx = cx, by = oy, bz = cz;
+        double bestD = Double.MAX_VALUE;
+        for (int dx = -2; dx <= sw + 1; dx++) {
+            for (int dz = -2; dz <= sd + 1; dz++) {
+                boolean outside = dx < 0 || dz < 0 || dx >= sw || dz >= sd;
+                if (!outside) continue;
+                int x = ox + dx, z = oz + dz;
+                int y = w.getHighestBlockYAt(x, z, HeightMap.OCEAN_FLOOR) + 1;
+                Block feet = w.getBlockAt(x, y, z);
+                Block head = w.getBlockAt(x, y + 1, z);
+                Block under = w.getBlockAt(x, y - 1, z);
+                if (!feet.isPassable() || !head.isPassable() || under.isPassable()) continue;
+                if (under.getType() == Material.LAVA || under.getType() == Material.WATER) continue;
+                // prefer the door side (dz < 0), then closeness to the middle
+                double d = (x - cx) * (x - cx) + (z - cz) * (z - cz) + (dz < 0 ? 0 : 6);
+                if (d < bestD) { bestD = d; bx = x; by = y; bz = z; }
+            }
+        }
+        return new int[]{ bx, by, bz };
+    }
+
     // ---- lodge: a bed for the night, paid for
 
     private static boolean jobLodge(GadgetContext ctx, JsonObject rec, Entity e, String id, JsonObject job) {
@@ -2026,7 +2177,8 @@ public class People implements GadgetContract {
             JsonObject v = nearestInn(places(ctx), e, 240);
             if (v == null) { finishJob(rec, e, "no inn near"); return true; }
             JsonObject inn = v.getAsJsonObject("inn");
-            setTarget(job, geti(inn, "x", 0) + 2, geti(inn, "y", 64), geti(inn, "z", 0) + 2);
+            int[] a = approach(w, geti(inn, "x", 0), geti(inn, "y", 64), geti(inn, "z", 0), INN_W, INN_D);
+            setTarget(job, a[0], a[1], a[2]);
             job.addProperty("village", gets(v, "id", ""));
             job.addProperty("phase", "go");
             rec.addProperty("activity", "heading to the inn at " + gets(v, "name", "the village"));
@@ -2034,7 +2186,13 @@ public class People implements GadgetContract {
         }
         if (phase.equals("go")) {
             int tr = travel(ctx, e, id, job, 3, false);
-            if (tr < 0) { finishJob(rec, e, "could not reach the inn"); return true; }
+            if (tr < 0) {
+                // Do not stand in the dark trying the same walk once a second until dawn.
+                // Leave the inn alone for a while and get on with something useful.
+                rec.addProperty("lodgeFailUntil", beats + 600);
+                finishJob(rec, e, "could not reach the inn");
+                return true;
+            }
             if (tr == 0) return false;
             // pay the house. Members sleep free; a stranger leaves something worth having.
             JsonObject v = null;
@@ -2079,7 +2237,8 @@ public class People implements GadgetContract {
             JsonObject v = nearestInn(places(ctx), e, 240);
             if (v == null || !v.has("store")) { finishJob(rec, e, "no market near"); return true; }
             JsonObject st = v.getAsJsonObject("store");
-            setTarget(job, geti(st, "x", 0), geti(st, "y", 64), geti(st, "z", 0));
+            int[] a = approach(w, geti(st, "x", 0) - 1, geti(st, "y", 64), geti(st, "z", 0) - 1, 3, 3);
+            setTarget(job, a[0], a[1], a[2]);
             job.addProperty("village", gets(v, "id", ""));
             job.addProperty("phase", "go");
             rec.addProperty("activity", "going to market at " + gets(v, "name", "the village"));
@@ -2326,14 +2485,48 @@ public class People implements GadgetContract {
         "LDShadowLady", "Solidarity", "Skizzleman", "Kryticalc", "EthosLab"
     };
 
-    private static String pickSkin(List<JsonObject> everyone) {
-        for (int i = 0; i < 30; i++) {
-            String s = SKINS[rand(SKINS.length)];
-            boolean used = false;
-            for (JsonObject o : everyone) if (s.equalsIgnoreCase(gets(o, "skin", ""))) used = true;
-            if (!used) return s;
+    /** The names above are a fallback. The real pool lives in the ledger - see skinPool(). */
+    private static String[] SKIN_POOL = null;
+
+    /**
+     * Every NPC wears some real account's skin, because the plugin dresses a mannequin by
+     * resolving a Minecraft username against Mojang. Thirty-seven names in an array meant
+     * forty people wearing at most thirty-seven faces, four of them jeb_ - a crowd of
+     * clones. The pool is thousands of real accounts now, kept in the ledger as
+     * facts/skin-pool rather than inlined here, so it can be refreshed by a script
+     * without recompiling a hundred and sixty thousand characters of gadget.
+     */
+    private static String[] skinPool(GadgetContext ctx) {
+        if (SKIN_POOL != null) return SKIN_POOL;
+        try {
+            JsonObject q = new JsonObject();
+            q.addProperty("collection", "facts");
+            q.addProperty("id", "skin-pool");
+            JsonObject rec = ctx.invoke("ledger_get", q);
+            JsonArray a = rec != null && rec.has("skins") ? rec.getAsJsonArray("skins") : null;
+            if (a != null && a.size() > 0) {
+                String[] out = new String[a.size()];
+                for (int i = 0; i < a.size(); i++) out[i] = a.get(i).getAsString();
+                SKIN_POOL = out;
+                return out;
+            }
+        } catch (Throwable ignored) { }
+        SKIN_POOL = SKINS;
+        return SKINS;
+    }
+
+    private static String pickSkin(GadgetContext ctx, List<JsonObject> everyone) {
+        String[] pool = skinPool(ctx);
+        java.util.Set<String> used = new java.util.HashSet<String>();
+        for (JsonObject o : everyone) {
+            String s = gets(o, "skin", "");
+            if (!s.isEmpty()) used.add(s.toLowerCase(java.util.Locale.ROOT));
         }
-        return SKINS[rand(SKINS.length)];
+        for (int i = 0; i < 200; i++) {
+            String s = pool[rand(pool.length)];
+            if (!used.contains(s.toLowerCase(java.util.Locale.ROOT))) return s;
+        }
+        return pool[rand(pool.length)];
     }
 
     /** Two dice, centred: most people are ordinary, a few are remarkable either way. */
@@ -2366,7 +2559,7 @@ public class People implements GadgetContract {
         for (String s : new String[]{ "str", "dex", "con", "wis", "int", "cha" }) ab.addProperty(s, rollAbility());
         args.add("abilities", ab);
         args.addProperty("skill", SKILLS[rand(SKILLS.length)]);
-        args.addProperty("skin", pickSkin(everyone));
+        args.addProperty("skin", pickSkin(ctx, everyone));
         JsonObject need = new JsonObject();
         need.addProperty("kind", NEED_KINDS[rand(NEED_KINDS.length)]);
         need.addProperty("value", 10);
@@ -2438,6 +2631,9 @@ public class People implements GadgetContract {
             rec.addProperty("activity", "found again");
         }
         normalise(rec);
+        // Every ten minutes, one point of every opinion of every player fades. A grudge
+        // that never softens locks a player out of forty people for the life of the world.
+        if (beats % 600 == 0) bondDecay(rec);
 
         // --- gravity, when nothing else is moving them. The walker handles falls on the
         // move; standing still over nothing (a block mined out from underfoot, a ledge
@@ -2610,8 +2806,24 @@ public class People implements GadgetContract {
                     continue;
                 }
             }
+            // Who dropped this? An item lying at your feet with a player standing over it
+            // is a gift, and being given something is the most reliable way anyone has
+            // ever made a friend. Thrown items remember their thrower for a while.
+            String from = null;
+            try {
+                java.util.UUID thrower = ((org.bukkit.entity.Item) n).getThrower();
+                if (thrower != null) {
+                    org.bukkit.entity.Player gp = ctx.server().getPlayer(thrower);
+                    if (gp != null) from = gp.getName();
+                }
+            } catch (Throwable ignored) { }
+            int taken = s.getAmount();
             int left = give(rec, s.getType(), s.getAmount());
             if (left == 0) {
+                if (from != null) {
+                    bondAdd(rec, from, Math.min(10, 2 + taken / 8),
+                            "gave me " + taken + " " + s.getType().name().toLowerCase(java.util.Locale.ROOT));
+                }
                 n.remove();
                 e.getWorld().playSound(e.getLocation(), org.bukkit.Sound.ENTITY_ITEM_PICKUP, 0.3f, 1.2f);
             } else if (left < s.getAmount()) {
@@ -2682,7 +2894,7 @@ public class People implements GadgetContract {
             String next = null;
             org.bukkit.entity.Item want = nearestDrop(rec, e, hunger < 16 ? 24 : 12, hunger < 16);
             if (want == null && isNight(e.getWorld()) && hunger >= 6 && nearestInn(places(ctx), e, 240) != null
-                    && !rec.has("assigned")) {
+                    && geti(rec, "lodgeFailUntil", 0) <= beats && !rec.has("assigned")) {
                 job = startJob(rec, "lodge");
             } else if (want != null) {
                 job = startJob(rec, "pickup");
@@ -2741,45 +2953,156 @@ public class People implements GadgetContract {
         save(ctx, rec);
     }
 
+    // ---- the graveyard at spawn
+    //
+    // (2026-08-25, James: "when a npc dies their head should go to a grave at spawn,
+    // where they are allocated a grave site. This area should grow over time with each
+    // death.") Graves used to go up where the body fell, which meant most of them stood
+    // in wilderness nobody would ever walk past again. Now every death is allocated the
+    // next plot in one cemetery beside world spawn, and the ground it covers grows by a
+    // row every seven burials.
+    //
+    // The head is still the one vessel of their return - the same skull, stamped with
+    // the same id, just somewhere findable. Anyone wanting to bring somebody back now
+    // knows where to go.
+
+    private static final int GRAVE_ROW = 7;   // plots in a row before the yard grows back
+    private static final int GRAVE_DX = 2;    // spacing across a row
+    private static final int GRAVE_DZ = 3;    // spacing between rows, leaving a path
+
+    /** Never bury a block that is already part of somebody's grave. */
+    private static boolean isGraveFurniture(Material m) {
+        return m == Material.PLAYER_HEAD || m == Material.PLAYER_WALL_HEAD
+            || m == Material.OAK_WALL_SIGN || m == Material.OAK_SIGN
+            || m == Material.COBBLESTONE || m == Material.OAK_FENCE;
+    }
+
     /**
-     * A grave where they fell: a stone under, their head on top wearing their own face, a
-     * sign with their name. The head the plugin dropped is taken up into the grave - it
-     * is still the one vessel of their return, now stamped on the skull block itself -
-     * and the grave is a place anyone can find.
+     * The cemetery record, made the first time anybody dies. It holds the origin and how
+     * many plots have been allocated, so the layout survives a redefine and a restart -
+     * the yard has to keep growing in the same place, not start again beside itself.
+     */
+    private static JsonObject graveyard(GadgetContext ctx, World w) throws Exception {
+        JsonObject q = new JsonObject();
+        q.addProperty("collection", "places");
+        q.addProperty("id", "graveyard");
+        JsonObject yard = null;
+        try { yard = ctx.invoke("ledger_get", q); } catch (Throwable ignored) { }
+        if (yard != null && yard.has("origin")) return yard;
+
+        // Beside spawn, not on it: near enough that everybody walks past, far enough
+        // that the spawn point itself is not paved over.
+        Location sp = w.getSpawnLocation();
+        int ox = sp.getBlockX() + 12, oz = sp.getBlockZ();
+        for (int t = 0; t < 24; t++) {
+            int y = w.getHighestBlockYAt(ox, oz, HeightMap.OCEAN_FLOOR);
+            Material m = w.getBlockAt(ox, y, oz).getType();
+            if (m != Material.WATER && m != Material.LAVA) break;
+            ox += 4;                                   // spawn is by the sea: walk inland
+        }
+        int oy = w.getHighestBlockYAt(ox, oz, HeightMap.OCEAN_FLOOR);
+        yard = new JsonObject();
+        yard.addProperty("id", "graveyard");
+        yard.addProperty("name", "The graveyard at spawn");
+        yard.addProperty("kind", "graveyard");
+        yard.add("origin", xyzOf(ox, oy, oz));
+        yard.addProperty("plots", 0);
+        yard.addProperty("builtBy", "world");
+        yard.addProperty("description", "Open ground beside spawn. Nobody is buried here yet.");
+        saveYard(ctx, yard);
+        return yard;
+    }
+
+    private static void saveYard(GadgetContext ctx, JsonObject yard) throws Exception {
+        JsonObject put = new JsonObject();
+        put.addProperty("collection", "places");
+        put.add("record", yard);
+        ctx.invoke("ledger_put", put);
+    }
+
+    /**
+     * The wall around the yard, redrawn as it grows. Cheap enough to lay again on every
+     * burial, and it is what makes the ground the cemetery covers visibly larger each
+     * time somebody is put into it.
+     */
+    private static void fenceYard(World w, int ox, int oy, int oz, int rows) {
+        int halfX = (GRAVE_ROW / 2) * GRAVE_DX + 2;
+        int backZ = Math.max(0, rows - 1) * GRAVE_DZ + 2;
+        for (int x = ox - halfX; x <= ox + halfX; x++) {
+            for (int z = oz - 2; z <= oz + backZ; z++) {
+                boolean edge = x == ox - halfX || x == ox + halfX || z == oz - 2 || z == oz + backZ;
+                if (!edge) continue;
+                if (x == ox && z == oz - 2) continue;                 // the way in
+                Block g = w.getBlockAt(x, oy, z);
+                if (g.isPassable() || g.getType() == Material.WATER) g.setType(Material.GRASS_BLOCK);
+                Block post = w.getBlockAt(x, oy + 1, z);
+                if (post.isPassable() && !isGraveFurniture(post.getType())) post.setType(Material.OAK_FENCE);
+            }
+        }
+    }
+
+    /** What to write on the stone. Kept short: a sign line is not a paragraph. */
+    private static String causeLine(JsonObject rec) {
+        if (geti(rec, "hunger", 20) <= 0) return "starved";
+        String why = gets(rec, "lastJobEnd", "");
+        if (why.isEmpty()) return "cause unknown";
+        return why.length() > 15 ? why.substring(0, 15) : why;
+    }
+
+    /**
+     * Bury somebody. The head the plugin dropped where they fell is taken up, and the
+     * skull wearing their own face goes onto the next plot in the yard at spawn.
      */
     private static void grave(GadgetContext ctx, JsonObject rec, NpcData d) throws Exception {
-        Location at = d.lastLocation != null ? d.lastLocation : d.home;
-        if (at == null || at.getWorld() == null) return;
-        World w = at.getWorld();
+        Location fell = d.lastLocation != null ? d.lastLocation : d.home;
+        World w = fell != null && fell.getWorld() != null ? fell.getWorld()
+                : (ctx.server().getWorlds().isEmpty() ? null : ctx.server().getWorlds().get(0));
+        if (w == null) return;
         org.bukkit.NamespacedKey key = ctx.plugin().npcManager().key();
         String id = d.id;
-        // the head item the plugin dropped, if it is still lying there
-        for (Entity n : w.getNearbyEntities(at, 10, 6, 10)) {
-            if (!(n instanceof org.bukkit.entity.Item)) continue;
-            ItemStack s = ((org.bukkit.entity.Item) n).getItemStack();
-            if (s.getType() != Material.PLAYER_HEAD || s.getItemMeta() == null) continue;
-            String who = s.getItemMeta().getPersistentDataContainer().get(key, org.bukkit.persistence.PersistentDataType.STRING);
-            if (id.equals(who)) { at = n.getLocation(); n.remove(); break; }
+
+        // Take up the head item lying where they died. It is not lost - it is about to
+        // be the skull on their headstone, carrying the same id it always did.
+        if (fell != null) {
+            for (Entity n : w.getNearbyEntities(fell, 10, 6, 10)) {
+                if (!(n instanceof org.bukkit.entity.Item)) continue;
+                ItemStack drop = ((org.bukkit.entity.Item) n).getItemStack();
+                if (drop.getType() != Material.PLAYER_HEAD || drop.getItemMeta() == null) continue;
+                String who = drop.getItemMeta().getPersistentDataContainer().get(key, org.bukkit.persistence.PersistentDataType.STRING);
+                if (id.equals(who)) { n.remove(); break; }
+            }
         }
-        int x = at.getBlockX(), z = at.getBlockZ();
-        int y = w.getHighestBlockYAt(x, z, HeightMap.MOTION_BLOCKING_NO_LEAVES);
-        Block base = w.getBlockAt(x, y, z);
-        if (base.getType() == Material.WATER && d.home != null) {
-            // drowned: the marker goes up at home, where people will see it
-            x = d.home.getBlockX(); z = d.home.getBlockZ();
-            y = w.getHighestBlockYAt(x, z, HeightMap.MOTION_BLOCKING_NO_LEAVES);
-            base = w.getBlockAt(x, y, z);
+
+        JsonObject yard = graveyard(ctx, w);
+        JsonObject o = obj(yard, "origin");
+        int ox = geti(o, "x", 0), oy = geti(o, "y", 64), oz = geti(o, "z", 0);
+        int n = geti(yard, "plots", 0);
+        int row = n / GRAVE_ROW, col = n % GRAVE_ROW;
+        int gx = ox + (col - GRAVE_ROW / 2) * GRAVE_DX;
+        int gz = oz + row * GRAVE_DZ;
+
+        // Level the plot to the yard's own floor, whatever the hillside is doing, so the
+        // rows still line up with each other twenty burials from now.
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                Block g = w.getBlockAt(gx + dx, oy, gz + dz);
+                if (!isGraveFurniture(g.getType())) {
+                    g.setType(dx == 0 && dz == 0 ? Material.COARSE_DIRT : Material.DIRT_PATH);
+                }
+                for (int up = 1; up <= 4; up++) {
+                    Block a = w.getBlockAt(gx + dx, oy + up, gz + dz);
+                    if (!a.isPassable() && !isGraveFurniture(a.getType())) a.setType(Material.AIR);
+                }
+            }
         }
-        if (base.getType() == Material.WATER) return;           // the sea keeps its own
-        if (base.isPassable()) base = base.getRelative(0, -1, 0);
-        if (d.lastLocation == null) d.lastLocation = new Location(w, x, y, z);
-        Block stone = base.getRelative(0, 1, 0);
-        Block skull = base.getRelative(0, 2, 0);
+
+        Block stone = w.getBlockAt(gx, oy + 1, gz);
+        Block skull = w.getBlockAt(gx, oy + 2, gz);
         stone.setType(Material.COBBLESTONE);
         skull.setType(Material.PLAYER_HEAD);
-        org.bukkit.block.BlockState st = skull.getState();
-        if (st instanceof org.bukkit.block.Skull) {
-            org.bukkit.block.Skull sk = (org.bukkit.block.Skull) st;
+        org.bukkit.block.BlockState bs = skull.getState();
+        if (bs instanceof org.bukkit.block.Skull) {
+            org.bukkit.block.Skull sk = (org.bukkit.block.Skull) bs;
             String skin = gets(rec, "skin", null);
             if (skin != null) {
                 try { sk.setPlayerProfile(Bukkit.createProfile(skin)); } catch (Throwable ignored) { }
@@ -2787,38 +3110,55 @@ public class People implements GadgetContract {
             sk.getPersistentDataContainer().set(key, org.bukkit.persistence.PersistentDataType.STRING, id);
             sk.update(true, false);
         }
-        // a sign on the side with their name
-        Block signAt = stone.getRelative(0, 0, 1);
-        if (signAt.isPassable()) {
+
+        // The sign faces the path at the front of the row.
+        Block signAt = w.getBlockAt(gx, oy + 1, gz - 1);
+        if (!isGraveFurniture(signAt.getType())) {
             signAt.setType(Material.OAK_WALL_SIGN);
             org.bukkit.block.BlockState ss = signAt.getState();
             if (ss instanceof org.bukkit.block.Sign) {
                 org.bukkit.block.Sign sign = (org.bukkit.block.Sign) ss;
-                sign.getSide(org.bukkit.block.sign.Side.FRONT).line(0, net.kyori.adventure.text.Component.text("Here lies"));
-                sign.getSide(org.bukkit.block.sign.Side.FRONT).line(1, net.kyori.adventure.text.Component.text(d.name));
-                sign.getSide(org.bukkit.block.sign.Side.FRONT).line(2, net.kyori.adventure.text.Component.text(gets(rec, "village", "").replace("village-", "")));
+                org.bukkit.block.sign.SignSide front = sign.getSide(org.bukkit.block.sign.Side.FRONT);
+                front.line(0, net.kyori.adventure.text.Component.text("Here lies"));
+                front.line(1, net.kyori.adventure.text.Component.text(d.name));
+                front.line(2, net.kyori.adventure.text.Component.text(causeLine(rec)));
+                front.line(3, net.kyori.adventure.text.Component.text(gets(rec, "village", "").replace("village-", "")));
                 sign.update(true, false);
             }
         }
+
+        int rows = row + 1;
+        fenceYard(w, ox, oy, oz, rows);
+
+        yard.addProperty("plots", n + 1);
+        yard.addProperty("description", (n + 1) + (n == 0 ? " grave" : " graves") + " beside spawn, in "
+                + rows + (rows == 1 ? " row." : " rows."));
+        saveYard(ctx, yard);
+
         JsonObject place = new JsonObject();
         place.addProperty("id", "grave-" + id);
         place.addProperty("name", d.name + "'s grave");
         place.addProperty("kind", "grave");
-        place.add("origin", xyzOf(x, stone.getY(), z));
+        place.add("origin", xyzOf(gx, oy + 1, gz));
         place.addProperty("npcId", id);
+        place.addProperty("plot", n);
         place.addProperty("builtBy", "world");
-        place.addProperty("description", "Where " + d.name + " fell. Their head rests on the stone.");
+        place.addProperty("description", d.name + " is buried in the graveyard at spawn, plot " + (n + 1)
+                + ". Their head rests on the stone. Cause: " + causeLine(rec) + ".");
+        if (fell != null) place.add("fellAt", xyzOf(fell.getBlockX(), fell.getBlockY(), fell.getBlockZ()));
         JsonObject put = new JsonObject();
         put.addProperty("collection", "places");
         put.add("record", place);
         ctx.invoke("ledger_put", put);
-        rec.add("grave", xyzOf(x, stone.getY(), z));
+
+        rec.add("grave", xyzOf(gx, oy + 1, gz));
         JsonObject ev = new JsonObject();
         ev.addProperty("npcId", id);
         ev.addProperty("name", d.name);
-        ev.addProperty("x", x);
-        ev.addProperty("y", stone.getY());
-        ev.addProperty("z", z);
+        ev.addProperty("x", gx);
+        ev.addProperty("y", oy + 1);
+        ev.addProperty("z", gz);
+        ev.addProperty("plot", n);
         ctx.plugin().bridge().broadcastEvent("npc_grave", ev);
     }
 
@@ -2957,10 +3297,357 @@ public class People implements GadgetContract {
                 }
             }
             if (beats % 5 == 0) dawn(ctx, everyone);
+            // A nether star lying by a skull is somebody buying a life back.
+            if (beats % 10 == 0) reviveWatch(ctx);
             if (beats % 60 == 0) keepHeads(ctx);
             if (beats % 30 == 0) keepFields(ctx, everyone);
             watchGraves(ctx, everyone);
         } catch (Throwable ignored) { }
+    }
+
+    // ------------------------------------------------------------------ bonds
+    //
+    // (2026-08-25, James: "We need a friendship hate meter per player that gets updated
+    // over time.") What each person thinks of each player, on one number from -100 to
+    // 100, kept on their own sheet under "bonds" so it survives a redefine like every
+    // other thing they know.
+    //
+    // It is moved by things that actually happened - being hit, being given something,
+    // a promise kept or broken, walking on their land - and never by the actor. An NPC
+    // does not get to decide it likes you; it finds out that it does. The actor READS
+    // the number (it reaches the prompt through npc_context) and talks accordingly.
+    //
+    // And it drifts. A grudge that never fades is not a grudge, it is a wall, and the
+    // player who made one bad first impression would be locked out of forty people for
+    // the life of the world. One point back toward neutral every ten minutes.
+
+    private static final int BOND_MIN = -100, BOND_MAX = 100;
+    /** Below this nobody will hand you anything, whatever they said. */
+    private static final int BOND_REFUSE = -30;
+
+    private static JsonObject bonds(JsonObject rec) {
+        if (!rec.has("bonds") || !rec.get("bonds").isJsonObject()) rec.add("bonds", new JsonObject());
+        return rec.getAsJsonObject("bonds");
+    }
+
+    private static JsonObject bondOf(JsonObject rec, String player) {
+        JsonObject all = bonds(rec);
+        if (!all.has(player) || !all.get(player).isJsonObject()) {
+            JsonObject b = new JsonObject();
+            b.addProperty("score", 0);
+            b.addProperty("met", java.time.Instant.now().toString());
+            all.add(player, b);
+        }
+        return all.getAsJsonObject(player);
+    }
+
+    private static int bondScore(JsonObject rec, String player) {
+        if (player == null || player.isEmpty()) return 0;
+        JsonObject all = bonds(rec);
+        if (!all.has(player) || !all.get(player).isJsonObject()) return 0;
+        return geti(all.getAsJsonObject(player), "score", 0);
+    }
+
+    /** Move an opinion, and remember the last thing that moved it. */
+    private static void bondAdd(JsonObject rec, String player, int delta, String why) {
+        if (player == null || player.isEmpty() || delta == 0) return;
+        JsonObject b = bondOf(rec, player);
+        int now = Math.max(BOND_MIN, Math.min(BOND_MAX, geti(b, "score", 0) + delta));
+        b.addProperty("score", now);
+        b.addProperty("last", why);
+        b.addProperty("seen", java.time.Instant.now().toString());
+        JsonArray why5 = arr(b, "because");
+        why5.add((delta > 0 ? "+" : "") + delta + " " + why);
+        while (why5.size() > 5) why5.remove(0);
+    }
+
+    /** One point back towards neutral, so nothing is ever permanent. */
+    private static void bondDecay(JsonObject rec) {
+        JsonObject all = bonds(rec);
+        for (String player : new java.util.ArrayList<String>(all.keySet())) {
+            if (!all.get(player).isJsonObject()) continue;
+            JsonObject b = all.getAsJsonObject(player);
+            int s = geti(b, "score", 0);
+            if (s == 0) continue;
+            b.addProperty("score", s > 0 ? s - 1 : s + 1);
+        }
+    }
+
+    /** How it reads to somebody who has to talk to you. */
+    private static String bondWord(int score) {
+        if (score <= -60) return "hates you";
+        if (score <= -25) return "does not trust you";
+        if (score < 10) return "barely knows you";
+        if (score < 40) return "likes you";
+        if (score < 75) return "counts you a friend";
+        return "would do anything for you";
+    }
+
+    // ------------------------------------------------------------------ giving
+    //
+    // (2026-08-25, James: "npc's need to be able to drop items when talking to players
+    // and asked to or if they agree to a trade.") An NPC cannot reach into your
+    // inventory any more than you can reach into theirs - rule 4, they are players - so
+    // giving is dropping the thing at your feet, which is exactly how a player hands
+    // something over.
+    //
+    // Whether they will at all is the bond's business. Somebody who does not trust you
+    // keeps their axe, whatever the conversation decided.
+
+    private static JsonObject giveToPlayer(GadgetContext ctx, JsonObject rec, String playerName,
+                                           String itemName, int count) throws Exception {
+        JsonObject out = new JsonObject();
+        String id = gets(rec, "id", "");
+        NpcData d = ctx.plugin().npcManager().get(id);
+        Entity e = d == null || d.dead ? null : ctx.plugin().npcManager().resolveEntity(d);
+        if (e == null) { out.addProperty("gave", false); out.addProperty("why", "not here"); return out; }
+
+        org.bukkit.entity.Player player = ctx.server().getPlayerExact(playerName);
+        if (player == null) { out.addProperty("gave", false); out.addProperty("why", "nobody by that name is online"); return out; }
+        if (player.getWorld() != e.getWorld() || player.getLocation().distance(e.getLocation()) > 8) {
+            out.addProperty("gave", false); out.addProperty("why", "too far away to hand anything over"); return out;
+        }
+        int score = bondScore(rec, playerName);
+        if (score <= BOND_REFUSE) {
+            out.addProperty("gave", false);
+            out.addProperty("why", "will not give " + playerName + " anything (" + bondWord(score) + ")");
+            return out;
+        }
+        Material m = Material.matchMaterial(itemName == null ? "" : itemName.toUpperCase(java.util.Locale.ROOT));
+        if (m == null) { out.addProperty("gave", false); out.addProperty("why", "no such item: " + itemName); return out; }
+        int have = count(rec, m);
+        if (have <= 0) { out.addProperty("gave", false); out.addProperty("why", "has no " + m.name().toLowerCase(java.util.Locale.ROOT)); return out; }
+        int n = Math.max(1, Math.min(count <= 0 ? 1 : count, have));
+        if (!take(rec, m, n)) { out.addProperty("gave", false); out.addProperty("why", "could not part with it"); return out; }
+
+        // Drop it between the two of them, moving towards the player, the way a thrown
+        // item travels. Never into their inventory: nobody's pockets are reachable.
+        Location from = e.getLocation().clone().add(0, 1.2, 0);
+        org.bukkit.entity.Item dropped = e.getWorld().dropItem(from, new ItemStack(m, n));
+        try {
+            org.bukkit.util.Vector at = player.getLocation().toVector().subtract(from.toVector()).normalize().multiply(0.35);
+            dropped.setVelocity(at);
+            dropped.setPickupDelay(0);
+        } catch (Throwable ignored) { }
+        e.getWorld().playSound(from, org.bukkit.Sound.ENTITY_ITEM_PICKUP, 0.6f, 1.4f);
+
+        // Giving is its own small kindness, and being given to is a bigger one. Both
+        // sides of that end up in the same number, because the number is what THIS
+        // person thinks of THAT player.
+        bondAdd(rec, playerName, 2, "gave them " + n + " " + m.name().toLowerCase(java.util.Locale.ROOT));
+        rec.addProperty("activity", "handing " + playerName + " " + n + " " + m.name().toLowerCase(java.util.Locale.ROOT).replace('_', ' '));
+
+        JsonObject ev = new JsonObject();
+        ev.addProperty("npcId", id);
+        ev.addProperty("player", playerName);
+        ev.addProperty("item", m.name());
+        ev.addProperty("count", n);
+        ctx.plugin().bridge().broadcastEvent("npc_gave", ev);
+
+        out.addProperty("gave", true);
+        out.addProperty("item", m.name());
+        out.addProperty("count", n);
+        out.addProperty("bond", bondScore(rec, playerName));
+        return out;
+    }
+
+    // ------------------------------------------------------------------ moving the old graves
+
+    /** Is this spot inside the cemetery at spawn? Used to spot graves still out in the wild. */
+    private static boolean inYard(GadgetContext ctx, JsonObject at) {
+        try {
+            JsonObject q = new JsonObject();
+            q.addProperty("collection", "places");
+            q.addProperty("id", "graveyard");
+            JsonObject yard = ctx.invoke("ledger_get", q);
+            if (yard == null || !yard.has("origin")) return false;
+            JsonObject o = obj(yard, "origin");
+            int halfX = (GRAVE_ROW / 2) * GRAVE_DX + 3;
+            int rows = (geti(yard, "plots", 0) / GRAVE_ROW) + 2;
+            int dx = Math.abs(geti(at, "x", 0) - geti(o, "x", 0));
+            int dz = geti(at, "z", 0) - geti(o, "z", 0);
+            return dx <= halfX && dz >= -3 && dz <= rows * GRAVE_DZ + 3;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * Take down a grave that was raised where somebody fell, now that they lie at spawn.
+     * The same person commemorated in two places is one grave too many, and the skull
+     * left behind would be a second vessel of a return that can only happen once.
+     */
+    private static void clearOldGrave(GadgetContext ctx, String id, JsonObject at) {
+        try {
+            World w = ctx.world(null);
+            int x = geti(at, "x", 0), y = geti(at, "y", 64), z = geti(at, "z", 0);
+            org.bukkit.NamespacedKey key = ctx.plugin().npcManager().key();
+            for (int dy = -1; dy <= 2; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    for (int dz = -1; dz <= 1; dz++) {
+                        Block b = w.getBlockAt(x + dx, y + dy, z + dz);
+                        Material m = b.getType();
+                        if (m == Material.PLAYER_HEAD || m == Material.PLAYER_WALL_HEAD) {
+                            org.bukkit.block.BlockState st = b.getState();
+                            String tag = st instanceof org.bukkit.block.Skull
+                                    ? ((org.bukkit.block.Skull) st).getPersistentDataContainer()
+                                        .get(key, org.bukkit.persistence.PersistentDataType.STRING)
+                                    : null;
+                            if (id.equals(tag)) b.setType(Material.AIR);
+                        } else if ((m == Material.OAK_WALL_SIGN || m == Material.OAK_SIGN
+                                    || m == Material.COBBLESTONE) && dx == 0 && dz <= 1) {
+                            b.setType(Material.AIR);
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    // ------------------------------------------------------------------ coming back
+    //
+    // (2026-08-25, James: "throwing a nether star at a head should bring it back.")
+    // A nether star is the rarest thing a player can carry, and throwing it is just
+    // dropping it - so a star lying beside a skull is somebody spending the best item
+    // they own to undo a death. That is the price, and it is paid in full: the star is
+    // consumed whether or not they ever get thanked for it.
+    //
+    // It works on a grave skull in the yard and on a loose head somebody was carrying,
+    // because both are the same skull with the same id stamped on it.
+
+    private static final double STAR_REACH = 3.0;
+
+    private void reviveWatch(GadgetContext ctx) {
+        org.bukkit.NamespacedKey key = ctx.plugin().npcManager().key();
+        for (World w : ctx.server().getWorlds()) {
+            for (Entity n : w.getEntitiesByClass(org.bukkit.entity.Item.class)) {
+                ItemStack star = ((org.bukkit.entity.Item) n).getItemStack();
+                if (star.getType() != Material.NETHER_STAR) continue;
+                Location at = n.getLocation();
+                String who = headNear(w, at, key);
+                if (who == null) continue;
+                try {
+                    if (raise(ctx, who, at, key)) {
+                        int left = star.getAmount() - 1;
+                        if (left <= 0) n.remove();
+                        else { star.setAmount(left); ((org.bukkit.entity.Item) n).setItemStack(star); }
+                        w.strikeLightningEffect(at);
+                        w.playSound(at, org.bukkit.Sound.ITEM_TOTEM_USE, 1.0f, 1.0f);
+                    }
+                } catch (Throwable ignored) { }
+            }
+        }
+    }
+
+    /** An NPC's skull within reach of here: the grave block, or a head lying loose. */
+    private static String headNear(World w, Location at, org.bukkit.NamespacedKey key) {
+        int r = (int) Math.ceil(STAR_REACH);
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dy = -r; dy <= r; dy++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    Block b = w.getBlockAt(at.getBlockX() + dx, at.getBlockY() + dy, at.getBlockZ() + dz);
+                    if (b.getType() != Material.PLAYER_HEAD && b.getType() != Material.PLAYER_WALL_HEAD) continue;
+                    org.bukkit.block.BlockState st = b.getState();
+                    if (!(st instanceof org.bukkit.block.Skull)) continue;
+                    String id = ((org.bukkit.block.Skull) st).getPersistentDataContainer()
+                            .get(key, org.bukkit.persistence.PersistentDataType.STRING);
+                    if (id != null) return id;
+                }
+            }
+        }
+        for (Entity n : w.getNearbyEntities(at, STAR_REACH, STAR_REACH, STAR_REACH)) {
+            if (!(n instanceof org.bukkit.entity.Item)) continue;
+            ItemStack s = ((org.bukkit.entity.Item) n).getItemStack();
+            if (s.getType() != Material.PLAYER_HEAD || s.getItemMeta() == null) continue;
+            String id = s.getItemMeta().getPersistentDataContainer()
+                    .get(key, org.bukkit.persistence.PersistentDataType.STRING);
+            if (id != null) return id;
+        }
+        return null;
+    }
+
+    /**
+     * Bring somebody back. The skull is spent along with the star - the vessel is
+     * emptied, not copied - and they stand up beside their own grave with nothing,
+     * hungry, exactly as they arrived the first time.
+     */
+    private boolean raise(GadgetContext ctx, String id, Location at, org.bukkit.NamespacedKey key) throws Exception {
+        JsonObject q = new JsonObject();
+        q.addProperty("collection", "npcs");
+        q.addProperty("id", id);
+        JsonObject rec;
+        try { rec = ctx.invoke("ledger_get", q); } catch (Throwable t) { return false; }
+        if (rec == null || !rec.has("id")) return false;
+        if (rec.has("alive") && rec.get("alive").getAsBoolean()) return false;   // already up
+
+        World w = at.getWorld();
+        // take the skull, wherever it was
+        for (int dx = -3; dx <= 3; dx++) for (int dy = -3; dy <= 3; dy++) for (int dz = -3; dz <= 3; dz++) {
+            Block b = w.getBlockAt(at.getBlockX() + dx, at.getBlockY() + dy, at.getBlockZ() + dz);
+            if (b.getType() != Material.PLAYER_HEAD && b.getType() != Material.PLAYER_WALL_HEAD) continue;
+            org.bukkit.block.BlockState st = b.getState();
+            if (!(st instanceof org.bukkit.block.Skull)) continue;
+            String tag = ((org.bukkit.block.Skull) st).getPersistentDataContainer()
+                    .get(key, org.bukkit.persistence.PersistentDataType.STRING);
+            if (id.equals(tag)) b.setType(Material.AIR);
+        }
+        for (Entity n : w.getNearbyEntities(at, STAR_REACH, STAR_REACH, STAR_REACH)) {
+            if (!(n instanceof org.bukkit.entity.Item)) continue;
+            ItemStack s = ((org.bukkit.entity.Item) n).getItemStack();
+            if (s.getType() != Material.PLAYER_HEAD || s.getItemMeta() == null) continue;
+            String tag = s.getItemMeta().getPersistentDataContainer()
+                    .get(key, org.bukkit.persistence.PersistentDataType.STRING);
+            if (id.equals(tag)) n.remove();
+        }
+
+        // Stand them beside the grave, not in it.
+        int sx = at.getBlockX() + 1, sz = at.getBlockZ();
+        int sy = w.getHighestBlockYAt(sx, sz, HeightMap.OCEAN_FLOOR) + 1;
+        JsonObject rev = new JsonObject();
+        rev.addProperty("id", id);
+        rev.addProperty("x", sx);
+        rev.addProperty("y", sy);
+        rev.addProperty("z", sz);
+        rev.addProperty("world", w.getName());
+        try { ctx.invoke("npc_revive", rev); } catch (Throwable t) { return false; }
+
+        // npc_revive clears `dead` in the body file and NOT `alive` in the ledger.
+        // Write both or the beat will bury them again on the next tick.
+        rec.addProperty("alive", true);
+        rec.addProperty("hp", 20);
+        rec.addProperty("hunger", 8);            // back, and starving for it
+        rec.addProperty("saturation", 0);
+        rec.remove("job");
+        rec.remove("grave");
+        rec.remove("diedAt");
+        rec.addProperty("activity", "back from the dead");
+        rec.addProperty("lastJobEnd", "raised by a nether star");
+        save(ctx, rec);
+
+        // the plot is empty now: watchGraves must stop trying to restock it
+        try {
+            JsonObject gq = new JsonObject();
+            gq.addProperty("collection", "places");
+            gq.addProperty("id", "grave-" + id);
+            JsonObject gp = ctx.invoke("ledger_get", gq);
+            if (gp != null && gp.has("id")) {
+                gp.addProperty("looted", true);
+                gp.addProperty("description", gets(rec, "name", id) + " was raised from this plot by a nether star.");
+                JsonObject put = new JsonObject();
+                put.addProperty("collection", "places");
+                put.add("record", gp);
+                ctx.invoke("ledger_put", put);
+            }
+        } catch (Throwable ignored) { }
+
+        JsonObject ev = new JsonObject();
+        ev.addProperty("npcId", id);
+        ev.addProperty("name", gets(rec, "name", id));
+        ev.addProperty("x", sx);
+        ev.addProperty("y", sy);
+        ev.addProperty("z", sz);
+        ctx.plugin().bridge().broadcastEvent("npc_raised", ev);
+        return true;
     }
 
     // ------------------------------------------------------------------ entry point
@@ -3012,7 +3699,7 @@ public class People implements GadgetContract {
             spawn.addProperty("name", name);
             spawn.addProperty("entityType", "MANNEQUIN");
             spawn.addProperty("defense", "fight");
-            String skin = args.has("skin") ? args.get("skin").getAsString() : pickSkin(roster(ctx));
+            String skin = args.has("skin") ? args.get("skin").getAsString() : pickSkin(ctx, roster(ctx));
             spawn.addProperty("skin", skin);
             spawn.addProperty("world", w.getName());
             spawn.addProperty("x", x + 0.5);
@@ -3083,6 +3770,7 @@ public class People implements GadgetContract {
             promises.add(promise);
             while (promises.size() > 8) promises.remove(0);
             rec.addProperty("assigned", jobKind);
+            rec.remove("assignTries");
             rec.addProperty("attendUntil", 0);
             rec.addProperty("activity", "off to " + jobKind + (args.has("for") ? " for " + args.get("for").getAsString() : ""));
             save(ctx, rec);
@@ -3094,23 +3782,75 @@ public class People implements GadgetContract {
         }
 
         /** Raise graves for everyone dead who has none. */
+        /**
+         * Raise a grave for everybody dead who has none, and MOVE the ones that were
+         * raised where they fell into the yard at spawn. (2026-08-25, James: "We want all
+         * graves to be done this way past and future.") The old marker is taken down
+         * behind them, so the same person is not commemorated in two places.
+         */
         if (action.equals("graves")) {
             JsonArray made = new JsonArray();
             for (JsonObject rec : roster(ctx)) {
                 if (rec.has("alive") && rec.get("alive").getAsBoolean()) continue;
-                if (rec.has("grave") && rec.get("grave").isJsonObject()) continue;
                 NpcData d = ctx.plugin().npcManager().get(gets(rec, "id", ""));
                 if (d == null) continue;
                 try {
+                    JsonObject had = rec.has("grave") && rec.get("grave").isJsonObject()
+                            ? rec.getAsJsonObject("grave") : null;
+                    if (had != null && inYard(ctx, had)) continue;   // already in the yard
+                    if (had != null) clearOldGrave(ctx, gets(rec, "id", ""), had);
+                    rec.remove("grave");
                     grave(ctx, rec, d);
                     save(ctx, rec);
-                    made.add(gets(rec, "name", "?") + " at " + (rec.has("grave") ? rec.getAsJsonObject("grave").toString() : "?"));
+                    made.add(gets(rec, "name", "?") + (had != null ? " moved to " : " buried at ")
+                            + (rec.has("grave") ? rec.getAsJsonObject("grave").toString() : "?"));
                 } catch (Throwable t) {
                     made.add(gets(rec, "name", "?") + ": " + String.valueOf(t.getMessage()));
                 }
             }
             JsonObject out = new JsonObject();
             out.add("graves", made);
+            return out;
+        }
+
+        /** Hand something over, as the outcome of a conversation or a struck bargain. */
+        if (action.equals("give")) {
+            String npcId = args.get("npcId").getAsString();
+            JsonObject q = new JsonObject();
+            q.addProperty("collection", "npcs");
+            q.addProperty("id", npcId);
+            JsonObject rec = ctx.invoke("ledger_get", q);
+            JsonObject out = giveToPlayer(ctx, rec,
+                    args.has("player") ? args.get("player").getAsString() : "",
+                    args.has("item") ? args.get("item").getAsString() : "",
+                    args.has("count") ? args.get("count").getAsInt() : 1);
+            save(ctx, rec);
+            return out;
+        }
+
+        /**
+         * Move what somebody thinks of a player. Called by the brain when it sees a thing
+         * happen that an NPC would have an opinion about - being hit, chiefly. Never by
+         * an actor: nobody talks their way into being liked.
+         */
+        if (action.equals("bond")) {
+            String npcId = args.get("npcId").getAsString();
+            JsonObject q = new JsonObject();
+            q.addProperty("collection", "npcs");
+            q.addProperty("id", npcId);
+            JsonObject rec = ctx.invoke("ledger_get", q);
+            String player = args.get("player").getAsString();
+            if (args.has("delta")) {
+                bondAdd(rec, player, args.get("delta").getAsInt(),
+                        args.has("why") ? args.get("why").getAsString() : "something happened");
+                save(ctx, rec);
+            }
+            int score = bondScore(rec, player);
+            JsonObject out = new JsonObject();
+            out.addProperty("npcId", npcId);
+            out.addProperty("player", player);
+            out.addProperty("score", score);
+            out.addProperty("feeling", bondWord(score));
             return out;
         }
 
@@ -3132,6 +3872,19 @@ public class People implements GadgetContract {
         final int myGen = generation(ctx, true);
         int killed = reap(ctx);
         if (TASK_ID != null) { ctx.cancelTask(TASK_ID.intValue()); TASK_ID = null; }
+        // `beats` is a static and a restart puts it back to zero, but the sheets still
+        // carry deadlines counted in beats - an attendUntil of 117946 written yesterday
+        // now sits thirty hours in the future, and every one of those people would stand
+        // "waiting" for good. Clear the beat-relative clocks on the way in. (Deadlines
+        // held in real milliseconds, like noBuildUntil, are unaffected and stay.)
+        beats = 0;
+        int cleared = 0;
+        for (JsonObject rec : roster(ctx)) {
+            boolean any = false;
+            String[] clocks = { "attendUntil", "attendSince", "attendPauseUntil", "lodgeFailUntil", "cool" };
+            for (String c : clocks) if (rec.has(c)) { rec.remove(c); any = true; }
+            if (any) { cleared++; try { save(ctx, rec); } catch (Throwable ignored) { } }
+        }
         populationCap = args.has("populationCap") ? args.get("populationCap").getAsInt() : 40;
         TASK_ID = Integer.valueOf(ctx.runTimer(BEAT_TICKS, new Runnable() {
             public void run() {
@@ -3145,6 +3898,7 @@ public class People implements GadgetContract {
         out.addProperty("started", true);
         out.addProperty("generation", myGen);
         out.addProperty("staleTimersCancelled", killed);
+        out.addProperty("beatClocksCleared", cleared);
         out.addProperty("beatTicks", BEAT_TICKS);
         return out;
     }

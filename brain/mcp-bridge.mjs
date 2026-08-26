@@ -228,6 +228,10 @@ tool("npc_do", "Commit this NPC to a job right now, as the outcome of a conversa
   id: z.string(), job: z.string(), want: z.string().optional().describe("for craft: the item, e.g. WOODEN_PICKAXE"),
   for: z.string().optional().describe("who asked"), promise: z.string().optional().describe("what you said you would do, in your words"),
 }, (args) => call("gadget:people", { action: "assign", npcId: args.id, job: args.job, want: args.want, for: args.for, promise: args.promise }));
+tool("npc_give", "Hand a player something out of your own bag, as a gift or your side of a trade you just agreed. It drops at their feet - nobody reaches into anybody's inventory. Only what your sheet says you carry, and only to somebody who does not distrust you.", {
+  id: z.string(), player: z.string(), item: z.string().describe("material name, e.g. COOKED_BEEF"),
+  count: z.number().optional().describe("how many (default 1)"),
+}, (args) => call("gadget:people", { action: "give", npcId: args.id, player: args.player, item: args.item, count: args.count }));
 pt("npc_walk_to", "Walk an NPC to a position (pauses its daily routine for holdSeconds).", {
   id: z.string(), ...pos,
   speed: z.number().optional(),

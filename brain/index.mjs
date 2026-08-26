@@ -41,7 +41,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { loadConfig, DIRECTOR_WAKE_EVENTS, BRAIN_ROOT } from "./lib/config.mjs";
+import { loadConfig, DIRECTOR_WAKE_EVENTS, NEEDS_LOG_EVENTS, BRAIN_ROOT } from "./lib/config.mjs";
 import { log, nextSceneNumber } from "./lib/logger.mjs";
 import { journalSkip } from "./lib/decisions-journal.mjs";
 import { loadLore, watchLore } from "./lib/lore.mjs";
@@ -58,6 +58,7 @@ import { runActorTurn } from "./lib/actor-turn.mjs";
 import { parseActorReport } from "./lib/actor-report.mjs";
 import { SelfUpdater } from "./lib/self-update.mjs";
 import { Developer } from "./lib/developer.mjs";
+import { NeedsLog } from "./lib/needs-log.mjs";
 import { resetIfNewEpoch } from "./lib/chronicle.mjs";
 
 export async function main(env = process.env) {
@@ -108,6 +109,15 @@ export async function main(env = process.env) {
   function submitOrder(text, orderTimestamp) {
     scheduler.push("operator_order", { text, orderTimestamp, at: new Date().toISOString() });
   }
+
+  // The needs log: what killed people and what they could not do. Like
+  // getWorldModel below, it closes over `bridge` rather than holding it - the
+  // brain's own connection is created further down, and nothing here is called
+  // until an event arrives long after this synchronous setup finishes.
+  const needsLog = new NeedsLog({
+    bridgeCall: (cmd, args, timeoutMs) => bridge.call(cmd, args, timeoutMs),
+    timeoutMs: config.npcContextTimeoutMs,
+  });
 
   // getWorldModel is a closure over `bridge` (assigned further below, once
   // the brain's own bridge connection is created) rather than a direct
@@ -692,8 +702,33 @@ export async function main(env = process.env) {
         return;
       }
 
+      // Evidence about what the world cannot do yet: written down, never woken on.
+      // A death is the loudest kind, and gets its cause worked out on the spot while
+      // the attack that caused it is still fresh in memory.
+      if (NEEDS_LOG_EVENTS.has(event)) {
+        if (event === "npc_attacked") {
+          needsLog.noteAttack(data);
+          // Being hit by a player is the single loudest thing that can happen to an
+          // opinion. The gadget owns the number; the brain only reports what it saw.
+          // GameListeners stamps `player` with the name only when a Player did it,
+          // and `attackerType` says which. A mob mauling somebody is nobody's fault.
+          const by = data && data.attackerType === "player" ? data.player : null;
+          if (by && data.npcId) {
+            bridge.call("gadget:people", { action: "bond", npcId: data.npcId, player: by, delta: -25, why: "hit me" })
+              .catch((e) => log.error("bond_update_failed", { error: String(e && e.message || e) }));
+          }
+        }
+        else if (event === "npc_death") needsLog.recordDeath(data);
+        else {
+          needsLog.append({ kind: "blocked", event, detail: data })
+            .catch((e) => log.error("needs_log_append_failed", { error: String(e && e.message || e) }));
+        }
+        return;
+      }
+
       // Everything else feeds the director's debounced scene queue, if it's
-      // a sense event the director cares about at all.
+      // a sense event the director cares about at all. That set is now player
+      // moments only - see DIRECTOR_WAKE_EVENTS.
       if (DIRECTOR_WAKE_EVENTS.has(event)) scheduler.push(event, data);
     },
     // Re-install system gadgets on EVERY successful auth, not just at boot.
@@ -715,6 +750,7 @@ export async function main(env = process.env) {
   bridge.start();
 
   const stop = () => {
+    clearInterval(needsSweep);
     if (developer) developer.stop();
     bridge.stop();
     loreWatch.stop();
@@ -729,13 +765,24 @@ export async function main(env = process.env) {
   // shutdown would, then exits 75 - run-forever.cmd (brain/run-forever.cmd)
   // interprets exit 75 as "restart me immediately", any other nonzero exit
   // as a crash (restart after a short delay), and 0 as a deliberate stop.
-  // The developer: hourly, adds the next feature from brain/roadmap.json and pushes.
+  // Hourly, write down what the living are stuck on. This is the other half of
+  // the needs log - deaths write themselves the moment they happen, but a world
+  // where nobody dies can still be a world where nine people in forty end every
+  // crafting job with "nothing worth making".
+  const needsSweep = setInterval(() => {
+    needsLog.sweep().catch((e) => log.error("needs_sweep_failed", { error: String((e && e.stack) || e) }));
+  }, Math.max(1, config.needsSweepMin) * 60_000);
+  if (typeof needsSweep.unref === "function") needsSweep.unref();
+
+  // The developer: hourly, builds the loudest thing the needs log is asking for,
+  // falling back to brain/roadmap.json when the world has nothing to complain about.
   developer = new Developer({
     config,
     usage,
     repoRoot: path.resolve(BRAIN_ROOT, ".."),
     bridgeCall: (cmd, args, timeoutMs) => bridge.call(cmd, args, timeoutMs),
     waitForIdle: () => waitUntilIdle(),
+    needsLog,
   }).start();
 
   const selfUpdater = new SelfUpdater({

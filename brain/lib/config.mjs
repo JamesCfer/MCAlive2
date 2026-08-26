@@ -58,7 +58,7 @@ export const ALL_TOOLS = [
   "create_explosion", "strike_lightning", "move_region",
   // NPCs
   "npc_spawn", "npc_update", "npc_remove", "npc_say", "npc_walk_to", "npc_look_at",
-  "npc_equip", "npc_pose", "npc_revive", "npc_head_check", "npc_do",
+  "npc_equip", "npc_pose", "npc_revive", "npc_head_check", "npc_do", "npc_give",
   // Players
   "give_item", "apply_effect", "list_players",
   // Ledger
@@ -89,31 +89,54 @@ export const ALL_TOOLS = [
 // NPC actors may ONLY call these three tools (DESIGN.md "NPC actors").
 // Everything else - including npc_context itself, which would let an actor
 // metagame past the plugin-enforced knowledge isolation - is denied.
-export const ACTOR_TOOLS = ["npc_say", "npc_look_at", "npc_pose", "npc_do"];
+export const ACTOR_TOOLS = ["npc_say", "npc_look_at", "npc_pose", "npc_do", "npc_give"];
 
 // Sense events that feed the director's debounced scene loop. player_quit
 // only updates local presence tracking and never wakes anything (matching
 // gm/'s lesson: nothing useful for a director to react to in a quiet exit).
+/**
+ * What is worth waking the director for: PLAYER MOMENTS, and nothing else.
+ *
+ * This set used to include the ambient life of the world - somebody walked into a
+ * region, somebody explored, the world-turn heartbeat - and the director dutifully
+ * spent a turn on each. Reading the journal back, most of them concluded nothing:
+ * "Silence. A plain, unremarkable terrain sample with no notable features." Four of
+ * those in five minutes from one player walking around, until a five million token
+ * day was gone by ten at night and no NPC could speak.
+ *
+ * The ambient events now feed lib/needs-log.mjs instead, and the tokens they used to
+ * cost are spent once an hour building something the world actually lacks.
+ */
 export const DIRECTOR_WAKE_EVENTS = new Set([
   "player_join",
   "player_death",
-  "npc_attacked",
-  "npc_death",
-  "npc_head_taken",
-  "player_explored",
   "player_idle_scene",
-  "region_enter",
-  "region_exit",
+  "npc_head_taken", // a player picked up a dead NPC's head: the revival token
   "player_chat", // only when NOT routed to an actor (see index.mjs routing)
   "operator_order", // Lore Console "order the world" - see console-server.mjs/index.mjs submitOrder
   "sequence_done", // plugin-side timed spectacle sequence (e.g. strike_lightning or formula_run) finished
   "formula_error", // a formula_run step failed plugin-side
-  "npc_job_done", // an NPC's assigned job finished all its repeats
-  "npc_job_blocked", // an NPC's assigned job stalled (e.g. missing inputs)
-  "behavior_done", // a behavior program's crew finished every step
-  "behavior_blocked", // a behavior program stalled (no_resources/missing_inputs/cant_reach/crew_dead) and paused itself
-  "world_turn", // sparse narrative heartbeat (world-turn-minutes, only with players online): groom arcs, chronicle upkeep
 ]);
+
+/**
+ * Events that are evidence about what the world cannot do yet. These do not wake
+ * anything: they are written down, and read once an hour by the developer.
+ *
+ * npc_attacked is here for attribution rather than as a need of its own - a death
+ * inside a minute of one names its killer instead of guessing (see NeedsLog.causeOf).
+ */
+export const NEEDS_LOG_EVENTS = new Set([
+  "npc_death",
+  "npc_attacked",
+  "npc_job_blocked", // an NPC's assigned job stalled (e.g. missing inputs)
+  "behavior_blocked", // a behavior program stalled and paused itself
+]);
+
+/**
+ * Deliberately handled nowhere: player_explored, region_enter, region_exit,
+ * world_turn, npc_job_done, behavior_done. Ambient or purely-informational, and
+ * every one of them used to cost a director turn.
+ */
 
 export function loadConfig(env = process.env) {
   const mcalive2Token = env.MCALIVE2_TOKEN || "change-me";
@@ -124,6 +147,8 @@ export function loadConfig(env = process.env) {
     debounceMs: num("BRAIN_DEBOUNCE_MS", 2500),
     loreRefreshMs: num("BRAIN_LORE_REFRESH_MS", 600000),
     dailyTokenBudget: num("BRAIN_DAILY_TOKEN_BUDGET", 500000),
+    // How often to write down what the living are stuck on (lib/needs-log.mjs).
+    needsSweepMin: num("BRAIN_NEEDS_SWEEP_MIN", 60),
     maxTurnsPerMin: num("BRAIN_MAX_TURNS_PER_MIN", 10),
 
     directorModel: env.BRAIN_DIRECTOR_MODEL || "claude-sonnet-5",

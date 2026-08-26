@@ -61,8 +61,9 @@ export class Developer {
    * @param {(cmd:string, args:object, timeoutMs?:number)=>Promise<any>} p.bridgeCall
    * @param {() => Promise<void>} [p.waitForIdle]
    */
-  constructor({ config, usage, repoRoot, bridgeCall, waitForIdle, queryFn }) {
+  constructor({ config, usage, repoRoot, bridgeCall, waitForIdle, queryFn, needsLog }) {
     this.config = config;
+    this.needsLog = needsLog || null;
     this.usage = usage;
     this.repoRoot = repoRoot;
     this.bridgeCall = bridgeCall;
@@ -102,7 +103,23 @@ export class Developer {
     await fs.writeFile(this.roadmapPath, JSON.stringify(r, null, 2) + "\n");
   }
 
-  pickNext(roadmap) {
+  /**
+   * What to build this hour.
+   *
+   * The needs log comes first: a thing the world is actually failing at right now
+   * beats the next item on a roadmap written before any of it was running. Deaths
+   * outrank grumbles inside the log itself (see NeedsLog.topFeature). The roadmap
+   * is the fallback for an hour when the world has nothing to complain about.
+   */
+  async pickNext(roadmap) {
+    if (this.needsLog) {
+      try {
+        const asked = await this.needsLog.topFeature();
+        if (asked) return asked;
+      } catch (e) {
+        log.error("needs_log_pick_failed", { error: String((e && e.message) || e) });
+      }
+    }
     return roadmap.features.find((f) => f.status === "pending") || null;
   }
 
@@ -177,10 +194,17 @@ export class Developer {
       return;
     }
     const roadmap = await this.readRoadmap();
-    const feature = this.pickNext(roadmap);
+    const feature = await this.pickNext(roadmap);
     if (!feature) {
-      log.info("developer_skipped", { reason: "roadmap complete" });
+      log.info("developer_skipped", { reason: "nothing asked for and roadmap complete" });
       return;
+    }
+    // A needs-log feature is not in roadmap.json, so the agent has nowhere to mark it
+    // done. Put it there first: it becomes a normal roadmap entry that happens to have
+    // been written by the world instead of by hand, and the rest of the run is unchanged.
+    if (feature.source === "needs-log") {
+      roadmap.features.unshift(feature);
+      await this.writeRoadmap(roadmap);
     }
     this.running = true;
     this.runs += 1;
@@ -255,8 +279,16 @@ export class Developer {
       } catch (e) {
         log.warn("developer_push_failed", { error: String(e && e.message || e) });
       }
+      // Whatever the world asked for has now been answered, well or badly. Close the
+      // entries it came from either way - a need that could not be built must not be
+      // picked again next hour and every hour after it, which is how a loop that fixes
+      // nothing burns a day. It will reappear on the next sweep if it is still true.
+      if (feature.source === "needs-log" && this.needsLog) {
+        try { await this.needsLog.close(feature.sourceEntries); }
+        catch (e) { log.warn("needs_log_close_failed", { error: String((e && e.message) || e) }); }
+      }
       const elapsedSec = Math.round((Date.now() - started) / 1000);
-      this.lastResult = { feature: feature.id, outcome, tokens, elapsedSec, pushed, toolCalls: toolCalls.length };
+      this.lastResult = { feature: feature.id, outcome, tokens, elapsedSec, pushed, toolCalls: toolCalls.length, source: feature.source || "roadmap" };
       log.info("developer_run_complete", this.lastResult);
       await this.journal(`${feature.id}: ${outcome} in ${elapsedSec}s, ${tokens} tokens, ${toolCalls.length} tool calls, pushed=${pushed}\n${(resultText || "").slice(0, 2000)}`);
     } catch (e) {

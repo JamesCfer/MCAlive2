@@ -42,8 +42,10 @@ These came from James directly and override convenience. Breaking one is a bug, 
   `scripts/people.mjs --start` installs every one. The brain re-installs
   `position-tracker` and `world-scan` itself on boot.
 
-Bridge: `ws://192.168.40.4:8765`, token `mca2-Xq7vN4kRw9pTz2Lm8Jd3`.
-Console: `http://192.168.40.4:7777/map?token=<same token>`.
+Bridge: `ws://192.168.40.27:8765`, token `mca2-Xq7vN4kRw9pTz2Lm8Jd3`. The box is on DHCP and the
+address moves - it was 192.168.40.4 until 2026-08-25. Every script takes `MCALIVE2_URL`, so
+export that rather than editing sources when it shifts again.
+Console: `http://192.168.40.27:7777/map?token=<same token>`.
 The legacy `minecraftalive` MCP server speaks an **old protocol** and will fail against this
 server. Drive the bridge with a small Node WebSocket client instead (`auth`, then `{id,cmd,args}`).
 
@@ -101,6 +103,47 @@ lines, lineage and migration are gone. `gadget:people` is the NPC.
   (`Block.getDrops(tool)`), the tool held in hand. Gravity applies when they stand still; the
   walker swims through water rather than over it. Death is permanent; the head drops and never
   despawns; anyone who walks over it carries it with its identity.
+- **The graveyard at spawn** (2026-08-25, James: "when a npc dies their head should go to a
+  grave at spawn, where they are allocated a grave site. This area should grow over time with
+  each death.") Graves used to go up where the body fell, in wilderness nobody would walk past
+  again. Every death is now allocated the next plot in one cemetery twelve blocks off world
+  spawn: seven plots to a row, two apart, rows three apart, and the fence is redrawn a row
+  deeper on each burial so the ground it covers visibly grows. The plot is levelled to the
+  yard's own floor whatever the hillside is doing, so the rows still line up twenty burials
+  later. Cobblestone, their own skull on top, an oak sign reading name, cause and village.
+  The head item dropped where they fell is taken up into it - it is the same skull with the
+  same id, still the one vessel of their return, now somewhere findable. The yard is the
+  `places` record `graveyard` (origin + plots allocated), which is what makes the layout
+  survive a redefine; each grave keeps its own `grave-<id>` record with a `fellAt`.
+  `watchGraves` is unchanged: break the skull and the identified head drops, wherever it is.
+  Past graves move too (James: "We want all graves to be done this way past and future"):
+  `gadget:people {action:"graves"}` now re-sites any grave that is not already inside the
+  yard and takes the old marker down behind it, so nobody is commemorated in two places and
+  no second skull is left lying about as a duplicate vessel of a return that can only
+  happen once. Run it once after installing.
+- **Bonds** (2026-08-25, James: "We need a friendship hate meter per player that gets
+  updated over time.") One number per player on their own sheet under `bonds`, -100..100,
+  with the last few reasons it moved. It is moved by things that HAPPENED and never by the
+  actor: hit by a player -25 (the brain reports it, `gadget:people action:"bond"` records
+  it), given something +2 to +10 by the size of the gift (the pickup reads the item's
+  thrower, so it knows who), handing something over +2. Every ten minutes each opinion
+  drifts one point back towards zero, because a grudge that never softens locks a player
+  out of forty people for the life of the world. Below -30 nobody hands you anything
+  whatever the conversation decided. The number reaches the actor prompt through
+  `npc_context` (which passes the whole sheet), so an NPC who dislikes you talks like it.
+- **Giving** (`npc_give`, an ACTOR tool): hands a player something out of the NPC's own bag
+  as a gift or their half of a struck trade. It DROPS at the player's feet, thrown gently
+  towards them - nobody reaches into anybody's inventory, because they are players. Only
+  what the sheet really carries, only within 8 blocks, only if the bond allows it.
+- **Coming back** (2026-08-25, James: "throwing a nether star at a head should bring it
+  back.") `reviveWatch` runs every ten beats and looks for a NETHER_STAR item lying within
+  3 blocks of a skull carrying an npc id - the grave block in the yard, or a loose head
+  somebody was carrying. Throwing an item is dropping it, so this is a player spending the
+  best thing they own to undo a death. The star and the skull are both consumed, the plot
+  is marked `looted` so `watchGraves` stops restocking it, and they stand up beside the
+  grave with nothing and hunger 8. `npc_revive` clears `dead` in the body file and NOT
+  `alive` in the ledger, so `raise()` writes both - miss that and the next beat buries them
+  again.
 - **Abilities**: str dex con wis int cha, -3..+3, fixed. **Skills**: farming hunting mining
   building fishing swimming exploring treechopping crafting trading; start 0; minutes at the
   skill accumulate; point n at 2^n-1 minutes. Each leans on one ability (`SKILL_STAT`). Skill +
@@ -145,10 +188,48 @@ lines, lineage and migration are gone. `gadget:people` is the NPC.
 
 ---
 
+## What the world is short of
+
+(2026-08-25, James: "The scene processing doesn't really do anything.") The director used
+to be woken by the ambient life of the world - somebody explored, somebody crossed a region
+line, the world-turn heartbeat - and spent a real turn on each. Read the journal back and
+most of them decided nothing: *"Silence. A plain, unremarkable terrain sample with no
+notable features."* Four of those in five minutes from one player walking around, and a five
+million token day was gone by ten at night with no NPC able to speak.
+
+So sense events no longer wake anything. They are written down, and built from.
+
+- **`DIRECTOR_WAKE_EVENTS`** is now player moments only: `player_join`, `player_death`,
+  `player_idle_scene`, `npc_head_taken`, unrouted `player_chat`, `operator_order`,
+  `sequence_done`, `formula_error`.
+- **`NEEDS_LOG_EVENTS`** (`npc_death`, `npc_attacked`, `npc_job_blocked`,
+  `behavior_blocked`) feed `lib/needs-log.mjs`, which appends to the ledger record
+  `facts/needs-log`. A death gets its cause worked out on the spot: an `npc_attacked` inside
+  the last minute names the killer outright, otherwise the sheet the beat wrote a second
+  earlier does (hunger 0 is starvation, and so on). The plugin's `npc_death` carries a
+  killer only when a *player* did it, and the plugin surface is frozen, so everything else
+  has to be established from what already reaches the brain.
+- **`player_explored`, `region_enter`, `region_exit`, `world_turn`, `npc_job_done`,
+  `behavior_done`** are handled nowhere. Every one of them used to cost a director turn.
+- **Hourly** (`BRAIN_NEEDS_SWEEP_MIN`, default 60) the sweep counts `lastJobEnd` across
+  everybody alive. Those strings are the job methods' own words for how the last attempt
+  went, so the failures are an honest inventory of what this world cannot do yet - measured
+  live on 2026-08-25: "nothing worth making" x9, "no game" x5, "could not reach a tree" x4.
+  Counts accumulate across sweeps, so a thing that keeps happening beats a thing that
+  happened loudly once.
+
+`NeedsLog.topFeature()` shapes the loudest open entry like a roadmap feature. Deaths outrank
+grumbles. The developer builds it.
+
 ## The developer
 
 Once an hour (`BRAIN_DEV_INTERVAL_MIN`, default 60) the brain runs `lib/developer.mjs`: it
-takes the first `pending` entry in `brain/roadmap.json` (100 features, in dependency order),
+takes **whatever the needs log is asking for**, falling back to the first `pending` entry in
+`brain/roadmap.json` (100 features, in dependency order) when the world has nothing to
+complain about. A needs-log feature is unshifted into the roadmap first so the agent has
+somewhere to mark it done, and its source entries are closed when the run ends either way -
+a need that could not be built must not be picked again every hour forever; it reappears on
+the next sweep if it is still true. It
 hands a coding agent this file, the roadmap, the live status and the feature, and lets it work
 in the laptop checkout with file tools plus the live bridge. The agent compiles its gadget on
 the running server, verifies, marks the entry `done` (or `failed`, honestly) with notes,
@@ -185,6 +266,13 @@ live on the server (the gadget was defined) but GitHub lags until someone pushes
 ## Gotchas paid for in blood
 
 **Gadget authoring**
+- `scripts/compile-gadgets.sh [id...]` compiles gadget sources on the laptop against
+  `plugin/target/MCAlive2.jar` and the Paper API, in about four seconds. It is not a
+  replacement for the server check below - it cannot tell you `ctx` is in scope at runtime -
+  but on 2026-08-25 the server's `gadget_define` stopped answering altogether (every call
+  hung, from the 170k-char `people` down to a ten-line test gadget, while every other bridge
+  command replied instantly) and four finished changes had no way to be checked at all.
+  A local javac catches every compile error the server's would have.
 - A redefine loads a **new class** — statics reset, and any running `ctx.runTimer` becomes an
   orphan nothing can stop. Keep a generation counter in the world's `PersistentDataContainer`
   and reap orphans by reflecting the Runnable out of `getPendingTasks()`.

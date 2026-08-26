@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DIR = path.join(HERE, "..", "brain", "blueprints");
-const URL_ = process.env.MCALIVE2_URL || "ws://192.168.40.4:8765";
+const URL_ = process.env.MCALIVE2_URL || "ws://192.168.40.27:8765";
 const TOKEN = process.env.MCALIVE2_TOKEN || "mca2-Xq7vN4kRw9pTz2Lm8Jd3";
 
 // ---------------------------------------------------------------- tiering
